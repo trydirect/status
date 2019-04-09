@@ -1,2 +1,2 @@
 # status
-Simple docker management panel
+Simple docker container management
