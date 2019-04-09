@@ -1,0 +1,33 @@
+<html>
+<head>
+    <title>Status Panel</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/css/materialize.min.css">
+</head>
+<body>
+
+    <div class="container">
+        <div style="padding:10px 0; font-size:18px;">
+            <a href="https://try.direct" style="color:rgba(0,0,0,0.7); text-decoration:none" target="_blank">Status Panel</a>
+        </div>
+        <form class="" method="post" style="margin: 100px auto 0; max-width: 300px;">
+            <div class="row">
+                <div class="input-field ">
+                    <input placeholder="Username" id="username" type="text" name="username">
+                    <label for="username">Username</label>
+                </div>
+            </div>
+            <div class="row">
+                <div class="input-field ">
+                    <input placeholder="Password" id="password" type="password" name="password">
+                    <label for="password">Password</label>
+                </div>
+            </div>
+            {% if error %}
+            <div style="background:rgba(255,0,0,0.3); padding:10px; margin:10px 0">Login failed</div>
+            {% endif %}
+            <button class="btn waves-effect waves-light" type="submit" name="action">Login</button>
+        </form>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/js/materialize.min.js"></script>
+</body>
+</html>

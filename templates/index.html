@@ -1,0 +1,105 @@
+﻿<html>
+<head>
+    <title>Status Panel</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/css/materialize.min.css">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+</head>
+<body>
+    
+    <div class="container">
+        <a href="/logout" style="float:right; display:inline-block; margin:15px 0 0">
+            <i class="material-icons" style="vertical-align:middle; font-size:16px;">logout</i> Logout
+        </a>
+        <div style="padding:10px 0; font-size:18px;">
+            <a href="http://try.direct" style="color:rgba(0,0,0,0.7); text-decoration:none" target="_blank">Status Panel</a>
+        </div>
+
+        {% if ssl_enabled %}
+            <h3>SSL is already enabled</h3>
+            <a href="https://{{domain}}" target="_blank">https://{{domain}}</a> <br />
+            <a href="/disable_ssl" class="btn waves-effect waves-light" >
+                <i class="large material-icons" style="vertical-align:middle">lock</i> DISABLE SSL
+            </a>
+        {% else %}
+            <h3>Available actions</h3>
+            
+            {% if can_enable %}
+            <a href="/enable_ssl" class="btn waves-effect waves-light" >
+                <i class="large material-icons" style="vertical-align:middle">lock</i> Enable SSL
+            </a>
+            {% else %}
+            <button disabled class="btn waves-effect waves-light" >
+                <i class="large material-icons" style="vertical-align:middle">lock</i> Enable SSL
+            </button> <br />
+            You <b>can't enable</b> SSL because the DNS are not propagated yet to this IP
+            
+
+            <div class="card horizontal">
+                <div class="card-content">
+                    {% if ip %}
+                    <p>Server Ip : {{ip}}</p>
+                    {% endif %}
+                    {% if domainIp %}
+                    <p>Domain Ip : {{domainIp}}</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+        {% endif %}
+        
+        <h3 style='margin-top:30px'>Running containers</h3>
+        {% if container_list %}
+            <table width="100%">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Status</th>
+                        <th width="70px" style="text-align: right">Logs</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for container in container_list %}
+                    <tr>
+                        <td>{{container['name']}}</td>
+                        <td width="250px">
+                            {% if container['status'] == 'running' %}
+                            <span style="display:inline-block; padding:6px 12px; border-radius:3px">
+                                <i class="tiny material-icons" style="color: #4caf50">fiber_manual_record</i> <span>{{container['status']}}</span>
+                            </span>
+                            {% else %}
+                            <span style="background: #f44336; color:#000; display:inline-block; padding:6px 12px; border-radius:3px">{{container['status']}}</span>
+                            {% endif %}
+                            <a class="waves-effect waves-light btn modal-trigger" href="/restart/{{container['name']}}">
+                                <i class="material-icons" style="vertical-align:middle; font-size:16px;">autorenew</i>
+                                Restart
+                            </a>
+                        </td>
+                        <td width="170px" style="text-align: right">
+                            <a class="waves-effect waves-light btn modal-trigger" href="#modal_{{container['name']}}">
+                                <i class="material-icons" style="vertical-align:middle; font-size:16px;">history</i>
+                                View logs
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% for container in container_list %}
+            <div id="modal_{{container['name']}}" class="modal">
+                <div class="modal-content">
+                  <h4>{{container['name']}}</h4>
+                  <p style="white-space: pre;">{{container['logs']}}</p>
+                </div>
+              </div>
+            {% endfor %}
+        {% endif %}
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/js/materialize.min.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        var elems = document.querySelectorAll('.modal');
+        var instances = M.Modal.init(elems);
+    });
+    </script>
+</body>
+</html>

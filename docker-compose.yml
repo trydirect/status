@@ -1,0 +1,17 @@
+version: '2.2'
+
+services:
+  web:
+    image: trydirect:status
+    build:
+     context: .
+    container_name: status
+    ports:
+     - "5000:5000"
+    volumes:
+     - .:/app
+     - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+    environment:
+      - NGINX_CONTAINER=nginx
