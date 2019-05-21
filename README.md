@@ -1,16 +1,15 @@
-# Docker Status Panel
-
-## About
-Docker Status Panel - is a simple docker container management panel written in Python / Flask microframework.
-
-
-
 [![Build Status](https://travis-ci.com/trydirect/status.svg?branch=master)](https://travis-ci.com/trydirect/status)
 ![Docker Stars](https://img.shields.io/docker/stars/trydirect/status.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/trydirect/status.svg)
 ![Docker Automated](https://img.shields.io/docker/cloud/automated/trydirect/status.svg)
 ![Docker Build](https://img.shields.io/docker/cloud/build/trydirect/status.svg)
 [![Gitter chat](https://badges.gitter.im/trydirect/community.png)](https://gitter.im/try-direct/community)
+
+# Docker Status Panel
+
+## About
+Docker Status Panel - is a simple docker container management panel written in Python / Flask microframework.
+
 
 <img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://user-images.githubusercontent.com/42473/58089800-5ae5cd80-7bce-11e9-81ab-b11e9a5ec125.png">
 
