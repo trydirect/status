@@ -1,0 +1,48 @@
+language: python
+python:
+  - 2.7
+
+env:
+  - DOCKER_CONTENT_TRUST=0
+
+services:
+  - docker
+
+before_install:
+  # update is required to update the repositories to see the new packages for
+  # Docker.
+  - sudo apt-get update
+  - docker-compose --version
+  - pip install docker-compose --upgrade
+  - docker-compose --version
+
+
+install:
+  - docker-compose -f docker-compose-build.yml up -d --build
+  - docker-compose -f docker-compose-build.yml ps
+
+
+before_script:
+  - pip install requests
+  - pip install docker
+
+script:
+  - bash ./.travis/linters.sh
+  - python app.py
+  - python tests.py
+
+
+notifications:
+  slack:
+    rooms:
+      - optimum-team:GycletOWK4Kt95GktwYwfUMp#build
+
+
+after_success:
+  - docker login -e $DOCKER_EMAIL -u $DOCKER_USER -p $DOCKER_PASS
+  - export REPO=trydirect/status
+  - export TAG=`if [ "$TRAVIS_BRANCH" == "master" ]; then echo "latest"; else echo $TRAVIS_BRANCH ; fi`
+  - docker build -f Dockerfile -t $REPO:$COMMIT .
+  - docker tag $REPO:$COMMIT $REPO:$TAG
+  - docker tag $REPO:$COMMIT $REPO:travis-$TRAVIS_BUILD_NUMBER
+  - docker push $REPO
