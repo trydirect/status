@@ -2,10 +2,10 @@ version: '2.2'
 
 services:
   web:
-    image: optimum/try.direct:agent
+    image: trydirect/status
     build:
      context: .
-    container_name: try.direct.agent
+    container_name: status
     ports:
      - "5000:5000"
     volumes:

@@ -18,5 +18,5 @@ web = client.containers.get('web')
 assert web.status == 'running'
 response = requests.get("http://localhost:5000")
 assert response.status_code == 200
-assert "" in response.text
+# assert "" in response.text
 print(response.text)

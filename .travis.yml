@@ -25,10 +25,13 @@ install:
 before_script:
   - pip install requests
   - pip install docker
+  - pip install nosetests
+  - pip install puylint
 
 script:
   - bash ./.travis/linters.sh
   - python app.py
+  - pylint --errors-only
   - python tests.py
 
 
