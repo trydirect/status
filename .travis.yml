@@ -25,7 +25,7 @@ install:
 before_script:
   - pip install requests
   - pip install docker
-  - pip install puylint
+  - pip install pylint
 
 script:
   - bash ./.travis/linters.sh
