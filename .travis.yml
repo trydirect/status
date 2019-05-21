@@ -25,7 +25,6 @@ install:
 before_script:
   - pip install requests
   - pip install docker
-  - pip install nosetests
   - pip install puylint
 
 script:
