@@ -29,7 +29,6 @@ before_script:
 
 script:
   - bash ./.travis/linters.sh
-  - python app.py
   - pylint --errors-only
   - python tests.py
 
