@@ -1,49 +1,36 @@
 language: python
 python:
-  - 2.7
-
+- 2.7
 env:
+  matrix:
   - DOCKER_CONTENT_TRUST=0
-
+  global:
+  - secure: Ek3kkjSa3W+5Y5TH/R91/RiN+HAIXBgJrFIOpiGz2n9r2V8AqFJcw3UJR08ZxtahV7ToKumABM71HlREDnwwdHufhdeiBP7vw9/ybd+BILo/+x2WwBHosesFxUdjsmiFpVLQ2Oydp6hTJmKCLfbshGp0hxhDQez3p5U8ScvqV6Kh6hxglL6rujRCJGmXoxxhnWhfdWY6f6zqSj/kXLLz5HHBzbIP0dmo5YluyWi6xSlWC0tfFq7vGnWu5BZmmUlGX9Wrliltk4CZvOjPHF7HyKSv5UHjS7GXIcH5aWwtrsjxcSvpqaGREaeotu37xQkOsvTjO/sW5LHAm4SBkvk+f3+VMZYJL/+/+EgR/saGHJ0GNd4uJ5PTgSuYRt21d2Xy7e8ZYAIsU0nPIeAYFp90MsqplboUvb0KxBKMAbQKCKpTJW+Nfb5wNfgQ/MTEQefnDYSCMSSP2Yk7lSUEUXmj1dW6H4bK4YyGWZYos3/xiDYe7DSsJ3iRbgOCTC3b/1p9DEHEZml2h/2HluyxDIpgVx63aFt3iz3ZroC74O2PBzzDubTedrpicCVQ8Jgt+G66sgLIayn1WEZDRSkrrTzEUVzOtNxAXMFjbcEC+M2Tq1+j5vVwFs2tXFvOHXtkD84w35PVuy+WLuu5hqcX2Rywm3bOmm5NgdNjLm/G/ygNw4U=
+  - secure: cVQHS9m+fl2OQZqQUnmxNLOWHe1IW8yY+QwOmnObw516rX1C2M65JVgQpJx3eVVhauAtDVy68GOU4ef8fRXxB/FdzGNKGI9LVA5w1ykn0uztGXL5GcZ/qcOOVKih4QvSfl3Rfh7FaJ8FiZwazsapgpKZbjF02QHPfmpqt2gr7LyRxXoMZkJdopAy3Y0rW2qQ5ts0frWb4zSWNrNJgT5rQ7ujitZ8J4AmqTgEh5kgxl1iutDMs86iiFv8HyxyC27H/6n5i+/BgGlfsAzBAGsujaIRwVxHrCA2n8f/uYzW4VjKFcd58pE3/4FLWjqj+lLwVECCL/zeFrZMlOqaMAsNKchttHBq4TDI79Su1atieOmXpBjByum3kIHQbvLY8qQloMH06UZt63RupBnDZe97p32DIc6ZHQ78pPmj1KcjGfSbN3wUWgvvMWxTeYlQ0VGl6w7liDPZ/kHWeaA3EOjFM/rpxTNENKQVROj0Tftu/jTEPie+jyVNQhojGDP5ST9Ufq8HH0+H6x12MtKIgSETzlF2A1k2dI/bKRvNYLsqQQ0/FzasT6yXWgirg9QXtrK7X6L0tRcshYj7vwov/+Rxms7pifaljh1tb4sA9Gg/S59zNBNk80NzF+oriePMI8Cw/hBsAvhHOkym3M34DVWq/vlcUK4eN5U1VmnutZWKs6Q=
 services:
-  - docker
-
+- docker
 before_install:
-  # update is required to update the repositories to see the new packages for
-  # Docker.
-  - sudo apt-get update
-  - docker-compose --version
-  - pip install docker-compose --upgrade
-  - docker-compose --version
-
-
+- sudo apt-get update
+- docker-compose --version
+- pip install docker-compose --upgrade
+- docker-compose --version
 install:
-  - docker-compose -f docker-compose-build.yml up -d --build
-  - docker-compose -f docker-compose-build.yml ps
-
-
+- docker-compose -f docker-compose-build.yml up -d --build
+- docker-compose -f docker-compose-build.yml logs
+- docker-compose -f docker-compose-build.yml ps
 before_script:
-  - pip install requests
-  - pip install docker
-  - pip install pylint
-
+- pip install requests
+- pip install docker
+- pip install pylint
 script:
-  - bash ./.travis/linters.sh
-  - pylint --errors-only
-  - python tests.py
-
-
+- bash ./.travis/linters.sh
+- python tests.py
+#- pylint
 notifications:
   slack:
     rooms:
-      - optimum-team:GycletOWK4Kt95GktwYwfUMp#build
-
-
+    - optimum-team:GycletOWK4Kt95GktwYwfUMp#build
 after_success:
-  - docker login -e $DOCKER_EMAIL -u $DOCKER_USER -p $DOCKER_PASS
-  - export REPO=trydirect/status
-  - export TAG=`if [ "$TRAVIS_BRANCH" == "master" ]; then echo "latest"; else echo $TRAVIS_BRANCH ; fi`
-  - docker build -f Dockerfile -t $REPO:$COMMIT .
-  - docker tag $REPO:$COMMIT $REPO:$TAG
-  - docker tag $REPO:$COMMIT $REPO:travis-$TRAVIS_BUILD_NUMBER
-  - docker push $REPO
+- echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+- docker-compose -f docker-compose-build.yml images
+- docker push trydirect/status:latest
