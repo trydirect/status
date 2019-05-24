@@ -14,5 +14,5 @@ COPY app.py /app
 COPY config.json /app
 RUN pip3 install -r requirements.txt
 
-ENTRYPOINT ["python"]
+ENTRYPOINT ["python3"]
 CMD ["app.py"]
