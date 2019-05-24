@@ -8,8 +8,8 @@ import requests
 client = docker.from_env()
 time.sleep(10)  # we expect all containers are up and running in 20 secs
 
-web = client.containers.get('web')
-# print(web.logs())
+web = client.containers.get('status')
+print(web.logs())
 # assert 'spawned uWSGI master process' in web.logs()
 # assert 'spawned uWSGI worker 1' in web.logs()
 # assert 'spawned uWSGI worker 2' in web.logs()
