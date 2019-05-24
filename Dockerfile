@@ -1,7 +1,7 @@
 FROM python:3.7-slim
 
 LABEL maintainer="info@optimum-web.com"
-RUN apt-get update &&  apt-get install --no-install-recommends -y -qq python-pip python-dev \
+RUN apt-get update &&  apt-get install --no-install-recommends -y -qq python3-pip python-dev \
     build-essential && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 RUN groupadd -r -g 2000 status
@@ -12,7 +12,7 @@ COPY templates /app
 COPY requirements.txt /app
 COPY app.py /app
 COPY config.json /app
-RUN pip install -r requirements.txt
+RUN pip3 install -r requirements.txt
 
 ENTRYPOINT ["python"]
 CMD ["app.py"]
