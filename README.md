@@ -13,7 +13,7 @@ Docker Status Panel - is a minimal docker container management panel written in 
 
 <img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://user-images.githubusercontent.com/42473/58089800-5ae5cd80-7bce-11e9-81ab-b11e9a5ec125.png">
 
-# Under the hood
+## Under the hood
  * Python 3.7
  * Flask latest
  
@@ -56,9 +56,9 @@ $ docker-compose -f docker-compose-build.yml build
 4. Push to the branch (`git push origin feature/fooBar`)
 5. Create a new Pull Request
 
-# Feature request
+## Feature request
 https://github.com/trydirect/status/issues
 
-# Support new features development
+## Support new features development
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=2BH8ED2AUU2RL)
