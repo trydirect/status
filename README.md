@@ -33,7 +33,15 @@ Clone this project into your work directory:
 ```sh
 $ git clone "https://github.com/trydirect/status.git"
 ```
-Then build it with docker-compose:
+
+## How to start:
+```sh
+$ cd status
+$ docker-compose up -d
+```
+
+
+## How to build:
 ```sh
 $ cd status
 $ docker-compose -f docker-compose-build.yml build
@@ -48,6 +56,8 @@ $ docker-compose -f docker-compose-build.yml build
 4. Push to the branch (`git push origin feature/fooBar`)
 5. Create a new Pull Request
 
+# Feature request
+https://github.com/trydirect/status/issues
 
 # Support new features development
 
