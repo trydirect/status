@@ -1,14 +1,20 @@
-from flask import Flask, Response, redirect, url_for, request, session, abort, render_template
-from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
-import os
-import secrets
-from requests import get
 import socket
 import json
+import os
+import secrets
 import docker
-from shutil import copyfile
 import logging
 from collections import OrderedDict
+from shutil import copyfile
+
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from requests import get
+
+from flask import jsonify
+from flask import make_response, send_file
+from flask import Flask, Response, redirect, url_for, request, session, abort, render_template
+from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
+
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +33,23 @@ app.config.update(
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
+
+
+def check_hash(hash):
+    deployment_hash = os.environ.get('DEPLOYMENT_HASH')
+    hash_to_verify = hash
+
+    s = URLSafeTimedSerializer(deployment_hash)
+    new_hash = s.dumps(deployment_hash)
+    response = {
+        'status': 'OK',
+        'hash': new_hash
+    }
+    if not deployment_hash or not hash_to_verify or (hash_to_verify and not deployment_hash == hash_to_verify):
+        response = {
+            'status': "ERROR",
+        }
+    return response
 
 
 class User(UserMixin):
@@ -143,6 +166,7 @@ def disable_ssl():
     session['ssl_enabled'] = False
     return redirect("/")
 
+
 @app.route('/restart/<container>')
 @login_required
 def restart(container):
@@ -171,6 +195,44 @@ def page_not_found(e):
 @login_manager.user_loader
 def load_user(userid):
     return User(userid)
+
+
+@app.route("/backup/ping", methods=["POST"])
+def backup_ping():
+    # Check IP
+    if request.environ['REMOTE_ADDR'] != os.environ.get('TRYDIRECT_IP'):
+        return make_response(jsonify({"error": "Invalid IP"}), 400)
+
+    try:
+        args = json.loads(request.data.decode("utf-8"))
+    except Exception:
+        return make_response(jsonify({"error": "Invalid JSON"}), 400)
+
+    response = check_hash(args.get('hash'))
+    return make_response(jsonify(response), 200)
+
+
+@app.route("/backup/<hash>/<target_ip>", methods=["GET"])
+def return_backup(hash, target_ip):
+    # Check hash
+    deployment_hash = os.environ.get('DEPLOYMENT_HASH')
+    s = URLSafeTimedSerializer(deployment_hash)
+    try:
+        hash = s.loads(hash, max_age=1800)  # 30 mins in secs
+    except (BadSignature, SignatureExpired) as ex:
+        logging.exception(ex)
+        return make_response(jsonify({"error": "Invalid hash"}), 400)
+
+    # Check IP
+    if request.environ['REMOTE_ADDR'] != target_ip:
+        return make_response(jsonify({"error": "Invalid IP"}), 400)
+
+    # If back up file doesn't exist, issue an error
+    backup_url = '/data/export/trydirect.tar.gz.cpt'
+    if os.path.isfile(backup_url):
+        return send_file(backup_url, attachment_filename='trydirect.tar.gz.cpt', as_attachment=True)
+    else:
+        return make_response(jsonify({"error": "Backup not found"}), 400)
 
 
 if __name__ == '__main__':
