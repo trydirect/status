@@ -218,7 +218,7 @@ def return_backup(hash, target_ip):
     deployment_hash = os.environ.get('DEPLOYMENT_HASH')
     s = URLSafeTimedSerializer(deployment_hash)
     try:
-        hash = s.loads(hash, max_age=30)  # 30 secs
+        hash = s.loads(hash, max_age=1800)  # 30 mins in secs
     except (BadSignature, SignatureExpired) as ex:
         logging.exception(ex)
         return make_response(jsonify({"error": "Invalid hash"}), 400)
