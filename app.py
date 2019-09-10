@@ -228,7 +228,7 @@ def return_backup(hash, target_ip):
         return make_response(jsonify({"error": "Invalid IP"}), 400)
 
     # If back up file doesn't exist, issue an error
-    backup_url = '/data/export/trydirect.tar.gz.cpt'
+    backup_url = '/data/trydirect.tar.gz.cpt'
     if os.path.isfile(backup_url):
         return send_file(backup_url, attachment_filename='trydirect.tar.gz.cpt', as_attachment=True)
     else:
