@@ -19,6 +19,8 @@ from flask_login import LoginManager, UserMixin, login_required, login_user, log
 log = logging.getLogger(__name__)
 
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
+BACKUP_FILE_NAME = 'backup.tar.gz.cpt'
+BACKUP_DIR = '/data/encrypted'
 logging.basicConfig(format=FORMAT)
 log.setLevel(logging.DEBUG)
 
@@ -228,9 +230,9 @@ def return_backup(hash, target_ip):
         return make_response(jsonify({"error": "Invalid IP"}), 400)
 
     # If back up file doesn't exist, issue an error
-    backup_url = '/data/trydirect.tar.gz.cpt'
+    backup_url = '{}/{}'.format(BACKUP_DIR, BACKUP_FILE_NAME)
     if os.path.isfile(backup_url):
-        return send_file(backup_url, attachment_filename='trydirect.tar.gz.cpt', as_attachment=True)
+        return send_file(backup_url, attachment_filename=BACKUP_FILE_NAME, as_attachment=True)
     else:
         return make_response(jsonify({"error": "Backup not found"}), 400)
 
