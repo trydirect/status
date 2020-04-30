@@ -12,7 +12,7 @@ from requests import get
 
 from flask import jsonify
 from flask import make_response, send_file
-from flask import Flask, Response, redirect, url_for, request, session, abort, render_template
+from flask import Flask, Response, redirect, request, session, abort, render_template
 from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
 
 
@@ -62,7 +62,7 @@ class User(UserMixin):
         self.password = os.environ.get('STATUS_PANEL_PASSWORD')
 
     def __repr__(self):
-        return "%d/%s/%s" % (self.id, self.name, self.password)
+        return "%d/%s" % (self.id, self.name)
 
 
 @app.route('/')
@@ -75,7 +75,7 @@ def home():
     containers = client.containers.list()
     for container in containers:
         logs = ''.join([log for log in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
-        if container.name != 'try.direct.agent':
+        if container.name != 'status':
             container_list.append({"name": container.name, "status": container.status, "logs": logs})
 
     ip = get('https://api.ipify.org').text
@@ -84,10 +84,7 @@ def home():
         domainIp = socket.gethostbyname(config.get('domain'))
     except Exception as e:
         print(e)
-    if ip == domainIp:
-        can_enable = True
-    else:
-        can_enable = False
+    can_enable = ip == domainIp
     return render_template('index.html', ip=ip, domainIp=domainIp, can_enable=can_enable, container_list=container_list,
                            ssl_enabled=session['ssl_enabled'], domain=config.get('domain'))
 
@@ -142,7 +139,7 @@ def enable_ssl():
                 copyfile("./origin_conf/ssl-conf.d/{}.conf".format(fname),
                          "./destination_conf/conf.d/{}.conf".format(fname))
             client.containers.get(os.environ.get('NGINX_CONTAINER')).restart()
-            log.debug('Self sign SSL conf file was replaces')
+            log.debug('Self sign SSL conf file was replaced')
         except Exception as e:
             log.debug(e)
             return redirect("/")
@@ -189,7 +186,7 @@ def logout():
 
 # handle login failed
 @app.errorhandler(401)
-def page_not_found(e):
+def page_not_found():
     return Response('<p>Login failed</p>')
 
 
