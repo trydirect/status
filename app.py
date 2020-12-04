@@ -22,7 +22,7 @@ FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 BACKUP_FILE_NAME = 'backup.tar.gz.cpt'
 BACKUP_DIR = '/data/encrypted'
 logging.basicConfig(format=FORMAT)
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.ERROR)
 
 with open('config.json', 'r') as f:
     config = json.load(f, object_pairs_hook=OrderedDict)
@@ -37,7 +37,7 @@ login_manager.init_app(app)
 login_manager.login_view = "login"
 
 
-def check_hash(hash):
+def check_hash(hash: str) -> dict:
     deployment_hash = os.environ.get('DEPLOYMENT_HASH')
     hash_to_verify = hash
 
@@ -56,7 +56,7 @@ def check_hash(hash):
 
 class User(UserMixin):
 
-    def __init__(self, id):
+    def __init__(self, id: int):
         self.id = id
         self.name = os.environ.get('STATUS_PANEL_USERNAME')
         self.password = os.environ.get('STATUS_PANEL_PASSWORD')
@@ -74,19 +74,20 @@ def home():
     container_list = []
     containers = client.containers.list()
     for container in containers:
-        logs = ''.join([log for log in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
+        logs = ''.join([lg for lg in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
         if container.name != 'status':
             container_list.append({"name": container.name, "status": container.status, "logs": logs})
 
     ip = get('https://api.ipify.org').text
-    domainIp = ""
     try:
-        domainIp = socket.gethostbyname(config.get('domain'))
+        domain_ip = socket.gethostbyname(config.get('domain'))
     except Exception as e:
-        print(e)
-    can_enable = ip == domainIp
-    return render_template('index.html', ip=ip, domainIp=domainIp, can_enable=can_enable, container_list=container_list,
-                           ssl_enabled=session['ssl_enabled'], domain=config.get('domain'))
+        domain_ip = ""
+        log.exception(e)
+    can_enable = ip == domain_ip
+    return render_template('index.html', ip=ip, domainIp=domain_ip, can_enable=can_enable,
+                           container_list=container_list, ssl_enabled=session['ssl_enabled'],
+                           domain=config.get('domain'))
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -173,7 +174,7 @@ def restart(container):
         client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).restart()
     except Exception as e:
-        log.debug(e)
+        log.exception(e)
     return redirect("/")
 
 
@@ -212,14 +213,14 @@ def backup_ping():
 
 
 @app.route("/backup/<hash>/<target_ip>", methods=["GET"])
-def return_backup(hash, target_ip):
+def return_backup(hash: str, target_ip: str):
     # Check hash
     deployment_hash = os.environ.get('DEPLOYMENT_HASH')
     s = URLSafeTimedSerializer(deployment_hash)
     try:
-        hash = s.loads(hash, max_age=1800)  # 30 mins in secs
+        s.loads(hash, max_age=1800)  # 30 mins in secs
     except (BadSignature, SignatureExpired) as ex:
-        logging.exception(ex)
+        log.exception(ex)
         return make_response(jsonify({"error": "Invalid hash"}), 400)
 
     # Check IP
