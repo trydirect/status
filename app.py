@@ -1,20 +1,28 @@
-from flask import Flask, Response, redirect, url_for, request, session, abort, render_template
-from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
-import os
-import secrets
-from requests import get
 import socket
 import json
+import os
+import secrets
 import docker
-from shutil import copyfile
 import logging
 from collections import OrderedDict
+from shutil import copyfile
+
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from requests import get
+
+from flask import jsonify
+from flask import make_response, send_file
+from flask import Flask, Response, redirect, request, session, abort, render_template
+from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
+
 
 log = logging.getLogger(__name__)
 
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
+BACKUP_FILE_NAME = 'backup.tar.gz.cpt'
+BACKUP_DIR = '/data/encrypted'
 logging.basicConfig(format=FORMAT)
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.ERROR)
 
 with open('config.json', 'r') as f:
     config = json.load(f, object_pairs_hook=OrderedDict)
@@ -29,15 +37,32 @@ login_manager.init_app(app)
 login_manager.login_view = "login"
 
 
+def check_hash(hash: str) -> dict:
+    deployment_hash = os.environ.get('DEPLOYMENT_HASH')
+    hash_to_verify = hash
+
+    s = URLSafeTimedSerializer(deployment_hash)
+    new_hash = s.dumps(deployment_hash)
+    response = {
+        'status': 'OK',
+        'hash': new_hash
+    }
+    if not deployment_hash or not hash_to_verify or (hash_to_verify and not deployment_hash == hash_to_verify):
+        response = {
+            'status': "ERROR",
+        }
+    return response
+
+
 class User(UserMixin):
 
-    def __init__(self, id):
+    def __init__(self, id: int):
         self.id = id
         self.name = os.environ.get('STATUS_PANEL_USERNAME')
         self.password = os.environ.get('STATUS_PANEL_PASSWORD')
 
     def __repr__(self):
-        return "%d/%s/%s" % (self.id, self.name, self.password)
+        return "%d/%s" % (self.id, self.name)
 
 
 @app.route('/')
@@ -49,22 +74,20 @@ def home():
     container_list = []
     containers = client.containers.list()
     for container in containers:
-        logs = ''.join([log for log in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
-        if container.name != 'try.direct.agent':
+        logs = ''.join([lg for lg in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
+        if container.name != 'status':
             container_list.append({"name": container.name, "status": container.status, "logs": logs})
 
     ip = get('https://api.ipify.org').text
-    domainIp = ""
     try:
-        domainIp = socket.gethostbyname(config.get('domain'))
+        domain_ip = socket.gethostbyname(config.get('domain'))
     except Exception as e:
-        print(e)
-    if ip == domainIp:
-        can_enable = True
-    else:
-        can_enable = False
-    return render_template('index.html', ip=ip, domainIp=domainIp, can_enable=can_enable, container_list=container_list,
-                           ssl_enabled=session['ssl_enabled'], domain=config.get('domain'))
+        domain_ip = ""
+        log.exception(e)
+    can_enable = ip == domain_ip
+    return render_template('index.html', ip=ip, domainIp=domain_ip, can_enable=can_enable,
+                           container_list=container_list, ssl_enabled=session['ssl_enabled'],
+                           domain=config.get('domain'))
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -117,7 +140,7 @@ def enable_ssl():
                 copyfile("./origin_conf/ssl-conf.d/{}.conf".format(fname),
                          "./destination_conf/conf.d/{}.conf".format(fname))
             client.containers.get(os.environ.get('NGINX_CONTAINER')).restart()
-            log.debug('Self sign SSL conf file was replaces')
+            log.debug('Self sign SSL conf file was replaced')
         except Exception as e:
             log.debug(e)
             return redirect("/")
@@ -143,6 +166,7 @@ def disable_ssl():
     session['ssl_enabled'] = False
     return redirect("/")
 
+
 @app.route('/restart/<container>')
 @login_required
 def restart(container):
@@ -150,7 +174,7 @@ def restart(container):
         client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).restart()
     except Exception as e:
-        log.debug(e)
+        log.exception(e)
     return redirect("/")
 
 
@@ -163,7 +187,7 @@ def logout():
 
 # handle login failed
 @app.errorhandler(401)
-def page_not_found(e):
+def page_not_found():
     return Response('<p>Login failed</p>')
 
 
@@ -173,5 +197,43 @@ def load_user(userid):
     return User(userid)
 
 
+@app.route("/backup/ping", methods=["POST"])
+def backup_ping():
+    # Check IP
+    if request.environ['REMOTE_ADDR'] != os.environ.get('TRYDIRECT_IP'):
+        return make_response(jsonify({"error": "Invalid IP"}), 400)
+
+    try:
+        args = json.loads(request.data.decode("utf-8"))
+    except Exception:
+        return make_response(jsonify({"error": "Invalid JSON"}), 400)
+
+    response = check_hash(args.get('hash'))
+    return make_response(jsonify(response), 200)
+
+
+@app.route("/backup/<hash>/<target_ip>", methods=["GET"])
+def return_backup(hash: str, target_ip: str):
+    # Check hash
+    deployment_hash = os.environ.get('DEPLOYMENT_HASH')
+    s = URLSafeTimedSerializer(deployment_hash)
+    try:
+        s.loads(hash, max_age=1800)  # 30 mins in secs
+    except (BadSignature, SignatureExpired) as ex:
+        log.exception(ex)
+        return make_response(jsonify({"error": "Invalid hash"}), 400)
+
+    # Check IP
+    if request.environ['REMOTE_ADDR'] != target_ip:
+        return make_response(jsonify({"error": "Invalid IP"}), 400)
+
+    # If back up file doesn't exist, issue an error
+    backup_url = '{}/{}'.format(BACKUP_DIR, BACKUP_FILE_NAME)
+    if os.path.isfile(backup_url):
+        return send_file(backup_url, attachment_filename=BACKUP_FILE_NAME, as_attachment=True)
+    else:
+        return make_response(jsonify({"error": "Backup not found"}), 400)
+
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+    app.run(debug=False, host='0.0.0.0')

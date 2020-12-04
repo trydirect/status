@@ -1,1 +1,2 @@
-{"ssl":"letsencrypt","domain":"pikolor.com","reqdata" : {"country": "PA","state": "Panama","locality": "Panama","organization": "TryDirect","organizationalunit": "IT","email": "info@try.direct","commonname": "try.direct"}, "project":"akeneo", "container":"nginx"}
+{"ssl":"letsencrypt","domain":"try.direct","reqdata" : {"country": "US","state": "Texas","locality": "Texas","organization":
+"TryDirect","organizationalunit": "IT","email": "info@try.direct","commonname": "try.direct"}, "project":"status", "container":"nginx"}
