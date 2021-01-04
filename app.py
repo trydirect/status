@@ -112,27 +112,28 @@ def enable_ssl():
     domains = '-w /tmp/letsencrypt {}'.format(' '.join(map(" -d {0} ".format, domain_list.values())))
 
     client = docker.DockerClient(base_url='unix://var/run/docker.sock')
-    res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run("mkdir /tmp/letsencrypt")
-    res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run("mkdir /tmp/letsencrypt/.well-known")
-    res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(
-        "mkdir /tmp/letsencrypt/.well-known/acme-challenge"
+    client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(
+        "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge"
     )
 
     if config['ssl'] == 'letsencrypt':
         try:
-            log.debug('trying to letsencrypt')
-            cmd = '/opt/letsencrypt/letsencrypt-auto certonly --email {admin_email} -a webroot {domains} --non-interactive --agree-tos --cert-path /etc/letsencrypt/live/{domain}/cert.pem --chain-path /etc/letsencrypt/live/{domain}/chain.pem --fullchain-path /etc/letsencrypt/live/{domain}/fullchain.pem --key-path /etc/letsencrypt/live/{domain}/privkey.pem'.format(
-                http_service='nginx', admin_email=config['reqdata']['email'], domains=domains,
-                domain=config.get('domain'))
-            log.debug(cmd)
+            log.debug('Starting certbot..')
+
+            # Run registration command (with client email)
+            cmd = f"certbot register --email {config['reqdata']['email']} --agree-tos -n"
             res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(cmd)
             log.debug(res)
-            for fname in domain_list:
-                copyfile("./origin_conf/letsencrypt-conf.d/{}.conf".format(fname),
-                         "./destination_conf/conf.d/{}.conf".format(fname))
+            # Run command to generate certificates with redirect HTTP traffic to HTTPS, removing HTTP access
+            cmd = f"certbot --nginx --redirect {domains}"
+            # Run command to generate certificates without redirect
+            # certbot --nginx --no-redirect -d domain.com
+            log.debug(f"Executing command: {cmd}")
+            res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(cmd)
+            log.debug(res)
             client.containers.get(os.environ.get('NGINX_CONTAINER')).restart()
         except Exception as e:
-            log.debug(e)
+            log.exception(e)
             return redirect("/")
     else:
         try:
@@ -173,6 +174,28 @@ def restart(container):
     try:
         client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).restart()
+    except Exception as e:
+        log.exception(e)
+    return redirect("/")
+
+
+@app.route('/stop/<container>')
+@login_required
+def stop(container):
+    try:
+        client = docker.DockerClient(base_url='unix://var/run/docker.sock')
+        client.containers.get(container).stop()
+    except Exception as e:
+        log.exception(e)
+    return redirect("/")
+
+
+@app.route('/pause/<container>')
+@login_required
+def pause(container):
+    try:
+        client = docker.DockerClient(base_url='unix://var/run/docker.sock')
+        client.containers.get(container).pause()
     except Exception as e:
         log.exception(e)
     return redirect("/")
