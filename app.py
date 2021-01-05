@@ -12,7 +12,7 @@ from requests import get
 
 from flask import jsonify
 from flask import make_response, send_file
-from flask import Flask, Response, redirect, request, session, abort, render_template
+from flask import Flask, Response, redirect, request, session, render_template
 from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
 
 
@@ -105,32 +105,38 @@ def login():
         return render_template('login.html')
 
 
+def mk_cmd():
+    domain_list = config['subdomains']
+    domain_list['base'] = config['domain']
+    domains = '{}'.format(' '.join(map("-d {0} ".format, domain_list.values())))
+    # Run registration command (with client email)
+    reg_cmd = f"certbot register --email {config['reqdata']['email']} --agree-tos -n"
+    # Run command to generate certificates with redirect HTTP traffic to HTTPS, removing HTTP access
+    crt_cmd = f"certbot --nginx --redirect {domains}"
+    # Run command to generate certificates without redirect
+    # certbot --nginx --no-redirect -d domain.com
+    log.info(f"Executing command: {crt_cmd}")
+    return reg_cmd, crt_cmd
+
+
 @app.route('/enable_ssl')
 @login_required
 def enable_ssl():
-    domain_list = config['subdomains']
-    domains = '-w /tmp/letsencrypt {}'.format(' '.join(map(" -d {0} ".format, domain_list.values())))
 
+    domain_list = config['subdomains']
     client = docker.DockerClient(base_url='unix://var/run/docker.sock')
     client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(
         "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge"
     )
 
     if config['ssl'] == 'letsencrypt':
+        reg_cmd, crt_cmd = mk_cmd()
         try:
-            log.debug('Starting certbot..')
-
-            # Run registration command (with client email)
-            cmd = f"certbot register --email {config['reqdata']['email']} --agree-tos -n"
-            res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(cmd)
-            log.debug(res)
-            # Run command to generate certificates with redirect HTTP traffic to HTTPS, removing HTTP access
-            cmd = f"certbot --nginx --redirect {domains}"
-            # Run command to generate certificates without redirect
-            # certbot --nginx --no-redirect -d domain.com
-            log.debug(f"Executing command: {cmd}")
-            res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(cmd)
-            log.debug(res)
+            log.info('Starting certbot..')
+            res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(reg_cmd)
+            log.info(res)
+            res = client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(crt_cmd)
+            log.info(res)
             client.containers.get(os.environ.get('NGINX_CONTAINER')).restart()
         except Exception as e:
             log.exception(e)
@@ -141,7 +147,7 @@ def enable_ssl():
                 copyfile("./origin_conf/ssl-conf.d/{}.conf".format(fname),
                          "./destination_conf/conf.d/{}.conf".format(fname))
             client.containers.get(os.environ.get('NGINX_CONTAINER')).restart()
-            log.debug('Self sign SSL conf file was replaced')
+            log.debug('Self signed SSL conf file was replaced')
         except Exception as e:
             log.debug(e)
             return redirect("/")
@@ -156,7 +162,7 @@ def disable_ssl():
     client = docker.DockerClient(base_url='unix://var/run/docker.sock')
 
     try:
-        log.debug('disable ssl')
+        log.debug('Disable SSL')
         for fname in domain_list:
             copyfile("./origin_conf/conf.d/{}.conf".format(fname), "./destination_conf/conf.d/{}.conf".format(fname))
         client.containers.get(os.environ.get('NGINX_CONTAINER')).restart()

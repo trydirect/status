@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# Container services tests
+
+
 import time
 import docker
 import requests
@@ -23,9 +26,6 @@ class BaseTestCase(unittest.TestCase):
         print(response.text)
         assert response.status_code == 200
         assert "Status Panel" in response.text
-
-    def test(self):
-        pass
 
     def tearDown(self):
         pass

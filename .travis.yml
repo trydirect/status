@@ -9,6 +9,8 @@ services:
 before_install:
 - sudo apt-get update
 - docker-compose --version
+- pip install requirements.txt
+- python test.py
 - pip install docker-compose --upgrade
 - docker-compose --version
 install:
