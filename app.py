@@ -107,7 +107,6 @@ def login():
 
 def mk_cmd():
     domain_list = config['subdomains']
-    domain_list['base'] = config['domain']
     domains = '{}'.format(' '.join(map("-d {0} ".format, domain_list.values())))
     # Run registration command (with client email)
     reg_cmd = f"certbot register --email {config['reqdata']['email']} --agree-tos -n"
