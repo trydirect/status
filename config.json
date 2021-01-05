@@ -1,4 +1,4 @@
-{"ssl":"letsencrypt","domain":"try.direct","reqdata" : {"country": "US","state": "Texas","locality": "Texas","organization":
+{"ssl":"letsencrypt", "domain":"try.direct","reqdata" : {"country": "US","state": "Texas","locality": "Texas","organization":
 "TryDirect","organizationalunit": "IT","email": "info@try.direct","commonname": "try.direct"}, "project":"status",
   "container":"nginx", "subdomains": {"prod": "prod.try.direct"}}
 
