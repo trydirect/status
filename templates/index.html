@@ -1,4 +1,4 @@
-﻿<html>
+﻿<html lang="en">
 <head>
     <title>Status Panel</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/css/materialize.min.css">
@@ -46,9 +46,36 @@
             </div>
             {% endif %}
         {% endif %}
-        
-        <h3 style='margin-top:30px'>Running containers</h3>
+        <style>
+            .tab-content{
+                display: none;
+            }
+        </style>
+        <script>
+            function displayTab(tabName) {
+                let i, content, buttons;
+
+                content = document.getElementsByClassName("tab-content");
+            for (i = 0; i < content.length; i++) {
+                content[i].style.display = "none";
+            }
+
+            buttons = document.getElementsByClassName("tab-button");
+            for (i = 0; i < buttons.length; i++) {
+                buttons[i].className = buttons[i].className.replace(" active", "");
+            }
+
+            document.getElementById(tabName).style.display = "block";
+                    }
+        </script>
+
+        <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('docker-containers')">
+            <i class="material-icons" style="vertical-align:middle; font-size:16px;">border_all</i> Running containers</button>
+        <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('self-hosted')">
+            <i class="material-icons" style="vertical-align:middle; font-size:16px;">pages</i> Available web pages</button>
         {% if container_list %}
+            <div id="docker-containers" class="tab-content" style="display: block">
+            <h3 style='margin-top:30px'>Running containers</h3>
             <table width="100%">
                 <thead>
                     <tr>
@@ -60,7 +87,9 @@
                 <tbody>
                     {% for container in container_list %}
                     <tr>
-                        <td>{{container['name']}}</td>
+                        <td>
+                            {{container['name']}}
+                        </td>
                         <td width="250px">
                             {% if container['status'] == 'running' %}
                             <span style="display:inline-block; padding:6px 12px; border-radius:3px">
@@ -84,6 +113,40 @@
                     {% endfor %}
                 </tbody>
             </table>
+            </div>
+            <div id="self-hosted" class="tab-content">
+            <h3 style='margin-top:30px'>Available web pages</h3>
+            <table width="100%">
+                <thead>
+                    <tr>
+                        <th>Web page</th>
+                        <th>Container name</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for container in container_list %}
+                        {% if container.ports %}
+                            {% for port in container.ports %}
+                                 <tr>
+                                    <td>
+                                        <a href="http://{{ ip }}:{{port.port}}/">
+                                            {% if port.title %}
+                                                {{ port.title }}
+                                            {% else %}
+                                                {{ ip }}:{{port.port}}
+                                            {% endif %}
+                                            </a><br>
+
+
+                                    </td>
+                                    <td>{{container['name']}}</td>
+                                </tr>
+                            {% endfor %}
+                        {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
             {% for container in container_list %}
             <div id="modal_{{container['name']}}" class="modal">
                 <div class="modal-content">
