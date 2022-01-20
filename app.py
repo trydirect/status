@@ -88,14 +88,30 @@ def get_self_hosted_services(port_bindings: dict, container, ip) -> list:
     return service_ports
 
 
+def get_ip_address():
+    """
+    Gets machines IP address
+    :return: str
+    """
+    try:
+        IP_API_MAP = [
+            'https://api.ipify.org',
+            'https://ipinfo.io/ip',
+            'https://ifconfig.me/ip'
+        ]
+        for api in IP_API_MAP:
+            ip = get(api)
+            if ip.status_code == 200:
+                return ip.text
+    except Exception as e:
+        log.exception(e)
+    return 'undefined'
+
+
 @app.route('/')
 @login_required
 def home():
-    try:
-        ip = get('https://api.ipify.org').text
-    except Exception as e:
-        ip = "localhost"
-        log.exception(e)
+    ip = get_ip_address()
     if 'ssl_enabled' not in session:
         session['ssl_enabled'] = False
     client = docker.DockerClient(base_url='unix://var/run/docker.sock')
