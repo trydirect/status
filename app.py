@@ -91,7 +91,11 @@ def get_self_hosted_services(port_bindings: dict, container, ip) -> list:
 @app.route('/')
 @login_required
 def home():
-    ip = get('https://api.ipify.org').text
+    try:
+        ip = get('https://api.ipify.org').text
+    except Exception as e:
+        ip = "localhost"
+        log.exception(e)
     if 'ssl_enabled' not in session:
         session['ssl_enabled'] = False
     client = docker.DockerClient(base_url='unix://var/run/docker.sock')
