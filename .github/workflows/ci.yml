@@ -25,13 +25,14 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
-      - name: Extract branch name
-          shell: bash
-          run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
-          id: extract_branch
+      - name: Set output
+        id: vars
+        run: echo ::set-output name=short_ref::${GITHUB_REF#refs/*/}
+      - name: Check output
+        run: echo ${{ steps.vars.outputs.short_ref }}
       - name: Build and push
         uses: docker/build-push-action@v2
         with:
           context: Dockerfile.prod
           push: true
-          tags: trydirect/status:${{ steps.extract_branch.outputs.branch }}
+          tags: trydirect/status:${{ steps.vars.outputs.short_ref }}
