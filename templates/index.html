@@ -5,7 +5,6 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
 </head>
 <body>
-    
     <div class="container">
         <a href="/logout" style="float:right; display:inline-block; margin:15px 0 0">
             <i class="material-icons" style="vertical-align:middle; font-size:16px;">logout</i> Logout
@@ -22,7 +21,7 @@
             </a>
         {% else %}
             <h3>Available actions</h3>
-            
+
             {% if can_enable %}
             <a href="/enable_ssl" class="btn waves-effect waves-light" >
                 <i class="large material-icons" style="vertical-align:middle">lock</i> Enable SSL
@@ -32,7 +31,7 @@
                 <i class="large material-icons" style="vertical-align:middle">lock</i> Enable SSL
             </button> <br />
             You <b>can't enable</b> SSL because the DNS are not propagated yet to this IP
-            
+
 
             <div class="card horizontal">
                 <div class="card-content">
@@ -73,6 +72,8 @@
             <i class="material-icons" style="vertical-align:middle; font-size:16px;">border_all</i> Running containers</button>
         <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('self-hosted')">
             <i class="material-icons" style="vertical-align:middle; font-size:16px;">pages</i> Available web pages</button>
+        <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('installed-apps')">
+            <i class="material-icons" style="vertical-align:middle; font-size:16px;">apps</i> Installed apps</button>
         {% if container_list %}
             <div id="docker-containers" class="tab-content" style="display: block">
             <h3 style='margin-top:30px'>Running containers</h3>
@@ -143,6 +144,30 @@
                                 </tr>
                             {% endfor %}
                         {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+
+            <div id="installed-apps" class="tab-content">
+            <h3 style='margin-top:30px'>Installed Applications</h3>
+            <table width="100%">
+                <thead>
+                    <tr>
+                        <th>Application</th>
+                        <th>Version</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for app_info in apps_info %}
+                                 <tr>
+                                    <td>
+                                        {{ app_info['name'] }}<br>
+
+
+                                    </td>
+                                    <td>{{ app_info['version'] }}</td>
+                                </tr>
                     {% endfor %}
                 </tbody>
             </table>

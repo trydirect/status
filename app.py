@@ -36,6 +36,30 @@ login_manager.init_app(app)
 login_manager.login_view = "login"
 
 
+def get_apps_name_version(apps_info: str) -> list:
+    """
+        Get apps_info string with format => appName-version
+        And returns next data structure: [
+            {
+                'name':'appName',
+                'version':'version'
+            }
+        ]
+    """
+    app_list = apps_info.split(',')
+    result: list = []
+    for i in range(len(app_list)):
+        temp_list = app_list[i].split('-')
+        result.append({
+            'name': temp_list[0],
+            'version': temp_list[1]
+        })
+    return result
+
+
+config['apps_info'] = get_apps_name_version(config.get('apps_info', ''))
+
+
 def check_hash(hash: str) -> dict:
     deployment_hash = os.environ.get('DEPLOYMENT_HASH')
     hash_to_verify = hash
@@ -132,7 +156,7 @@ def home():
     can_enable = ip == domain_ip
     return render_template('index.html', ip=ip, domainIp=domain_ip, can_enable=can_enable,
                            container_list=container_list, ssl_enabled=session['ssl_enabled'],
-                           domain=config.get('domain'))
+                           domain=config.get('domain'), apps_info=config.get('apps_info'))
 
 
 @app.route("/login", methods=["GET", "POST"])
