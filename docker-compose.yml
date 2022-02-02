@@ -2,7 +2,8 @@ version: '2.2'
 
 services:
   web:
-    image: trydirect/status
+    #image: trydirect/status
+    build: .
     container_name: status
     ports:
      - "5000:5000"

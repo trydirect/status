@@ -1,4 +1,17 @@
-{"ssl":"letsencrypt", "domain":"try.direct","reqdata" : {"country": "US","state": "Texas","locality": "Texas","organization":
-"TryDirect","organizationalunit": "IT","email": "info@try.direct","commonname": "try.direct"}, "project":"status",
-  "container":"nginx", "subdomains": {"prod": "prod.try.direct"}}
+{
+	"ssl":"letsencrypt",
+	"domain":"try.direct",
+	"reqdata" : {
+		"country": "US",
+		"state": "Texas",
+		"locality": "Texas",
+		"organization":"TryDirect",
+		"organizationalunit": "IT",
+		"email": "info@try.direct",
+		"commonname": "try.direct"
+	},
+	"project":"status",
+  	"container":"nginx",
+	"apps_info": "phpMyAdmin-5,MySQL-5,PHP-7,Apache-2,Redis-5",
+	"subdomains": {"prod": "prod.try.direct"}}
 
