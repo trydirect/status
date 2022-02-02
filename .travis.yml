@@ -1,35 +1,35 @@
-language: python
-python:
-- 3.9
-env:
-  matrix:
-  - DOCKER_CONTENT_TRUST=0
-services:
-- docker
-before_install:
-- sudo apt-get update
-- docker-compose --version
-- pip install requirements.txt
-- python test.py
-- pip install docker-compose --upgrade
-- docker-compose --version
-install:
-- docker-compose -f docker-compose-build.yml up -d --build
-- docker-compose -f docker-compose-build.yml logs
-- docker-compose -f docker-compose-build.yml ps
-before_script:
-- pip install requests
-- pip install docker
-- pip install pylint
-script:
-- bash ./.travis/linters.sh
-- python tests.py
-#- pylint
-notifications:
-  slack:
-    rooms:
-    - optimum-team:"$SLACK"#build
-after_success:
-- echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-- docker-compose -f docker-compose-build.yml images
-- docker push trydirect/status:$TRAVIS_BRANCH
+#language: python
+#python:
+#- 3.9
+#env:
+#  matrix:
+#  - DOCKER_CONTENT_TRUST=0
+#services:
+#- docker
+#before_install:
+#- sudo apt-get update
+#- docker-compose --version
+#- pip install requirements.txt
+#- python test.py
+#- pip install docker-compose --upgrade
+#- docker-compose --version
+#install:
+#- docker-compose -f docker-compose-build.yml up -d --build
+#- docker-compose -f docker-compose-build.yml logs
+#- docker-compose -f docker-compose-build.yml ps
+#before_script:
+#- pip install requests
+#- pip install docker
+#- pip install pylint
+#script:
+#- bash ./.travis/linters.sh
+#- python tests.py
+##- pylint
+#notifications:
+#  slack:
+#    rooms:
+#    - optimum-team:"$SLACK"#build
+#after_success:
+#- echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+#- docker-compose -f docker-compose-build.yml images
+#- docker push trydirect/status:$TRAVIS_BRANCH
