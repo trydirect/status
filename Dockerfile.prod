@@ -17,9 +17,9 @@ RUN pip3 install -r requirements.txt
 RUN pip3 install nuitka
 
 RUN python3 -m nuitka --follow-imports --low-memory --standalone app.py
+RUN rm -f /app/app.py
 
 FROM python:3.9-slim as production
-#FROM scratch as production
 WORKDIR /app
 COPY --from=builder /app/* .
 USER 2000
