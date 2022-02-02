@@ -32,4 +32,4 @@ notifications:
 after_success:
 - echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
 - docker-compose -f docker-compose-build.yml images
-- docker push trydirect/status:latest
+- docker push trydirect/status:$TRAVIS_BRANCH
