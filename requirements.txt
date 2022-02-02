@@ -4,3 +4,4 @@ python-dotenv
 requests
 unipath
 docker
+bs4

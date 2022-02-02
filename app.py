@@ -6,10 +6,9 @@ import docker
 import logging
 from collections import OrderedDict
 from shutil import copyfile
-
+from bs4 import BeautifulSoup
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from requests import get
-
 from flask import jsonify
 from flask import make_response, send_file
 from flask import Flask, Response, redirect, request, session, render_template
@@ -65,9 +64,54 @@ class User(UserMixin):
         return "%d/%s" % (self.id, self.name)
 
 
+def get_self_hosted_services(port_bindings: dict, container, ip) -> list:
+    """
+    Check if port opened in container is for self-hosted service
+    :param port_bindings:
+    :param container:
+    :return: list of ports for self-hosted services with their titles or empty list [{port:1234, title:Status Panel}]
+    """
+    service_ports: list = list()
+    for key in port_bindings:
+        for net in port_bindings[key]:
+            try:
+                r = get(f"http://{ip}:{net['HostPort']}")
+                soup = BeautifulSoup(r.text)
+                title = soup.find('title')
+                if r.status_code == 200:
+                    service_ports.append({
+                        'port': net.get('HostPort'),
+                        'title': title.string
+                    })
+            except Exception as e:
+                log.debug(e)
+    return service_ports
+
+
+def get_ip_address():
+    """
+    Gets machines IP address
+    :return: str
+    """
+    try:
+        IP_API_MAP = [
+            'https://api.ipify.org',
+            'https://ipinfo.io/ip',
+            'https://ifconfig.me/ip'
+        ]
+        for api in IP_API_MAP:
+            ip = get(api)
+            if ip.status_code == 200:
+                return ip.text
+    except Exception as e:
+        log.exception(e)
+    return 'undefined'
+
+
 @app.route('/')
 @login_required
 def home():
+    ip = get_ip_address()
     if 'ssl_enabled' not in session:
         session['ssl_enabled'] = False
     client = docker.DockerClient(base_url='unix://var/run/docker.sock')
@@ -75,10 +119,11 @@ def home():
     containers = client.containers.list()
     for container in containers:
         logs = ''.join([lg for lg in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
+        ports = get_self_hosted_services(container.attrs['HostConfig']['PortBindings'], container, ip)
+        log.debug(ports)
         if container.name != 'status':
-            container_list.append({"name": container.name, "status": container.status, "logs": logs})
+            container_list.append({"name": container.name, "status": container.status, "logs": logs, "ports": ports})
 
-    ip = get('https://api.ipify.org').text
     try:
         domain_ip = socket.gethostbyname(config.get('domain'))
     except Exception as e:
@@ -107,7 +152,6 @@ def login():
 
 def mk_cmd():
     domain_list = config['subdomains']
-    domain_list['base'] = config['domain']
     domains = '{}'.format(' '.join(map("-d {0} ".format, domain_list.values())))
     # Run registration command (with client email)
     reg_cmd = f"certbot register --email {config['reqdata']['email']} --agree-tos -n"
