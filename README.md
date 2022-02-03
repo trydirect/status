@@ -5,6 +5,7 @@
 ![Docker Build](https://img.shields.io/docker/cloud/build/trydirect/status.svg)
 [![Gitter chat](https://badges.gitter.im/trydirect/community.png)](https://gitter.im/try-direct/community)
 
+<img src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status_90x15.png.png">
 # Minimal Docker Status Panel
 
 ## About
