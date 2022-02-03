@@ -9,7 +9,7 @@ RUN groupadd -r -g 2000 status
 RUN useradd -u 2000 -g 2000 -m -d /home/status -s /bin/bash status && adduser status sudo
 
 WORKDIR /app
-COPY templates templates
+COPY templates .
 COPY requirements.txt .
 COPY app.py .
 COPY config.json .
