@@ -10,7 +10,9 @@
             <i class="material-icons" style="vertical-align:middle; font-size:16px;">logout</i> Logout
         </a>
         <div style="padding:10px 0; font-size:18px;">
-            <a href="/" style="color:rgba(0,0,0,0.7); text-decoration:none" target="_blank">STATUS</a>
+            <a href="/" style="color:rgba(0,0,0,0.7); text-decoration:none" target="_blank">
+                <img width="90" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status_90x15.png.png" title="Minimal Docker Status Panel">
+            </a>
         </div>
 
         {% if ssl_enabled %}
@@ -20,7 +22,7 @@
                 <i class="large material-icons" style="vertical-align:middle">lock</i> DISABLE SSL
             </a>
         {% else %}
-            <h3>Available actions</h3>
+            <br><br><br>
 
             {% if can_enable %}
             <a href="/enable_ssl" class="btn waves-effect waves-light" >
