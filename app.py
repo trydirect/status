@@ -156,7 +156,8 @@ def home():
     can_enable = ip == domain_ip
     return render_template('index.html', ip=ip, domainIp=domain_ip, can_enable=can_enable,
                            container_list=container_list, ssl_enabled=session['ssl_enabled'],
-                           domain=config.get('domain'), apps_info=config.get('apps_info'))
+                           domain=config.get('domain'), apps_info=config.get('apps_info'),
+                           panel_version='X.X.X')
 
 
 @app.route("/login", methods=["GET", "POST"])
