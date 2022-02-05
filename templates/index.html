@@ -41,7 +41,8 @@
                     <p>Server Ip : {{ip}}</p>
                     {% endif %}
                     {% if domainIp %}
-                    <p>Domain Ip : {{domainIp}}</p>
+                    <p>Domain Ip : {{domainIp}}
+                        <a title="What is Domain Ip?" href="https://try.direct/"><i class="material-icons" style="vertical-align:middle; font-size:16px;">help</i></a></p>
                     {% endif %}
                 </div>
             </div>
@@ -191,5 +192,29 @@
         var instances = M.Modal.init(elems);
     });
     </script>
+    <style>
+        .footer-basic {
+            position: fixed;
+            left: 0;
+            bottom: 0;
+            width: 100%;
+            padding:40px 0;
+            background-color:#ffffff;
+            color:#4b4c4d;
+        }
+        .footer-basic .copyright {
+            margin-top:15px;
+            text-align:center;
+            font-size:20px;
+            color:#aaa;
+            margin-bottom:0;
+        }
+
+    </style>
+    <div class="footer-basic">
+            <footer>
+                <p class="copyright">Status panel version {{ panel_version }}</p>
+            </footer>
+        </div>
 </body>
 </html>
