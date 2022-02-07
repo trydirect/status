@@ -22,6 +22,7 @@ BACKUP_FILE_NAME = 'backup.tar.gz.cpt'
 BACKUP_DIR = '/data/encrypted'
 logging.basicConfig(format=FORMAT)
 log.setLevel(logging.ERROR)
+client = docker.DockerClient(base_url=os.environ.get('DOCKER_SOCK'))
 
 with open('config.json', 'r') as f:
     config = json.load(f, object_pairs_hook=OrderedDict)
@@ -88,11 +89,10 @@ class User(UserMixin):
         return "%d/%s" % (self.id, self.name)
 
 
-def get_self_hosted_services(port_bindings: dict, container, ip) -> list:
+def get_self_hosted_services(port_bindings: dict, ip) -> list:
     """
     Check if port opened in container is for self-hosted service
     :param port_bindings:
-    :param container:
     :return: list of ports for self-hosted services with their titles or empty list [{port:1234, title:Status Panel}]
     """
     service_ports: list = list()
@@ -138,12 +138,11 @@ def home():
     ip = get_ip_address()
     if 'ssl_enabled' not in session:
         session['ssl_enabled'] = False
-    client = docker.DockerClient(base_url='unix://var/run/docker.sock')
     container_list = []
     containers = client.containers.list()
     for container in containers:
         logs = ''.join([lg for lg in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
-        ports = get_self_hosted_services(container.attrs['HostConfig']['PortBindings'], container, ip)
+        ports = get_self_hosted_services(container.attrs['HostConfig']['PortBindings'], ip)
         log.debug(ports)
         if container.name != 'status':
             container_list.append({"name": container.name, "status": container.status, "logs": logs, "ports": ports})
@@ -193,7 +192,6 @@ def mk_cmd():
 def enable_ssl():
 
     domain_list = config['subdomains']
-    client = docker.DockerClient(base_url='unix://var/run/docker.sock')
     client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(
         "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge"
     )
@@ -228,8 +226,6 @@ def enable_ssl():
 @login_required
 def disable_ssl():
     domain_list = config['subdomains']
-    client = docker.DockerClient(base_url='unix://var/run/docker.sock')
-
     try:
         log.debug('Disable SSL')
         for fname in domain_list:
@@ -247,7 +243,6 @@ def disable_ssl():
 @login_required
 def restart(container):
     try:
-        client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).restart()
     except Exception as e:
         log.exception(e)
@@ -258,7 +253,6 @@ def restart(container):
 @login_required
 def stop(container):
     try:
-        client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).stop()
     except Exception as e:
         log.exception(e)
@@ -269,7 +263,6 @@ def stop(container):
 @login_required
 def pause(container):
     try:
-        client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).pause()
     except Exception as e:
         log.exception(e)
