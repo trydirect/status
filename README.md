@@ -14,10 +14,10 @@ A minimal docker container management panel written in Python / Flask
 <br><br><br><br>
 
 
-<center><img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://user-images.githubusercontent.com/42473/58089800-5ae5cd80-7bce-11e9-81ab-b11e9a5ec125.png"></center>
+<center><img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/screenshot.png"></center>
 
 ## Under the hood
- * Python 3.7
+ * Python 3.9
  * Flask latest
  
 
