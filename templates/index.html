@@ -1,4 +1,3 @@
-﻿
 <html lang="en">
 <head>
     <title>Status Panel</title>
@@ -16,8 +15,10 @@
         <a href="/logout" class="nav-buttons">
             <i class="material-icons btn_icon">logout</i> Logout
         </a>
-        <div class="nav-title">
-            <a href="http://try.direct" class="nav-title" target="_blank">Status Panel</a>
+         <div class="nav-title">
+            <a href="http://try.direct" class="nav-title" target="_blank">
+                <img width="90" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status_90x15.png.png" title="Minimal Docker Status Panel">
+            </a>
         </div>
     <!-- End NavBar block -->
     <!-- SSL Block -->
@@ -28,7 +29,7 @@
                 <i class="large material-icons btn_icon">lock</i> DISABLE SSL
             </a>
         {% else %}
-            <h3>Available actions</h3>
+            <br><br><br>
 
             {% if can_enable %}
                 <a href="/enable_ssl" class="btn waves-effect waves-light" >
