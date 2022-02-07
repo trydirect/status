@@ -23,5 +23,6 @@ FROM python:3.9-slim as production
 WORKDIR /app
 COPY --from=builder /app/* .
 COPY ./templates /app/templates
+COPY ./static /app/static
 #USER 2000
 CMD ["/app/app"]
