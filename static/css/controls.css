@@ -1,0 +1,28 @@
+.container-status{
+    display:inline-block;
+    padding:6px 12px;
+    border-radius:3px;
+}
+
+.active{
+    color: #4caf50;
+}
+.paused{
+    color: red;
+}
+.btn_icon{
+    vertical-align:middle;
+    font-size:16px;
+}
+.tab-content{ /* Tabs */
+    display: none;
+}
+.active-tab{
+    display: block;
+}
+.vanish-tab{
+    display: none;
+}
+.tab-title{
+    margin-top:30px;
+}

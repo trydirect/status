@@ -1,83 +1,78 @@
-﻿<html lang="en">
+﻿
+<html lang="en">
 <head>
     <title>Status Panel</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/css/materialize.min.css">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.1/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-beta/js/materialize.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/controls.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="{{ url_for('static', filename='js/tab-controller.js') }}"></script>
 </head>
 <body>
     <div class="container">
-        <a href="/logout" style="float:right; display:inline-block; margin:15px 0 0">
-            <i class="material-icons" style="vertical-align:middle; font-size:16px;">logout</i> Logout
+    <!-- NavBar Block -->
+        <a href="/logout" class="nav-buttons">
+            <i class="material-icons btn_icon">logout</i> Logout
         </a>
-        <div style="padding:10px 0; font-size:18px;">
-            <a href="http://try.direct" style="color:rgba(0,0,0,0.7); text-decoration:none" target="_blank">Status Panel</a>
+        <div class="nav-title">
+            <a href="http://try.direct" class="nav-title" target="_blank">Status Panel</a>
         </div>
-
+    <!-- End NavBar block -->
+    <!-- SSL Block -->
         {% if ssl_enabled %}
             <h3>SSL is already enabled</h3>
             <a href="https://{{domain}}" target="_blank">https://{{domain}}</a> <br />
             <a href="/disable_ssl" class="btn waves-effect waves-light" >
-                <i class="large material-icons" style="vertical-align:middle">lock</i> DISABLE SSL
+                <i class="large material-icons btn_icon">lock</i> DISABLE SSL
             </a>
         {% else %}
             <h3>Available actions</h3>
 
             {% if can_enable %}
-            <a href="/enable_ssl" class="btn waves-effect waves-light" >
-                <i class="large material-icons" style="vertical-align:middle">lock</i> Enable SSL
-            </a>
+                <a href="/enable_ssl" class="btn waves-effect waves-light" >
+                    <i class="large material-icons btn_icon" >lock</i> Enable SSL
+                </a>
             {% else %}
-            <button disabled class="btn waves-effect waves-light" >
-                <i class="large material-icons" style="vertical-align:middle">lock</i> Enable SSL
-            </button> <br />
-            You <b>can't enable</b> SSL because the DNS are not propagated yet to this IP
+                <button disabled class="btn waves-effect waves-light" >
+                    <i class="large material-icons btn_icon" >lock</i> Enable SSL
+                </button> <br />
+                You <b>can't enable</b> SSL because the DNS are not propagated yet to this IP
 
 
-            <div class="card horizontal">
-                <div class="card-content">
-                    {% if ip %}
-                    <p>Server Ip : {{ip}}</p>
-                    {% endif %}
-                    {% if domainIp %}
-                    <p>Domain Ip : {{domainIp}}
-                        <a title="What is Domain Ip?" href="https://try.direct/"><i class="material-icons" style="vertical-align:middle; font-size:16px;">help</i></a></p>
-                    {% endif %}
+                <div class="card horizontal">
+                    <div class="card-content">
+                        {% if ip %}
+                            <p>Server Ip : {{ip}}</p>
+                        {% endif %}
+                        {% if domainIp %}
+                            <p>Domain Ip : {{domainIp}}
+                                <a title="What is Domain Ip?" href="https://try.direct/">
+                                    <i class="material-icons btn_icon">help</i>
+                                </a>
+                            </p>
+                        {% endif %}
+                    </div>
                 </div>
-            </div>
             {% endif %}
         {% endif %}
-        <style>
-            .tab-content{
-                display: none;
-            }
-        </style>
-        <script>
-            function displayTab(tabName) {
-                let i, content, buttons;
+    <!-- End SSL block -->
 
-                content = document.getElementsByClassName("tab-content");
-            for (i = 0; i < content.length; i++) {
-                content[i].style.display = "none";
-            }
-
-            buttons = document.getElementsByClassName("tab-button");
-            for (i = 0; i < buttons.length; i++) {
-                buttons[i].className = buttons[i].className.replace(" active", "");
-            }
-
-            document.getElementById(tabName).style.display = "block";
-                    }
-        </script>
-
+    <!-- Tab Block -->
+        <!-- Tab buttons block -->
         <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('docker-containers')">
-            <i class="material-icons" style="vertical-align:middle; font-size:16px;">border_all</i> Running containers</button>
+            <i class="material-icons btn_icon">border_all</i> Running containers</button>
         <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('self-hosted')">
-            <i class="material-icons" style="vertical-align:middle; font-size:16px;">pages</i> Available web pages</button>
+            <i class="material-icons btn_icon">pages</i> Available web pages</button>
         <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('installed-apps')">
-            <i class="material-icons" style="vertical-align:middle; font-size:16px;">apps</i> Installed apps</button>
+            <i class="material-icons btn_icon">apps</i> Installed apps</button>
+        <!-- End Tab buttons block -->
+
         {% if container_list %}
-            <div id="docker-containers" class="tab-content" style="display: block">
-            <h3 style='margin-top:30px'>Running containers</h3>
+            <!-- Running containers TAB -->
+            <div id="docker-containers" class="tab-content active-tab">
+            <h3 class="tab-title">Running containers</h3>
             <table width="100%">
                 <thead>
                     <tr>
@@ -94,20 +89,26 @@
                         </td>
                         <td width="250px">
                             {% if container['status'] == 'running' %}
-                            <span style="display:inline-block; padding:6px 12px; border-radius:3px">
-                                <i class="tiny material-icons" style="color: #4caf50">fiber_manual_record</i> <span>{{container['status']}}</span>
+                            <span class='container-status'>
+                                <i class="tiny material-icons active">fiber_manual_record</i> <span>{{container['status']}}</span>
                             </span>
                             {% else %}
-                            <span style="background: #f44336; color:#000; display:inline-block; padding:6px 12px; border-radius:3px">{{container['status']}}</span>
+                            <span class='container-status'>
+                                <i class="tiny material-icons paused">fiber_manual_record</i> <span>{{container['status']}}</span>
+                            </span>
                             {% endif %}
-                            <a class="waves-effect waves-light btn modal-trigger" href="/restart/{{container['name']}}">
-                                <i class="material-icons" style="vertical-align:middle; font-size:16px;">autorenew</i>
-                                Restart
-                            </a>
+                        <a class='dropdown-trigger btn' href='#' data-target='action_{{ container['name'] }}'>Action<i class="material-icons right btn_icon" >arrow_drop_down</i></a>
+
+                          <!-- Dropdown Buttons -->
+                        <ul id='action_{{ container['name'] }}' class='dropdown-content'>
+                            <li><a href="/restart/{{ container['name'] }}">Restart</a></li>
+                            <li><a href="/pause/{{ container['name'] }}">Pause</a></li>
+
+                        </ul>
                         </td>
                         <td width="170px" style="text-align: right">
                             <a class="waves-effect waves-light btn modal-trigger" href="#modal_{{container['name']}}">
-                                <i class="material-icons" style="vertical-align:middle; font-size:16px;">history</i>
+                                <i class="material-icons btn_icon">history</i>
                                 View logs
                             </a>
                         </td>
@@ -116,8 +117,11 @@
                 </tbody>
             </table>
             </div>
+            <!-- End Running containers TAB -->
+
+            <!-- Self-hosted TAB -->
             <div id="self-hosted" class="tab-content">
-            <h3 style='margin-top:30px'>Available web pages</h3>
+            <h3 class="tab-title">Available web pages</h3>
             <table width="100%">
                 <thead>
                     <tr>
@@ -138,8 +142,6 @@
                                                 {{ ip }}:{{port.port}}
                                             {% endif %}
                                             </a><br>
-
-
                                     </td>
                                     <td>{{container['name']}}</td>
                                 </tr>
@@ -149,30 +151,8 @@
                 </tbody>
             </table>
             </div>
-
-            <div id="installed-apps" class="tab-content">
-            <h3 style='margin-top:30px'>Installed Applications</h3>
-            <table width="100%">
-                <thead>
-                    <tr>
-                        <th>Application</th>
-                        <th>Version</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for app_info in apps_info %}
-                                 <tr>
-                                    <td>
-                                        {{ app_info['name'] }}<br>
-
-
-                                    </td>
-                                    <td>{{ app_info['version'] }}</td>
-                                </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            </div>
+            <!-- End Self-hosted TAB -->
+            <!-- Modal windows Block -->
             {% for container in container_list %}
             <div id="modal_{{container['name']}}" class="modal">
                 <div class="modal-content">
@@ -181,34 +161,41 @@
                 </div>
               </div>
             {% endfor %}
+            <!-- End Modal windows block -->
         {% endif %}
+        <div id="installed-apps" class="tab-content">
+                <h3 class="tab-title">Installed Applications</h3>
+                <table width="100%">
+                    <thead>
+                        <tr>
+                            <th>Application</th>
+                            <th>Version</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for app_info in apps_info %}
+                             <tr>
+                                <td>{{ app_info['name'] }}<br></td>
+                                <td>{{ app_info['version'] }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                </div>
+    <!-- End Tab block -->
     </div>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/js/materialize.min.js"></script>
     <script>
     document.addEventListener('DOMContentLoaded', function() {
         var elems = document.querySelectorAll('.modal');
         var instances = M.Modal.init(elems);
     });
-    </script>
-    <style>
-        .footer-basic {
-            position: fixed;
-            left: 0;
-            bottom: 0;
-            width: 100%;
-            padding:40px 0;
-            background-color:#ffffff;
-            color:#4b4c4d;
-        }
-        .footer-basic .copyright {
-            margin-top:15px;
-            text-align:center;
-            font-size:20px;
-            color:#aaa;
-            margin-bottom:0;
-        }
 
-    </style>
+    $(document).ready(function(){
+    $('.modal').modal();
+    $('.dropdown-trigger').dropdown();
+    });
+
+    </script>
     <div class="footer-basic">
             <footer>
                 <p class="copyright">Status panel version {{ panel_version }}</p>

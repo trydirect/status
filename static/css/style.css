@@ -1,0 +1,29 @@
+.footer-basic {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    padding:40px 0;
+    background-color:#ffffff;
+    color:#4b4c4d;
+}
+.footer-basic .copyright {
+    margin-top:15px;
+    text-align:center;
+    font-size:20px;
+    color:#aaa;
+    margin-bottom:0;
+}
+.nav-buttons{
+    float:right;
+    display:inline-block;
+    margin:15px 0 0
+}
+a.nav-title{
+    color:rgba(0,0,0,0.7);
+    text-decoration:none;
+}
+div.nav-title{
+    padding:10px 0;
+    font-size:18px;
+}
