@@ -39,17 +39,22 @@
                 <button disabled class="btn waves-effect waves-light" >
                     <i class="large material-icons btn_icon" >lock</i> Enable SSL
                 </button> <br />
-                You <b>can't enable</b> SSL because the DNS are not propagated yet to this IP
-
-
+                <div class="card horizontal">
+                    <div class="card-content">
+                        You <b>can't enable</b> SSL because the DNS are not propagated yet to this IP
+                        <a title="What is Domain IP?" target="_blank" href="https://try.direct/explains/what-is-dns-propagation">
+                            <i class="material-icons btn_icon">help</i>
+                        </a>
+                        </div>
+                </div>
                 <div class="card horizontal">
                     <div class="card-content">
                         {% if ip %}
                             <p>Server IP: {{ip}}</p>
                         {% endif %}
                         {% if domainIp %}
-                            <p>Domain Ip : {{domainIp}}
-                                <a title="What is Domain Ip?" href="https://try.direct/">
+                            <p>Your domain "A" record is set to: {{domainIp}}
+                                <a title="What is Domain IP address?" target="_blank" href="https://try.direct/explains/what-is-domain-ip-address">
                                     <i class="material-icons btn_icon">help</i>
                                 </a>
                             </p>
@@ -59,7 +64,6 @@
             {% endif %}
         {% endif %}
     <!-- End SSL block -->
-
     <!-- Tab Block -->
         <!-- Tab buttons block -->
         <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('docker-containers')">
@@ -198,7 +202,7 @@
     </script>
     <div class="footer-basic">
             <footer>
-                <p class="copyright">Version: {{ panel_version }}</p>
+                <p class="copyright">v{{ panel_version }}</p>
             </footer>
         </div>
 </body>
