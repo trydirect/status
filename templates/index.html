@@ -16,8 +16,8 @@
             <i class="material-icons btn_icon">logout</i> Logout
         </a>
          <div class="nav-title">
-            <a href="http://try.direct" class="nav-title" target="_blank">
-                <img width="90" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status_90x15.png.png" title="Minimal Docker Status Panel">
+            <a href="/" class="nav-title" target="_blank">
+                <img src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status_90x15.png.png" title="Minimal docker container management panel">
             </a>
         </div>
     <!-- End NavBar block -->
@@ -45,7 +45,7 @@
                 <div class="card horizontal">
                     <div class="card-content">
                         {% if ip %}
-                            <p>Server Ip : {{ip}}</p>
+                            <p>Server IP: {{ip}}</p>
                         {% endif %}
                         {% if domainIp %}
                             <p>Domain Ip : {{domainIp}}
@@ -65,7 +65,7 @@
         <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('docker-containers')">
             <i class="material-icons btn_icon">border_all</i> Running containers</button>
         <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('self-hosted')">
-            <i class="material-icons btn_icon">pages</i> Available web pages</button>
+            <i class="material-icons btn_icon">pages</i> WEB access</button>
         <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('installed-apps')">
             <i class="material-icons btn_icon">apps</i> Installed apps</button>
         <!-- End Tab buttons block -->
@@ -98,13 +98,12 @@
                                 <i class="tiny material-icons paused">fiber_manual_record</i> <span>{{container['status']}}</span>
                             </span>
                             {% endif %}
-                        <a class='dropdown-trigger btn' href='#' data-target='action_{{ container['name'] }}'>Action<i class="material-icons right btn_icon" >arrow_drop_down</i></a>
+                        <a class="dropdown-trigger btn" href="#" data-target="action_{{ container['name'] }}">Action<i class="material-icons right btn_icon" >arrow_drop_down</i></a>
 
                           <!-- Dropdown Buttons -->
-                        <ul id='action_{{ container['name'] }}' class='dropdown-content'>
+                        <ul id="action_{{ container['name'] }}" class="dropdown-content">
                             <li><a href="/restart/{{ container['name'] }}">Restart</a></li>
                             <li><a href="/pause/{{ container['name'] }}">Pause</a></li>
-
                         </ul>
                         </td>
                         <td width="170px" style="text-align: right">
@@ -199,7 +198,7 @@
     </script>
     <div class="footer-basic">
             <footer>
-                <p class="copyright">Status panel version {{ panel_version }}</p>
+                <p class="copyright">Version: {{ panel_version }}</p>
             </footer>
         </div>
 </body>

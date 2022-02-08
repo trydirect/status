@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.com/trydirect/status.svg?branch=master)](https://travis-ci.com/trydirect/status)
+[![Docker CI/CD](https://github.com/trydirect/status/actions/workflows/ci.yml/badge.svg)](https://github.com/trydirect/status/actions/workflows/ci.yml)
 ![Docker Stars](https://img.shields.io/docker/stars/trydirect/status.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/trydirect/status.svg)
 ![Docker Automated](https://img.shields.io/docker/cloud/automated/trydirect/status.svg)
