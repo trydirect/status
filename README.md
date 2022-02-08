@@ -3,6 +3,7 @@
 ![Docker Pulls](https://img.shields.io/docker/pulls/trydirect/status.svg)
 ![Docker Automated](https://img.shields.io/docker/cloud/automated/trydirect/status.svg)
 ![Docker Build](https://img.shields.io/docker/cloud/build/trydirect/status.svg)
+<a href="https://discord.gg/nsjje55wuu"><img alt="Discord Chat" src="https://img.shields.io/discord/578119430391988232"></a>
 [![Gitter chat](https://badges.gitter.im/trydirect/community.png)](https://gitter.im/try-direct/community)
 <br><br><br><br>
 <div align="center">
@@ -52,7 +53,9 @@ $ docker-compose -f docker-compose-build.yml build
 
 
 ## Contributing
-
+<p align="center">
+  <a href="https://discord.gg/nsjje55wuu"><img alt="Discord Chat" src="https://img.shields.io/discord/578119430391988232"></a>
+</p>
 1. Fork it (<https://github.com/trydirect/status/fork>)
 2. Create your feature branch (`git checkout -b feature/fooBar`)
 3. Commit your changes (`git commit -am 'Add some fooBar'`)
