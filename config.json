@@ -1,17 +1,17 @@
 {
 	"ssl":"letsencrypt",
-	"domain":"try.direct",
+	"domain":"example.com",
 	"reqdata" : {
 		"country": "US",
 		"state": "Texas",
 		"locality": "Texas",
-		"organization":"TryDirect",
+		"organization":"Example",
 		"organizationalunit": "IT",
-		"email": "info@try.direct",
-		"commonname": "try.direct"
+		"email": "info@example.com",
+		"commonname": "example.com"
 	},
 	"project":"status",
   	"container":"nginx",
 	"apps_info": "phpMyAdmin-5,MySQL-5,PHP-7,Apache-2,Redis-5",
-	"subdomains": {"prod": "prod.try.direct"}}
-
+	"subdomains": {"prod": "prod.example.com"}
+}
