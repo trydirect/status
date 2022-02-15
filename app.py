@@ -2,6 +2,8 @@ import socket
 import json
 import os
 import secrets
+from typing import Union, Any
+
 import docker
 import logging
 from collections import OrderedDict
@@ -174,9 +176,17 @@ def login():
         return render_template('login.html')
 
 
-def mk_cmd():
-    domain_list = config['subdomains']
-    domains = '{}'.format(' '.join(map("-d {0} ".format, domain_list.values())))
+def mk_cmd(_config: dict[str, Union[Any, Any]] = None):
+    # a string of domains and subdomains is expected in the newer config.json format.
+    # domains are separated by comma
+    doms = _config or config['subdomains']
+    # print(f"doms = {doms}")
+    if isinstance(doms, dict):
+        domains: str = '{}'.format(' '.join(map("-d {0} ".format, doms.values())))
+    elif doms is not None and isinstance(doms, str):
+        domains: str = '{}'.format(' '.join(map("-d {0} ".format, doms.split(','))))
+    else:
+        domains = ''
     # Run registration command (with client email)
     reg_cmd = f"certbot register --email {config['reqdata']['email']} --agree-tos -n"
     # Run command to generate certificates with redirect HTTP traffic to HTTPS, removing HTTP access

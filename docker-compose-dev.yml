@@ -1,9 +1,9 @@
 version: '2.2'
 
 services:
-  web:
+  statuspanel:
     image: status
-    container_name: status
+    container_name: statuspanel
     ports:
      - "5000:5000"
     volumes:
