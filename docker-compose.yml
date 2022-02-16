@@ -1,15 +1,17 @@
 version: '2.2'
 
 services:
-  web:
-    image: trydirect/status
-    container_name: status
+  statuspanel:
+    image: trydirect/status:latest
+    container_name: statuspanel
     ports:
-     - "5000:5000"
+     - "5001:5000"
     volumes:
      - .:/app
      - /var/run/docker.sock:/var/run/docker.sock
-     - /data/encrypted:/data/encrypted
+#     - /data/encrypted:/data/encrypted
+    entrypoint: [""]
+#    command: ["bash", "-c", "sleep infinity"]
     env_file:
       - .env
     environment:

@@ -1,18 +1,21 @@
-[![Build Status](https://travis-ci.com/trydirect/status.svg?branch=master)](https://travis-ci.com/trydirect/status)
-![Build Status](https://github.com/trydirect/status/actions/workflows/ci/badge.svg)
+[![Docker CI/CD](https://github.com/trydirect/status/actions/workflows/ci.yml/badge.svg)](https://github.com/trydirect/status/actions/workflows/ci.yml)
 ![Docker Stars](https://img.shields.io/docker/stars/trydirect/status.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/trydirect/status.svg)
 ![Docker Automated](https://img.shields.io/docker/cloud/automated/trydirect/status.svg)
 ![Docker Build](https://img.shields.io/docker/cloud/build/trydirect/status.svg)
+<a href="https://discord.gg/nsjje55wuu"><img alt="Discord" src="https://img.shields.io/discord/578119430391988232?label=discord"></a>
 [![Gitter chat](https://badges.gitter.im/trydirect/community.png)](https://gitter.im/try-direct/community)
+<br><br><br><br>
+<div align="center">
+<img width="300" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status.png"> 
+ </div>
+ <div align="center">
+A minimal docker container management panel written in Python / Flask
+</div>
+<br><br><br><br>
 
-# Minimal Docker Status Panel
 
-## About
-Docker Status Panel - is a minimal docker container management panel written in Python / Flask microframework.
-
-
-<img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://user-images.githubusercontent.com/42473/58089800-5ae5cd80-7bce-11e9-81ab-b11e9a5ec125.png">
+<center><img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/screenshot.png"></center>
 
 ## Under the hood
  * Python 3.9
@@ -50,6 +53,7 @@ $ docker-compose -f docker-compose-build.yml build
 
 
 ## Contributing
+<a href="https://discord.gg/nsjje55wuu"><img alt="Discord" src="https://img.shields.io/discord/578119430391988232?label=discord"></a>
 
 1. Fork it (<https://github.com/trydirect/status/fork>)
 2. Create your feature branch (`git checkout -b feature/fooBar`)

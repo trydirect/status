@@ -2,6 +2,8 @@ import socket
 import json
 import os
 import secrets
+from typing import Union, Any
+
 import docker
 import logging
 from collections import OrderedDict
@@ -22,6 +24,7 @@ BACKUP_FILE_NAME = 'backup.tar.gz.cpt'
 BACKUP_DIR = '/data/encrypted'
 logging.basicConfig(format=FORMAT)
 log.setLevel(logging.ERROR)
+client = docker.DockerClient(base_url=os.environ.get('DOCKER_SOCK'))
 
 with open('config.json', 'r') as f:
     config = json.load(f, object_pairs_hook=OrderedDict)
@@ -34,6 +37,30 @@ app.config.update(
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
+
+
+def get_apps_name_version(apps_info: str) -> list:
+    """
+        Get apps_info string with format => appName-version
+        And returns next data structure: [
+            {
+                'name':'appName',
+                'version':'version'
+            }
+        ]
+    """
+    app_list = apps_info.split(',')
+    result: list = []
+    for i in range(len(app_list)):
+        temp_list = app_list[i].split('-')
+        result.append({
+            'name': temp_list[0],
+            'version': temp_list[1]
+        })
+    return result
+
+
+config['apps_info'] = get_apps_name_version(config.get('apps_info', ''))
 
 
 def check_hash(hash: str) -> dict:
@@ -64,11 +91,10 @@ class User(UserMixin):
         return "%d/%s" % (self.id, self.name)
 
 
-def get_self_hosted_services(port_bindings: dict, container, ip) -> list:
+def get_self_hosted_services(port_bindings: dict, ip) -> list:
     """
     Check if port opened in container is for self-hosted service
     :param port_bindings:
-    :param container:
     :return: list of ports for self-hosted services with their titles or empty list [{port:1234, title:Status Panel}]
     """
     service_ports: list = list()
@@ -114,12 +140,11 @@ def home():
     ip = get_ip_address()
     if 'ssl_enabled' not in session:
         session['ssl_enabled'] = False
-    client = docker.DockerClient(base_url='unix://var/run/docker.sock')
     container_list = []
     containers = client.containers.list()
     for container in containers:
         logs = ''.join([lg for lg in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
-        ports = get_self_hosted_services(container.attrs['HostConfig']['PortBindings'], container, ip)
+        ports = get_self_hosted_services(container.attrs['HostConfig']['PortBindings'], ip)
         log.debug(ports)
         if container.name != 'status':
             container_list.append({"name": container.name, "status": container.status, "logs": logs, "ports": ports})
@@ -132,7 +157,8 @@ def home():
     can_enable = ip == domain_ip
     return render_template('index.html', ip=ip, domainIp=domain_ip, can_enable=can_enable,
                            container_list=container_list, ssl_enabled=session['ssl_enabled'],
-                           domain=config.get('domain'))
+                           domain=config.get('domain'), apps_info=config.get('apps_info'),
+                           panel_version='0.1.0')
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -150,9 +176,17 @@ def login():
         return render_template('login.html')
 
 
-def mk_cmd():
-    domain_list = config['subdomains']
-    domains = '{}'.format(' '.join(map("-d {0} ".format, domain_list.values())))
+def mk_cmd(_config: dict[str, Union[Any, Any]] = None):
+    # a string of domains and subdomains is expected in the newer config.json format.
+    # domains are separated by comma
+    doms = _config or config['subdomains']
+    # print(f"doms = {doms}")
+    if isinstance(doms, dict):
+        domains: str = '{}'.format(' '.join(map("-d {0} ".format, doms.values())))
+    elif doms is not None and isinstance(doms, str):
+        domains: str = '{}'.format(' '.join(map("-d {0} ".format, doms.split(','))))
+    else:
+        domains = ''
     # Run registration command (with client email)
     reg_cmd = f"certbot register --email {config['reqdata']['email']} --agree-tos -n"
     # Run command to generate certificates with redirect HTTP traffic to HTTPS, removing HTTP access
@@ -168,7 +202,6 @@ def mk_cmd():
 def enable_ssl():
 
     domain_list = config['subdomains']
-    client = docker.DockerClient(base_url='unix://var/run/docker.sock')
     client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(
         "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge"
     )
@@ -203,8 +236,6 @@ def enable_ssl():
 @login_required
 def disable_ssl():
     domain_list = config['subdomains']
-    client = docker.DockerClient(base_url='unix://var/run/docker.sock')
-
     try:
         log.debug('Disable SSL')
         for fname in domain_list:
@@ -222,7 +253,6 @@ def disable_ssl():
 @login_required
 def restart(container):
     try:
-        client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).restart()
     except Exception as e:
         log.exception(e)
@@ -233,7 +263,6 @@ def restart(container):
 @login_required
 def stop(container):
     try:
-        client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).stop()
     except Exception as e:
         log.exception(e)
@@ -244,7 +273,6 @@ def stop(container):
 @login_required
 def pause(container):
     try:
-        client = docker.DockerClient(base_url='unix://var/run/docker.sock')
         client.containers.get(container).pause()
     except Exception as e:
         log.exception(e)

@@ -1,0 +1,28 @@
+FROM python:3.9-slim as builder
+
+LABEL maintainer="info@try.direct"
+
+RUN apt-get update &&  apt-get install --no-install-recommends -y -qq python3-pip python-dev gcc ccache patchelf \
+    build-essential && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+RUN groupadd -r -g 2000 status
+RUN useradd -u 2000 -g 2000 -m -d /home/status -s /bin/bash status && adduser status sudo
+
+WORKDIR /app
+COPY requirements.txt .
+COPY app.py .
+COPY config.json .
+COPY templates .
+RUN pip3 install -r requirements.txt
+RUN pip3 install nuitka
+
+RUN python3 -m nuitka --follow-imports --low-memory --standalone app.py
+RUN rm -f /app/app.py
+
+FROM python:3.9-slim as production
+WORKDIR /app
+COPY --from=builder /app/* .
+COPY ./templates /app/templates
+COPY ./static /app/static
+#USER 2000
+CMD ["/app/app"]
