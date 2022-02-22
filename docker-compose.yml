@@ -9,8 +9,8 @@ services:
     volumes:
      - .:/app
      - /var/run/docker.sock:/var/run/docker.sock
-     - /data/encrypted:/data/encrypted
-#    entrypoint: [""]
+#     - /data/encrypted:/data/encrypted
+    entrypoint: [""]
 #    command: ["bash", "-c", "sleep infinity"]
     env_file:
       - .env
