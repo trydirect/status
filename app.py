@@ -158,7 +158,7 @@ def home():
     return render_template('index.html', ip=ip, domainIp=domain_ip, can_enable=can_enable,
                            container_list=container_list, ssl_enabled=session['ssl_enabled'],
                            domain=config.get('domain'), apps_info=config.get('apps_info'),
-                           panel_version='0.1.0')
+                           panel_version='0.1.0', ip_help_link=os.environ.get('IP_HELP_LINK'))
 
 
 @app.route("/login", methods=["GET", "POST"])

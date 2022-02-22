@@ -42,7 +42,7 @@
                 <div class="card horizontal">
                     <div class="card-content">
                         You <b>can't enable</b> SSL because the DNS are not propagated yet to this IP
-                        <a title="What is Domain IP?" target="_blank" href="https://try.direct/explains/what-is-dns-propagation">
+                        <a title="What is Domain IP?" target="_blank" href="{{ ip_help_link }}">
                             <i class="material-icons btn_icon">help</i>
                         </a>
                         </div>
@@ -54,7 +54,7 @@
                         {% endif %}
                         {% if domainIp %}
                             <p>Your domain "A" record is set to: {{domainIp}}
-                                <a title="What is Domain IP address?" target="_blank" href="https://try.direct/explains/what-is-domain-ip-address">
+                                <a title="What is Domain IP address?" target="_blank" href="{{ ip_help_link }}">
                                     <i class="material-icons btn_icon">help</i>
                                 </a>
                             </p>
