@@ -3,7 +3,7 @@ import json
 import os
 import secrets
 from typing import Union, Any
-
+from werkzeug.exceptions import HTTPException
 import docker
 import logging
 from collections import OrderedDict
@@ -13,9 +13,8 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from requests import get
 from flask import jsonify
 from flask import make_response, send_file
-from flask import Flask, Response, redirect, request, session, render_template
+from flask import Flask, Response, redirect, request, session, render_template, abort
 from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
-
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +36,11 @@ app.config.update(
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
+
+
+@app.errorhandler(HTTPException)
+def handle_exception(e):
+    return render_template('error.html', code=e.code, message=e.description, name=e.name)
 
 
 def get_apps_name_version(apps_info: str) -> list:
@@ -200,7 +204,6 @@ def mk_cmd(_config: dict[str, Union[Any, Any]] = None):
 @app.route('/enable_ssl')
 @login_required
 def enable_ssl():
-
     domain_list = config['subdomains']
     client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(
         "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge"
