@@ -3,7 +3,7 @@ import json
 import os
 import secrets
 from typing import Union, Any
-
+from werkzeug.exceptions import HTTPException
 import docker
 import logging
 from collections import OrderedDict
@@ -13,9 +13,8 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from requests import get
 from flask import jsonify
 from flask import make_response, send_file
-from flask import Flask, Response, redirect, request, session, render_template
+from flask import Flask, Response, redirect, request, session, render_template, abort
 from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
-
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +26,12 @@ log.setLevel(logging.ERROR)
 client = docker.DockerClient(base_url=os.environ.get('DOCKER_SOCK'))
 
 with open('config.json', 'r') as f:
-    config = json.load(f, object_pairs_hook=OrderedDict)
+    try:
+        config = json.load(f, object_pairs_hook=OrderedDict)
+        config_errors = None
+    except Exception:
+        config = dict()
+        config_errors = 'Configuration file config.json is not valid or missing'
 
 app = Flask(__name__)
 app.config.update(
@@ -37,6 +41,11 @@ app.config.update(
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
+
+
+@app.errorhandler(HTTPException)
+def handle_exception(e):
+    return render_template('error.html', code=e.code, message=e.description, name=e.name)
 
 
 def get_apps_name_version(apps_info: str) -> list:
@@ -49,6 +58,8 @@ def get_apps_name_version(apps_info: str) -> list:
             }
         ]
     """
+    if not apps_info:
+        return list()
     app_list = apps_info.split(',')
     result: list = []
     for i in range(len(app_list)):
@@ -158,7 +169,7 @@ def home():
     return render_template('index.html', ip=ip, domainIp=domain_ip, can_enable=can_enable,
                            container_list=container_list, ssl_enabled=session['ssl_enabled'],
                            domain=config.get('domain'), apps_info=config.get('apps_info'),
-                           panel_version='0.1.0')
+                           panel_version='0.1.0', ip_help_link=os.environ.get('IP_HELP_LINK'), errors=config_errors)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -200,7 +211,6 @@ def mk_cmd(_config: dict[str, Union[Any, Any]] = None):
 @app.route('/enable_ssl')
 @login_required
 def enable_ssl():
-
     domain_list = config['subdomains']
     client.containers.get(os.environ.get('NGINX_CONTAINER')).exec_run(
         "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge"
