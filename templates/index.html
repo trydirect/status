@@ -63,6 +63,13 @@
                 </div>
             {% endif %}
         {% endif %}
+        {% if errors %}
+        <div class="card horizontal red accent-4">
+                    <div class="card-content">
+                            <p class="white-text">{{errors}}</p>
+                    </div>
+                </div>
+        {% endif %}
     <!-- End SSL block -->
     <!-- Tab Block -->
         <!-- Tab buttons block -->
