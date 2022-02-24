@@ -13,3 +13,21 @@ function displayTab(tabName) {
 
     document.getElementById(tabName).style.display = "block";
 }
+
+function checkOnUpdate(url){
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url);
+
+    xhr.setRequestHeader("Accept", "*/*");
+      xhr.onreadystatechange = function () {
+          if (xhr.readyState === 4) {
+              let r = JSON.parse(xhr.responseText);
+              if (r["upd"] === true) {
+                  document.getElementById('update_crd').style.display = 'block';
+                  document.getElementById('notification').innerText = 'new_releases';
+                  document.getElementById('notifyLink').innerHTML += 'New Messages!';
+              }
+          }
+      };
+    xhr.send()
+}

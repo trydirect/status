@@ -14,16 +14,14 @@
     color:#aaa;
     margin-bottom:0;
 }
-.nav-buttons{
-    float:right;
-    display:inline-block;
-    margin:15px 0 0
-}
-a.nav-title{
-    color:rgba(0,0,0,0.7);
-    text-decoration:none;
+nav{
+    background-color: transparent;
+    box-shadow: none
 }
 div.nav-title{
     padding:10px 0;
     font-size:18px;
+}
+.nav-ico{
+    color: #26a69a;
 }

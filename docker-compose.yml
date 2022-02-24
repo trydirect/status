@@ -1,18 +1,37 @@
 version: '2.2'
 
 services:
+  watchtower:
+    image: containrrr/watchtower
+    container_name: upd_watcher
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_HTTP_API_TOKEN=checkUpdate
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_MONITOR_ONLY=false
+      - WATCHTOWER_HTTP_API_METRICS=true
+      - WATCHTOWER_HTTP_API_PERIODIC_POLLS=false
+    command: --interval 25 --debug --http-api-update
+    ports:
+      - 8080:8080
   statuspanel:
     image: trydirect/status:latest
-    container_name: statuspanel
+    #build: .
+    container_name: status
+    links:
+      - watchtower:watchtower
     ports:
      - "5001:5000"
     volumes:
-     - .:/app
+#     - .:/app
      - /var/run/docker.sock:/var/run/docker.sock
-#     - /data/encrypted:/data/encrypted
-    entrypoint: [""]
+     - /data/encrypted:/data/encrypted
+#    entrypoint: [""]
 #    command: ["bash", "-c", "sleep infinity"]
     env_file:
       - .env
     environment:
       - NGINX_CONTAINER=nginx
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"

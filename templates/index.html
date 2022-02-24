@@ -9,17 +9,31 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="{{ url_for('static', filename='js/tab-controller.js') }}"></script>
 </head>
-<body>
+<body onload="checkOnUpdate('{{ url_for('check_update') }}');">
     <div class="container">
-    <!-- NavBar Block -->
-        <a href="/logout" class="nav-buttons">
-            <i class="material-icons btn_icon">logout</i> Logout
-        </a>
-         <div class="nav-title">
-            <a href="/" class="nav-title" target="_blank">
+        <!-- NavBar Block -->
+        <nav>
+        <div class="nav-wrapper">
+          <a href="/" class="nav-title" target="_blank">
                 <img src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status_90x15.png.png" title="Minimal docker container management panel">
             </a>
+          <ul id="nav-mobile" class="right">
+            <li><a style="color: #26a69a" href="#notify" id="notifyLink" class="modal-trigger"><i id="notification" class="nav-ico material-icons right">notifications</i></a></li>
+            <li><a href="/logout"><i class="nav-ico material-icons">logout</i></a></li>
+          </ul>
         </div>
+      </nav>
+        <div id="notify" class="modal">
+                <div class="modal-content">
+                    <h4> Notifications </h4>
+                    <p>
+                        <ol>
+                        <li id="update_crd" style="display: none">Status panel released new version of application. <a href="{{ url_for('update') }}">Upgrade</a></li>
+                        </ol>
+                    </p>
+                </div>
+              </div>
+
     <!-- End NavBar block -->
     <!-- SSL Block -->
         {% if ssl_enabled %}
