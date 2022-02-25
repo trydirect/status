@@ -12,8 +12,8 @@ from bs4 import BeautifulSoup
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from requests import get
 from flask import jsonify
-from flask import make_response, send_file
-from flask import Flask, Response, redirect, request, session, render_template, abort
+from flask import make_response, send_file, jsonify
+from flask import Flask, Response, redirect, request, session, render_template
 from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
 
 log = logging.getLogger(__name__)
@@ -145,6 +145,30 @@ def get_ip_address():
     return 'undefined'
 
 
+@app.route('/update')
+def update():
+    from requests.structures import CaseInsensitiveDict
+    url = 'http://watchtower:8080/v1/update'
+    headers = CaseInsensitiveDict()
+    headers["Authorization"] = "Bearer checkUpdate"
+    get(url, headers=headers)
+    return render_template('thanks.html', ver=os.environ.get('VERSION'))
+
+
+@app.route('/checkUpdate')
+def check_update():
+    now_version = client.containers.get('status').image
+    dh_version = client.images.pull('trydirect/status', 'latest')
+    need: bool = False
+    if now_version.id != dh_version.id:
+        need = True
+    return jsonify({
+        'now': now_version.id,
+        'hub': dh_version.id,
+        'upd': need,
+    })
+
+
 @app.route('/')
 @login_required
 def home():
@@ -157,7 +181,7 @@ def home():
         logs = ''.join([lg for lg in container.logs(tail=100, follow=False, stdout=True).decode('utf-8')])
         ports = get_self_hosted_services(container.attrs['HostConfig']['PortBindings'], ip)
         log.debug(ports)
-        if container.name != 'status':
+        if container.name not in ['status', 'upd_watcher']:
             container_list.append({"name": container.name, "status": container.status, "logs": logs, "ports": ports})
 
     try:
@@ -169,7 +193,8 @@ def home():
     return render_template('index.html', ip=ip, domainIp=domain_ip, can_enable=can_enable,
                            container_list=container_list, ssl_enabled=session['ssl_enabled'],
                            domain=config.get('domain'), apps_info=config.get('apps_info'),
-                           panel_version='0.1.0', ip_help_link=os.environ.get('IP_HELP_LINK'), errors=config_errors)
+                           panel_version=os.environ.get('VERSION'), ip_help_link=os.environ.get('IP_HELP_LINK'),
+                           errors=config_errors)
 
 
 @app.route("/login", methods=["GET", "POST"])
