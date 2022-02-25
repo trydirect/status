@@ -173,6 +173,7 @@ def check_update():
 @login_required
 def home():
     ip = get_ip_address()
+    ip = None
     if 'ssl_enabled' not in session:
         session['ssl_enabled'] = False
     container_list = []

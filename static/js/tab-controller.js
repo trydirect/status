@@ -24,10 +24,10 @@ function checkOnUpdate(url){
               let r = JSON.parse(xhr.responseText);
               if (r["upd"] === true) {
                   document.getElementById('update_crd').style.display = 'block';
-                  document.getElementById('notification').innerText = 'new_releases';
-                  document.getElementById('notifyLink').innerHTML += 'New Messages!';
+                  document.getElementById('notifyCounter').removeAttribute('hidden');
               }
           }
       };
-    xhr.send()
+    xhr.send();
+    setInterval(() => checkOnUpdate(url), 200000);
 }
