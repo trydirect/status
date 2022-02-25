@@ -2,8 +2,7 @@ version: '2.2'
 
 services:
   statuspanel:
-    #image: trydirect/status:latest
-    build: .
+    image: trydirect/status:latest
     container_name: statuspanel
     ports:
      - "5001:5000"
