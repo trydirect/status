@@ -16,8 +16,8 @@ services:
     ports:
       - 8080:8080
   statuspanel:
-    #image: trydirect/status:latest
-    build: .
+    image: trydirect/status:latest
+    #build: .
     container_name: status
     links:
       - watchtower:watchtower
