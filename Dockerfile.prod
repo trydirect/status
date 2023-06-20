@@ -2,7 +2,7 @@ FROM python:3.9-slim as builder
 
 LABEL maintainer="info@try.direct"
 
-RUN apt-get update &&  apt-get install --no-install-recommends -y -qq python3-pip python-dev gcc ccache patchelf \
+RUN apt-get update &&  apt-get install --no-install-recommends -y -qq python3-pip python3-dev gcc ccache patchelf \
     build-essential && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 RUN groupadd -r -g 2000 status
