@@ -4,3 +4,4 @@ venv
 .travis.yml
 .travis
 tests.py
+.ai
