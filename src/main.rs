@@ -1,8 +1,4 @@
-mod agent;
-mod comms;
-mod security;
-mod monitoring;
-mod utils;
+use status_panel::{agent, comms, security, monitoring, utils};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

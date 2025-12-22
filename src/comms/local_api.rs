@@ -3,9 +3,11 @@ use axum::{
     routing::{get, post},
     Router, response::IntoResponse, extract::Path,
     http::StatusCode, Json, response::Html, response::Redirect,
-    extract::Form, extract::ConnectInfo, extract::State, extract::WebSocketUpgrade,
+    extract::Form, extract::State, extract::WebSocketUpgrade,
 };
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
@@ -25,6 +27,45 @@ use crate::agent::docker;
 
 type SharedState = Arc<AppState>;
 
+// Extract client IP from ConnectInfo, headers, or fallback to 127.0.0.1
+#[derive(Debug, Clone)]
+struct ClientIp(pub String);
+
+impl<S> FromRequestParts<S> for ClientIp
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // Prefer SocketAddr inserted by Axum's connect info middleware
+        if let Some(addr) = parts.extensions.get::<SocketAddr>() {
+            return Ok(ClientIp(addr.ip().to_string()));
+        }
+
+        // Check common proxy headers
+        if let Some(forwarded) = parts.headers.get("x-forwarded-for") {
+            if let Ok(s) = forwarded.to_str() {
+                // Take the first IP if multiple
+                let ip = s.split(',').next().unwrap_or(s).trim().to_string();
+                if !ip.is_empty() {
+                    return Ok(ClientIp(ip));
+                }
+            }
+        }
+        if let Some(real_ip) = parts.headers.get("x-real-ip") {
+            if let Ok(s) = real_ip.to_str() {
+                let ip = s.trim().to_string();
+                if !ip.is_empty() {
+                    return Ok(ClientIp(ip));
+                }
+            }
+        }
+
+        // Fallback for tests or when info is unavailable
+        Ok(ClientIp("127.0.0.1".to_string()))
+    }
+}
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub session_store: SessionStore,
@@ -35,6 +76,7 @@ pub struct AppState {
     pub metrics_store: MetricsStore,
     pub metrics_tx: MetricsTx,
     pub metrics_webhook: Option<String>,
+    pub backup_path: Option<String>,
 }
 
 impl AppState {
@@ -63,6 +105,7 @@ impl AppState {
             metrics_store: Arc::new(tokio::sync::RwLock::new(MetricsSnapshot::default())),
             metrics_tx: broadcast::channel(32).0,
             metrics_webhook: std::env::var("METRICS_WEBHOOK").ok(),
+            backup_path: std::env::var("BACKUP_PATH").ok(),
         }
     }
 }
@@ -313,11 +356,10 @@ async fn pause_container(
 
 // Backup ping endpoint - verify hash and generate new one
 async fn backup_ping(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ClientIp(request_ip): ClientIp,
     Json(req): Json<BackupPingRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
     let allowed_ip = std::env::var("TRYDIRECT_IP").ok();
-    let request_ip = addr.ip().to_string();
 
     // Check if request is from allowed IP
     if let Some(allowed) = allowed_ip {
@@ -338,37 +380,41 @@ async fn backup_ping(
 
     let signer = BackupSigner::new(deployment_hash.as_bytes());
 
-    // Verify the provided hash
-    match signer.verify(&req.hash, 1800) {
-        Ok(_) => {
-            // Generate new hash
-            let new_hash = signer.sign(&deployment_hash)
-                .unwrap_or_else(|_| req.hash.clone());
-            
-            debug!("Backup ping verified from {}", request_ip);
-            Ok(Json(BackupPingResponse {
-                status: "OK".to_string(),
-                hash: Some(new_hash),
-            }))
-        }
-        Err(_) => {
-            error!("Invalid backup ping hash from {}", request_ip);
-            Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Invalid hash".to_string(),
-                }),
-            ))
-        }
+    // Check if hash matches deployment_hash or verify it's a valid signed hash
+    let is_valid = if req.hash == deployment_hash {
+        true
+    } else {
+        // Try to verify as a signed hash (for backward compatibility)
+        signer.verify(&req.hash, 1800).is_ok()
+    };
+
+    if is_valid {
+        // Generate new signed hash
+        let new_hash = signer.sign(&deployment_hash)
+            .unwrap_or_else(|_| deployment_hash.clone());
+        
+        debug!("Backup ping verified from {}", request_ip);
+        Ok(Json(BackupPingResponse {
+            status: "OK".to_string(),
+            hash: Some(new_hash),
+        }))
+    } else {
+        error!("Invalid backup ping hash from {}", request_ip);
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "ERROR".to_string(),
+            }),
+        ))
     }
 }
 
 // Backup download endpoint - send backup file with hash/IP verification
 async fn backup_download(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<SharedState>,
+    ClientIp(request_ip): ClientIp,
     Path((hash, target_ip)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
-    let request_ip = addr.ip().to_string();
 
     // Check if request is from target IP
     if request_ip != target_ip {
@@ -393,11 +439,13 @@ async fn backup_download(
     // Verify hash (30 minute window)
     match signer.verify(&hash, 1800) {
         Ok(_) => {
-            // Check if backup file exists
-            let backup_path = std::env::var("BACKUP_PATH")
-                .unwrap_or_else(|_| "/data/encrypted/backup.tar.gz.cpt".to_string());
+            // Resolve backup path from state (set at startup) to avoid env races in tests
+            let backup_path = state
+                .backup_path
+                .clone()
+                .unwrap_or_else(|| "/data/encrypted/backup.tar.gz.cpt".to_string());
 
-            if !std::path::Path::new(&backup_path).exists() {
+            if !std::path::Path::new(&backup_path).is_file() {
                 error!("Backup file not found: {}", backup_path);
                 return Err((
                     StatusCode::NOT_FOUND,
@@ -410,12 +458,27 @@ async fn backup_download(
             // Read and send backup file
             match tokio::fs::read(&backup_path).await {
                 Ok(content) => {
-                    debug!("Backup downloaded by {}", request_ip);
-                    Ok((
-                        StatusCode::OK,
-                        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-                        content,
-                    ))
+                    // Extract filename for logging and headers
+                    let filename = std::path::Path::new(&backup_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("backup.tar.gz.cpt");
+
+                    debug!("Backup downloaded by {}: {}", request_ip, filename);
+                    
+                    // Use HeaderMap to avoid lifetime issues
+                    use axum::http::HeaderMap;
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/octet-stream".parse().unwrap()
+                    );
+                    headers.insert(
+                        axum::http::header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{}\"", filename).parse().unwrap()
+                    );
+
+                    Ok((StatusCode::OK, headers, content))
                 }
                 Err(e) => {
                     error!("Failed to read backup file: {}", e);
@@ -496,6 +559,10 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/logout", get(logout_handler))
         .route("/backup/ping", post(backup_ping))
         .route("/backup/{hash}/{target_ip}", get(backup_download));
+    // v2.0 scaffolding: agent-side stubs for dashboard endpoints
+    router = router
+        .route("/api/v1/commands/wait/{hash}", get(commands_wait_stub))
+        .route("/api/v1/commands/report", post(commands_report_stub));
 
     #[cfg(feature = "docker")]
     {
@@ -514,6 +581,19 @@ pub fn create_router(state: SharedState) -> Router {
     }
 
     router.with_state(state)
+}
+
+// ------- v2.0 stubs: commands wait/report --------
+use crate::transport::CommandResult;
+
+async fn commands_wait_stub(Path(_hash): Path<String>) -> impl IntoResponse {
+    // Placeholder: return 204 No Content to simulate no commands queued
+    (StatusCode::NO_CONTENT, "").into_response()
+}
+
+async fn commands_report_stub(Json(_res): Json<CommandResult>) -> impl IntoResponse {
+    // Placeholder: accept and return 200 OK
+    (StatusCode::OK, Json(json!({"accepted": true}))).into_response()
 }
 
 pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
