@@ -35,6 +35,9 @@ bollard = { version = "0.19", optional = true, features = ["ssl", "chrono"] }
 # Daemonization
 daemonize = "0.5"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
 [[bin]]
 name = "status"
 path = "src/main.rs"
