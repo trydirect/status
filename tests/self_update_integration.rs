@@ -51,7 +51,9 @@ async fn start_update_job_downloads_and_verifies() {
 
     // Temp file should exist
     let tmp_path = format!("/tmp/status-panel.{}.bin", job_id);
-    let data = tokio::fs::read(&tmp_path).await.expect("temp binary exists");
+    let data = tokio::fs::read(&tmp_path)
+        .await
+        .expect("temp binary exists");
     assert_eq!(data, binary_bytes);
 
     // Cleanup temp file
