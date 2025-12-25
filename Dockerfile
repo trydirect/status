@@ -1,18 +1,21 @@
-FROM python:3.9-slim
-
-LABEL maintainer="info@optimum-web.com"
-RUN apt-get update &&  apt-get install --no-install-recommends -y -qq python3-pip python3-dev \
-    build-essential && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-RUN groupadd -r -g 2000 status
-RUN useradd -u 2000 -g 2000 -m -d /home/status -s /bin/bash status && adduser status sudo
+FROM rust:1.81 as builder
 
 WORKDIR /app
+COPY Cargo.toml .
+COPY src src
 COPY templates templates
-COPY requirements.txt .
-COPY app.py .
-COPY config.json .
-RUN pip3 install -r requirements.txt
+COPY static static
+COPY config.json config.json
+RUN cargo build --release
 
-ENTRYPOINT ["python3"]
-CMD ["app.py"]
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /app/target/release/status /usr/local/bin/status
+COPY templates templates
+COPY static static
+COPY config.json config.json
+ENV RUST_LOG=info
+# Expose API/UI port
+EXPOSE 8080
+CMD ["/usr/local/bin/status", "serve", "--port", "8080", "--with-ui"]
