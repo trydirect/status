@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use std::process::Stdio;
-use tokio::process::{Child, Command};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout as tokio_timeout, Duration};
-use tracing::{debug, warn, error, info};
+use tracing::{debug, error, info, warn};
 
-use crate::commands::timeout::{TimeoutTracker, TimeoutStrategy, TimeoutPhase};
+use crate::commands::timeout::{TimeoutPhase, TimeoutStrategy, TimeoutTracker};
 use crate::transport::{Command as AgentCommand, CommandResult};
 
 /// Result of command execution
@@ -35,7 +35,8 @@ impl ExecutionResult {
             ExecutionStatus::Failed => "failed",
             ExecutionStatus::Timeout => "timeout",
             ExecutionStatus::Killed => "killed",
-        }.to_string();
+        }
+        .to_string();
 
         let mut result_data = serde_json::json!({
             "exit_code": self.exit_code,
@@ -94,13 +95,13 @@ impl CommandExecutor {
         strategy: TimeoutStrategy,
     ) -> Result<ExecutionResult> {
         info!("Executing command: {} (id: {})", command.name, command.id);
-        
+
         let mut tracker = TimeoutTracker::new(strategy.clone());
         let start = std::time::Instant::now();
 
         // Parse command and arguments
         let (cmd_name, args) = self.parse_command(&command.name)?;
-        
+
         // Spawn the process
         let mut child = Command::new(&cmd_name)
             .args(&args)
@@ -130,16 +131,19 @@ impl CommandExecutor {
         // Monitor execution with timeout phases
         let execution_result = loop {
             let current_phase = tracker.current_phase();
-            
+
             // Report phase transitions
             if current_phase != last_phase {
                 let elapsed = tracker.elapsed().as_secs();
-                info!("Command {} entered phase {:?} after {}s", command.id, current_phase, elapsed);
-                
+                info!(
+                    "Command {} entered phase {:?} after {}s",
+                    command.id, current_phase, elapsed
+                );
+
                 if let Some(ref callback) = self.progress_callback {
                     callback(current_phase, elapsed);
                 }
-                
+
                 last_phase = current_phase;
             }
 
@@ -150,7 +154,7 @@ impl CommandExecutor {
                         result = child.wait() => {
                             // Process completed
                             let status = result.context("failed to wait for child")?;
-                            
+
                             // Drain remaining output
                             while let Ok(Some(line)) = stdout_lines.next_line().await {
                                 stdout_output.push_str(&line);
@@ -177,36 +181,39 @@ impl CommandExecutor {
                                 timeout_phase_reached: Some(current_phase),
                             };
                         }
-                        
+
                         Ok(Some(line)) = stdout_lines.next_line() => {
                             stdout_output.push_str(&line);
                             stdout_output.push('\n');
                             tracker.report_progress();
                         }
-                        
+
                         Ok(Some(line)) = stderr_lines.next_line() => {
                             stderr_output.push_str(&line);
                             stderr_output.push('\n');
                             tracker.report_progress();
                         }
-                        
+
                         _ = sleep(strategy.progress_interval()) => {
                             // Check for stalls
                             if tracker.is_stalled() {
-                                warn!("Command {} has stalled (no output for {}s)", 
+                                warn!("Command {} has stalled (no output for {}s)",
                                     command.id, strategy.stall_threshold_secs);
                             }
                         }
                     }
                 }
-                
+
                 TimeoutPhase::HardTermination => {
-                    warn!("Command {} reached hard timeout, attempting graceful termination", command.id);
-                    
+                    warn!(
+                        "Command {} reached hard timeout, attempting graceful termination",
+                        command.id
+                    );
+
                     if strategy.allow_graceful_termination {
                         // Send SIGTERM and wait 30 seconds
                         self.send_sigterm(&mut child, child_id)?;
-                        
+
                         match tokio_timeout(Duration::from_secs(30), child.wait()).await {
                             Ok(Ok(status)) => {
                                 info!("Command {} terminated gracefully", command.id);
@@ -230,14 +237,17 @@ impl CommandExecutor {
                         continue;
                     }
                 }
-                
+
                 TimeoutPhase::ForceKill => {
-                    error!("Command {} reached kill timeout, force terminating", command.id);
+                    error!(
+                        "Command {} reached kill timeout, force terminating",
+                        command.id
+                    );
                     self.send_sigkill(&mut child, child_id).await?;
-                    
+
                     // Wait a brief moment for kill to take effect
                     let _ = tokio_timeout(Duration::from_secs(2), child.wait()).await;
-                    
+
                     break ExecutionResult {
                         command_id: command.id.clone(),
                         status: ExecutionStatus::Killed,
@@ -251,7 +261,10 @@ impl CommandExecutor {
             }
         };
 
-        info!("Command {} completed with status: {:?}", command.id, execution_result.status);
+        info!(
+            "Command {} completed with status: {:?}",
+            command.id, execution_result.status
+        );
         Ok(execution_result)
     }
 
@@ -261,10 +274,10 @@ impl CommandExecutor {
         if parts.is_empty() {
             anyhow::bail!("empty command");
         }
-        
+
         let program = parts[0].to_string();
         let args = parts[1..].iter().map(|s| s.to_string()).collect();
-        
+
         Ok((program, args))
     }
 
@@ -274,10 +287,9 @@ impl CommandExecutor {
         if let Some(pid) = pid {
             use nix::sys::signal::{kill, Signal};
             use nix::unistd::Pid;
-            
+
             debug!("Sending SIGTERM to PID {}", pid);
-            kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
-                .context("failed to send SIGTERM")?;
+            kill(Pid::from_raw(pid as i32), Signal::SIGTERM).context("failed to send SIGTERM")?;
         } else {
             child.start_kill().context("failed to send SIGTERM")?;
         }
@@ -296,10 +308,9 @@ impl CommandExecutor {
         if let Some(pid) = pid {
             use nix::sys::signal::{kill, Signal};
             use nix::unistd::Pid;
-            
+
             debug!("Sending SIGKILL to PID {}", pid);
-            kill(Pid::from_raw(pid as i32), Signal::SIGKILL)
-                .context("failed to send SIGKILL")?;
+            kill(Pid::from_raw(pid as i32), Signal::SIGKILL).context("failed to send SIGKILL")?;
         } else {
             child.kill().await.context("failed to kill process")?;
         }
@@ -359,7 +370,10 @@ mod tests {
 
         let result = executor.execute(&command, strategy).await.unwrap();
 
-        assert!(matches!(result.status, ExecutionStatus::Timeout | ExecutionStatus::Killed));
+        assert!(matches!(
+            result.status,
+            ExecutionStatus::Timeout | ExecutionStatus::Killed
+        ));
     }
 
     #[tokio::test]
@@ -378,4 +392,3 @@ mod tests {
         assert_eq!(result.exit_code, Some(1));
     }
 }
-

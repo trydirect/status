@@ -1,10 +1,12 @@
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Default)]
 pub struct AuditLogger;
 
 impl AuditLogger {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     pub fn auth_success(&self, agent_id: &str, request_id: Option<&str>, action: &str) {
         info!(target: "audit", event = "auth_success", agent_id, request_id = request_id.unwrap_or(""), action);
@@ -30,7 +32,13 @@ impl AuditLogger {
         warn!(target: "audit", event = "scope_denied", agent_id, request_id = request_id.unwrap_or(""), scope);
     }
 
-    pub fn command_executed(&self, agent_id: &str, request_id: Option<&str>, command_id: &str, name: &str) {
+    pub fn command_executed(
+        &self,
+        agent_id: &str,
+        request_id: Option<&str>,
+        command_id: &str,
+        name: &str,
+    ) {
         info!(target: "audit", event = "command_executed", agent_id, request_id = request_id.unwrap_or(""), command_id, name);
     }
 
@@ -38,7 +46,12 @@ impl AuditLogger {
         info!(target: "audit", event = "token_rotated", agent_id, request_id = request_id.unwrap_or(""));
     }
 
-    pub fn internal_error(&self, agent_id: Option<&str>, request_id: Option<&str>, error_msg: &str) {
+    pub fn internal_error(
+        &self,
+        agent_id: Option<&str>,
+        request_id: Option<&str>,
+        error_msg: &str,
+    ) {
         error!(target: "audit", event = "internal_error", agent_id = agent_id.unwrap_or("") , request_id = request_id.unwrap_or(""), error = error_msg);
     }
 }

@@ -51,6 +51,7 @@ cargo run --features docker --bin status -- restart status
 - Docker container management (list, restart, stop, pause)
 - Session-based authentication
 - Health check endpoint
+- Self-update (beta): remote version check, binary download + SHA256 verify, deploy with backup/rollback
 
 ## Command Execution (API)
 
@@ -171,3 +172,25 @@ The UI uses Tera templating engine (similar to Jinja2). Templates are located in
 
 - Reads `config.json` and normalizes `apps_info` to structured items.
 - Subsystems marked with `@todo` will be implemented per `.ai/GOAL.md`.
+
+## Self-update (beta)
+
+- Env vars: `UPDATE_SERVER_URL` or `UPDATE_BINARY_URL`, optional `UPDATE_EXPECTED_SHA256`, `AGENT_ID`, `UPDATE_STORAGE_PATH`
+- Endpoints:
+  - `GET /api/self/version` → current + available (when `UPDATE_SERVER_URL` is set)
+  - `POST /api/self/update/start` → returns `job_id` (requires `X-Agent-Id`)
+  - `GET /api/self/update/status/{id}` → phase: pending|downloading|verifying|completed|failed
+  - `POST /api/self/update/deploy` → body: `{ "job_id", "install_path?", "service_name?" }`; backs up current binary, deploys prepared one
+  - `POST /api/self/update/rollback` → restore latest backup
+
+Example (start + deploy):
+
+```bash
+curl -X POST http://localhost:8080/api/self/update/start \
+  -H "X-Agent-Id: $AGENT_ID" \
+  -d '{"version":"1.2.3"}'
+
+curl -X POST http://localhost:8080/api/self/update/deploy \
+  -H "X-Agent-Id: $AGENT_ID" \
+  -d '{"job_id":"<returned-id>","service_name":"status-panel"}'
+```

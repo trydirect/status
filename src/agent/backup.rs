@@ -1,6 +1,6 @@
 use anyhow::Result;
-use ring::hmac;
 use base64::{engine::general_purpose, Engine as _};
+use ring::hmac;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,9 +27,7 @@ impl BackupSigner {
 
     /// Sign a value with timestamp
     pub fn sign(&self, value: &str) -> Result<String> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs();
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
         let data = SignedData {
             value: value.to_string(),
@@ -72,9 +70,7 @@ impl BackupSigner {
         let signed_data: SignedData = serde_json::from_slice(data)?;
 
         // Check timestamp
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
         if now - signed_data.timestamp > max_age_secs {
             anyhow::bail!("Hash expired");

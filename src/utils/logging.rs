@@ -1,5 +1,5 @@
-use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::{fmt, EnvFilter};
 
 pub fn init() {
     let fmt_layer = fmt::layer().with_target(false);

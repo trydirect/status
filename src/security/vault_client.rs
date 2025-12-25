@@ -1,7 +1,7 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::{Deserialize};
-use tracing::{debug, warn, info};
+use serde::Deserialize;
+use tracing::{debug, info, warn};
 
 /// Vault KV response envelope for token fetch.
 #[derive(Debug, Deserialize)]
@@ -32,7 +32,7 @@ pub struct VaultClient {
 
 impl VaultClient {
     /// Create a new Vault client from environment variables.
-    /// 
+    ///
     /// Environment variables:
     /// - `VAULT_ADDRESS`: Base URL (e.g., http://127.0.0.1:8200)
     /// - `VAULT_TOKEN`: Authentication token
@@ -66,7 +66,7 @@ impl VaultClient {
     }
 
     /// Fetch agent token from Vault KV store.
-    /// 
+    ///
     /// Constructs path: GET {base_url}/v1/{prefix}/{deployment_hash}/token
     /// Expects response: {"data":{"data":{"token":"..."}}}
     pub async fn fetch_agent_token(&self, deployment_hash: &str) -> Result<String> {
@@ -77,7 +77,8 @@ impl VaultClient {
 
         debug!("Fetching token from Vault: {}", url);
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .get(&url)
             .header("X-Vault-Token", &self.token)
             .send()
@@ -94,10 +95,8 @@ impl VaultClient {
             ));
         }
 
-        let vault_resp: VaultKvResponse = response
-            .json()
-            .await
-            .context("parsing Vault response")?;
+        let vault_resp: VaultKvResponse =
+            response.json().await.context("parsing Vault response")?;
 
         vault_resp
             .data
@@ -107,13 +106,9 @@ impl VaultClient {
     }
 
     /// Store agent token in Vault KV store (for registration or update).
-    /// 
+    ///
     /// Constructs path: POST {base_url}/v1/{prefix}/{deployment_hash}/token
-    pub async fn store_agent_token(
-        &self,
-        deployment_hash: &str,
-        token: &str,
-    ) -> Result<()> {
+    pub async fn store_agent_token(&self, deployment_hash: &str, token: &str) -> Result<()> {
         let url = format!(
             "{}/v1/{}/{}/token",
             self.base_url, self.prefix, deployment_hash
@@ -127,7 +122,8 @@ impl VaultClient {
             }
         });
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&url)
             .header("X-Vault-Token", &self.token)
             .json(&payload)
@@ -158,7 +154,8 @@ impl VaultClient {
 
         debug!("Deleting token from Vault: {}", url);
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .delete(&url)
             .header("X-Vault-Token", &self.token)
             .send()
