@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 /// Session-based user info.
@@ -66,10 +66,10 @@ pub struct Credentials {
 
 impl Credentials {
     pub fn from_env() -> Self {
-        let username = std::env::var("STATUS_PANEL_USERNAME")
-            .unwrap_or_else(|_| "admin".to_string());
-        let password = std::env::var("STATUS_PANEL_PASSWORD")
-            .unwrap_or_else(|_| "admin".to_string());
+        let username =
+            std::env::var("STATUS_PANEL_USERNAME").unwrap_or_else(|_| "admin".to_string());
+        let password =
+            std::env::var("STATUS_PANEL_PASSWORD").unwrap_or_else(|_| "admin".to_string());
         Self { username, password }
     }
 }
@@ -82,10 +82,10 @@ mod tests {
     async fn test_session_store_create_and_get() {
         let store = SessionStore::new();
         let user = SessionUser::new("testuser".to_string());
-        
+
         let session_id = store.create_session(user.clone()).await;
         assert!(!session_id.is_empty());
-        
+
         let retrieved = store.get_session(&session_id).await;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().username, "testuser");
@@ -95,11 +95,11 @@ mod tests {
     async fn test_session_store_delete() {
         let store = SessionStore::new();
         let user = SessionUser::new("testuser".to_string());
-        
+
         let session_id = store.create_session(user).await;
         let retrieved = store.get_session(&session_id).await;
         assert!(retrieved.is_some());
-        
+
         store.delete_session(&session_id).await;
         let after_delete = store.get_session(&session_id).await;
         assert!(after_delete.is_none());
@@ -110,15 +110,15 @@ mod tests {
         let store = SessionStore::new();
         let user1 = SessionUser::new("user1".to_string());
         let user2 = SessionUser::new("user2".to_string());
-        
+
         let session1 = store.create_session(user1).await;
         let session2 = store.create_session(user2).await;
-        
+
         assert_ne!(session1, session2);
-        
+
         let retrieved1 = store.get_session(&session1).await.unwrap();
         let retrieved2 = store.get_session(&session2).await.unwrap();
-        
+
         assert_eq!(retrieved1.username, "user1");
         assert_eq!(retrieved2.username, "user2");
     }
@@ -134,11 +134,11 @@ mod tests {
     fn test_credentials_from_env() {
         std::env::set_var("STATUS_PANEL_USERNAME", "envuser");
         std::env::set_var("STATUS_PANEL_PASSWORD", "envpass");
-        
+
         let creds = Credentials::from_env();
         assert_eq!(creds.username, "envuser");
         assert_eq!(creds.password, "envpass");
-        
+
         std::env::remove_var("STATUS_PANEL_USERNAME");
         std::env::remove_var("STATUS_PANEL_PASSWORD");
     }
@@ -148,10 +148,10 @@ mod tests {
         // Clear any environment variables first
         std::env::remove_var("STATUS_PANEL_USERNAME");
         std::env::remove_var("STATUS_PANEL_PASSWORD");
-        
+
         // Small delay to avoid race with other tests
         std::thread::sleep(std::time::Duration::from_millis(10));
-        
+
         let creds = Credentials::from_env();
         assert_eq!(creds.username, "admin");
         assert_eq!(creds.password, "admin");

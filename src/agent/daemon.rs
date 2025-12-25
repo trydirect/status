@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::signal;
-use tokio::time::Duration;
 use tokio::sync::{broadcast, RwLock};
+use tokio::time::Duration;
 use tracing::info;
 
 use crate::agent::config::Config;
-use crate::monitoring::{MetricsCollector, MetricsSnapshot, MetricsStore, spawn_heartbeat};
+use crate::monitoring::{spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore};
 
 pub async fn run(config_path: String) -> Result<()> {
     let cfg = Config::from_file(&config_path)?;
@@ -24,7 +24,11 @@ pub async fn run(config_path: String) -> Result<()> {
         .unwrap_or(Duration::from_secs(10));
 
     let heartbeat_handle = spawn_heartbeat(collector, store, interval, tx, webhook.clone());
-    info!(interval_secs = interval.as_secs(), webhook = webhook.as_deref().unwrap_or("none"), "metrics heartbeat started");
+    info!(
+        interval_secs = interval.as_secs(),
+        webhook = webhook.as_deref().unwrap_or("none"),
+        "metrics heartbeat started"
+    );
 
     // Wait for shutdown signal (Ctrl+C) then stop the heartbeat loop
     signal::ctrl_c().await?;

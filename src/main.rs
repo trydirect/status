@@ -1,5 +1,5 @@
-use status_panel::{agent, comms, security, monitoring, utils};
 use dotenvy::dotenv;
+use status_panel::{agent, comms, utils};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -26,9 +26,11 @@ enum Commands {
     /// Start HTTP server (local API)
     Serve {
         #[arg(long, default_value_t = 8080)]
-        port: u16,        /// Enable UI with HTML templates
+        port: u16,
+        /// Enable UI with HTML templates
         #[arg(long, default_value_t = false)]
-        with_ui: bool,    },
+        with_ui: bool,
+    },
     /// Show Docker containers
     #[cfg(feature = "docker")]
     Containers,

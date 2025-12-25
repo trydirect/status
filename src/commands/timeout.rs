@@ -6,42 +6,54 @@ use std::time::{Duration, Instant};
 pub struct TimeoutStrategy {
     /// Base timeout duration in seconds
     pub base_timeout_secs: u64,
-    
+
     /// Soft timeout multiplier (default 0.8) - warning phase
     #[serde(default = "default_soft_multiplier")]
     pub soft_multiplier: f64,
-    
+
     /// Hard timeout multiplier (default 0.9) - SIGTERM phase
     #[serde(default = "default_hard_multiplier")]
     pub hard_multiplier: f64,
-    
+
     /// Kill timeout multiplier (default 1.0) - SIGKILL phase
     #[serde(default = "default_kill_multiplier")]
     pub kill_multiplier: f64,
-    
+
     /// Interval for progress reports in seconds
     #[serde(default = "default_progress_interval")]
     pub progress_interval_secs: u64,
-    
+
     /// Time without progress before considering command stalled (seconds)
     #[serde(default = "default_stall_threshold")]
     pub stall_threshold_secs: u64,
-    
+
     /// Allow graceful termination with SIGTERM before SIGKILL
     #[serde(default = "default_true")]
     pub allow_graceful_termination: bool,
-    
+
     /// Enable checkpoint support for resumable operations
     #[serde(default)]
     pub enable_checkpoints: bool,
 }
 
-fn default_soft_multiplier() -> f64 { 0.8 }
-fn default_hard_multiplier() -> f64 { 0.9 }
-fn default_kill_multiplier() -> f64 { 1.0 }
-fn default_progress_interval() -> u64 { 30 }
-fn default_stall_threshold() -> u64 { 300 }
-fn default_true() -> bool { true }
+fn default_soft_multiplier() -> f64 {
+    0.8
+}
+fn default_hard_multiplier() -> f64 {
+    0.9
+}
+fn default_kill_multiplier() -> f64 {
+    1.0
+}
+fn default_progress_interval() -> u64 {
+    30
+}
+fn default_stall_threshold() -> u64 {
+    300
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Default for TimeoutStrategy {
     fn default() -> Self {
@@ -72,7 +84,7 @@ impl TimeoutStrategy {
             enable_checkpoints: true,
         }
     }
-    
+
     /// Create strategy for quick operations
     pub fn quick_strategy(base_timeout_secs: u64) -> Self {
         Self {
@@ -155,7 +167,7 @@ impl TimeoutTracker {
     /// Get current phase based on elapsed time
     pub fn current_phase(&mut self) -> TimeoutPhase {
         let elapsed = self.start_time.elapsed();
-        
+
         let phase = if elapsed >= self.strategy.kill_timeout() {
             TimeoutPhase::ForceKill
         } else if elapsed >= self.strategy.hard_timeout() {
@@ -187,7 +199,7 @@ impl TimeoutTracker {
     /// Get time remaining until next phase
     pub fn time_to_next_phase(&self) -> Option<Duration> {
         let elapsed = self.start_time.elapsed();
-        
+
         match self.current_phase {
             TimeoutPhase::Normal => {
                 let soft = self.strategy.soft_timeout();
@@ -266,7 +278,7 @@ mod tests {
 
         let mut tracker = TimeoutTracker::new(strategy);
         assert_eq!(tracker.current_phase(), TimeoutPhase::Normal);
-        
+
         // Note: In real tests, we'd need to mock time or use sleeps
         // This just tests the logic structure
     }
@@ -275,10 +287,10 @@ mod tests {
     fn test_progress_reporting() {
         let strategy = TimeoutStrategy::default();
         let mut tracker = TimeoutTracker::new(strategy);
-        
+
         std::thread::sleep(Duration::from_millis(10));
         tracker.report_progress();
-        
+
         // Progress should be recent
         assert!(!tracker.is_stalled());
     }
