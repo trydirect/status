@@ -27,6 +27,12 @@ impl UpdateStatus {
     }
 }
 
+impl Default for UpdateStatus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub type UpdateJobs = Arc<RwLock<HashMap<String, UpdateStatus>>>;
 
 /// Start a background update job that downloads a binary to a temp path
@@ -157,11 +163,11 @@ fn detect_binary_name() -> String {
             return "status-linux-x86_64-musl".to_string();
         }
         // Default to glibc version for Linux
-        return "status-linux-x86_64".to_string();
+        "status-linux-x86_64".to_string()
     }
     #[cfg(target_os = "macos")]
     {
-        return "status-darwin-x86_64".to_string();
+        "status-darwin-x86_64".to_string()
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

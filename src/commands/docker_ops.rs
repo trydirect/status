@@ -26,7 +26,7 @@ impl DockerOperation {
     pub fn parse(cmd: &str) -> Result<Self> {
         let parts: Vec<&str> = cmd.split(':').collect();
 
-        match (parts.get(0), parts.get(1), parts.get(2)) {
+        match (parts.first(), parts.get(1), parts.get(2)) {
             (Some(&"docker"), Some(&"restart"), Some(&name)) => {
                 validate_container_name(name)?;
                 Ok(DockerOperation::Restart(name.to_string()))

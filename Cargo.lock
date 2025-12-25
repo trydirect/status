@@ -2270,6 +2270,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "subtle",
  "sysinfo",
  "tempfile",
  "tera",

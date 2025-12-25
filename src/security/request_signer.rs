@@ -3,7 +3,7 @@ use axum::http::HeaderMap;
 use base64::{engine::general_purpose, Engine};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use ring::constant_time::verify_slices_are_equal;
+use subtle::ConstantTimeEq;
 use sha2::Sha256;
 
 // HMAC-SHA256(request_body, AGENT_TOKEN) → X-Agent-Signature (base64)
@@ -25,7 +25,7 @@ fn decode_signature(sig: &str) -> Result<Vec<u8>> {
     }
     // hex fallback
     fn from_hex(s: &str) -> Option<Vec<u8>> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return None;
         }
         let mut out = Vec::with_capacity(s.len() / 2);
@@ -71,7 +71,9 @@ pub fn verify_signature(
     mac.update(body);
     let expected = mac.finalize().into_bytes();
 
-    verify_slices_are_equal(&provided, expected.as_slice())
-        .map_err(|_| anyhow!("signature mismatch"))?;
-    Ok(())
+    if provided.ct_eq(expected.as_slice()).unwrap_u8() == 1 {
+        Ok(())
+    } else {
+        Err(anyhow!("signature mismatch"))
+    }
 }

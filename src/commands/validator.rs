@@ -1,6 +1,5 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::collections::HashSet;
-use std::path::Path;
 
 use crate::transport::Command as AgentCommand;
 
@@ -78,10 +77,10 @@ impl CommandValidator {
         }
 
         // Enforce whitelist for non-shell programs
-        if !["sh", "bash", "zsh"].contains(&program.as_str()) {
-            if !self.config.allowed_programs.contains(&program) {
-                bail!(format!("program '{}' is not allowed", program));
-            }
+        if !["sh", "bash", "zsh"].contains(&program.as_str())
+            && !self.config.allowed_programs.contains(&program)
+        {
+            bail!(format!("program '{}' is not allowed", program));
         }
 
         // Argument constraints

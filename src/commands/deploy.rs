@@ -33,7 +33,7 @@ pub async fn load_manifest() -> Result<RollbackManifest> {
     let data = tokio::fs::read(&p)
         .await
         .context("reading rollback manifest")?;
-    Ok(serde_json::from_slice(&data).context("parsing rollback manifest")?)
+    serde_json::from_slice(&data).context("parsing rollback manifest")
 }
 
 pub async fn save_manifest(m: &RollbackManifest) -> Result<()> {

@@ -1,6 +1,5 @@
 #![cfg(feature = "docker")]
 use anyhow::{Context, Result};
-use bollard::container::StatsOptions;
 use bollard::exec::CreateExecOptions;
 use bollard::models::{ContainerStatsResponse, ContainerSummaryStateEnum};
 use bollard::query_parameters::{
@@ -56,13 +55,14 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
             let name = c
                 .names
                 .unwrap_or_default()
-                .get(0)
+                .first()
                 .cloned()
                 .unwrap_or_default()
                 .trim_start_matches('/')
                 .to_string();
             let status = c
                 .state
+                .as_ref()
                 .map(|s| format!("{:?}", s))
                 .unwrap_or_else(|| "unknown".to_string());
             ContainerInfo {
@@ -90,14 +90,14 @@ pub async fn list_containers_with_logs(tail: &str) -> Result<Vec<ContainerInfo>>
         let name = c
             .names
             .as_ref()
-            .and_then(|v| v.get(0).cloned())
+            .and_then(|v| v.first().cloned())
             .unwrap_or_default()
             .trim_start_matches('/')
             .to_string();
 
         let status = c
             .state
-            .clone()
+            .as_ref()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
@@ -194,7 +194,7 @@ async fn fetch_stats_for(docker: &Docker, name: &str) -> Result<ContainerHealth>
 
     let mut stream = docker.stats(
         name,
-        Some(StatsOptions {
+        Some(bollard::query_parameters::StatsOptions {
             stream: false,
             one_shot: true,
         }),
@@ -245,13 +245,14 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
         let name = c
             .names
             .as_ref()
-            .and_then(|v| v.get(0).cloned())
+            .and_then(|v| v.first().cloned())
             .unwrap_or_default()
             .trim_start_matches('/')
             .to_string();
 
         let status = c
             .state
+            .as_ref()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 

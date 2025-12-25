@@ -38,7 +38,6 @@ use crate::commands::{
 };
 use crate::commands::{
     check_remote_version, get_update_status, start_update_job, UpdateJobs, UpdatePhase,
-    UpdateStatus,
 };
 use crate::commands::{CommandValidator, DockerOperation, TimeoutStrategy};
 use crate::monitoring::{
@@ -137,10 +136,10 @@ impl AppState {
             None
         };
 
-        let vault_client = VaultClient::from_env().ok().flatten().map(|vc| {
-            debug!("Vault client initialized for token rotation");
-            vc
-        });
+        let vault_client = VaultClient::from_env()
+            .ok()
+            .flatten()
+            .inspect(|_| debug!("Vault client initialized for token rotation"));
 
         let token_cache = vault_client
             .is_some()
@@ -943,7 +942,7 @@ struct DeployRequest {
 }
 
 async fn self_update_deploy(
-    State(state): State<SharedState>,
+    State(_state): State<SharedState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -1074,9 +1073,7 @@ async fn verify_stacker_post(
     body: &[u8],
     required_scope: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if let Err(resp) = validate_agent_id(headers) {
-        return Err(resp);
-    }
+    validate_agent_id(headers)?;
 
     // Rate limiting per agent
     let agent_id = header_str(headers, "X-Agent-Id").unwrap_or("");
