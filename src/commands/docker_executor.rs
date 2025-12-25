@@ -1,7 +1,10 @@
 use crate::commands::DockerOperation;
 use crate::transport::CommandResult;
 use anyhow::Result;
+
+#[cfg(feature = "docker")]
 use std::time::Instant;
+#[cfg(feature = "docker")]
 use tracing::{error, info};
 
 #[cfg(feature = "docker")]
