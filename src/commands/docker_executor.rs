@@ -133,7 +133,7 @@ pub async fn execute_docker_operation(
 /// Fallback for non-Docker builds
 #[cfg(not(feature = "docker"))]
 pub async fn execute_docker_operation(
-    command_id: &str,
+    _command_id: &str,
     _operation: DockerOperation,
 ) -> Result<CommandResult> {
     use anyhow::anyhow;

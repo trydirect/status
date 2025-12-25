@@ -31,6 +31,7 @@ use crate::agent::backup::BackupSigner;
 use crate::agent::config::Config;
 #[cfg(feature = "docker")]
 use crate::agent::docker;
+#[cfg(feature = "docker")]
 use crate::commands::execute_docker_operation;
 use crate::commands::executor::CommandExecutor;
 use crate::commands::{
