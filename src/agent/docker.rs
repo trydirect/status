@@ -38,7 +38,7 @@ pub struct PortInfo {
 }
 
 fn docker_client() -> Docker {
-    Docker::connect_with_local_defaults().expect("docker client")
+    Docker::connect_with_defaults().expect("docker client")
 }
 
 pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
