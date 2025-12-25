@@ -48,8 +48,9 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
         let url = if let Some(u) = binary_url {
             u
         } else if let (Some(srv), Some(ver)) = (server_url, target_version.clone()) {
-            // Conventional path: `${UPDATE_SERVER_URL}/releases/{version}/status-linux-x86_64`
-            format!("{}/releases/{}/status-linux-x86_64", srv.trim_end_matches('/'), ver)
+            // Detect platform and construct binary name
+            let binary_name = detect_binary_name();
+            format!("{}/releases/{}/{}", srv.trim_end_matches('/'), ver, binary_name)
         } else {
             let mut w = jobs_clone.write().await;
             if let Some(st) = w.get_mut(&id_clone) {
@@ -120,4 +121,25 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
 pub async fn get_update_status(jobs: UpdateJobs, id: &str) -> Option<UpdateStatus> {
     let m = jobs.read().await;
     m.get(id).cloned()
+}
+
+fn detect_binary_name() -> String {
+    // Detect if we're running on musl by checking for /etc/alpine-release or ldd output
+    #[cfg(target_os = "linux")]
+    {
+        // Check if musl by trying to detect Alpine or running ldd on ourselves
+        if std::path::Path::new("/etc/alpine-release").exists() {
+            return "status-linux-x86_64-musl".to_string();
+        }
+        // Default to glibc version for Linux
+        return "status-linux-x86_64".to_string();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return "status-darwin-x86_64".to_string();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        "status-linux-x86_64".to_string()
+    }
 }
