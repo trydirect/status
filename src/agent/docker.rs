@@ -37,12 +37,12 @@ pub struct PortInfo {
     pub title: Option<String>,
 }
 
-fn docker_client() -> Docker {
-    Docker::connect_with_defaults().expect("docker client")
+fn docker_client() -> Result<Docker> {
+    Docker::connect_with_defaults().context("docker client connect")
 }
 
 pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
-    let docker = docker_client();
+    let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
     let list = docker
@@ -76,7 +76,7 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
 }
 
 pub async fn list_containers_with_logs(tail: &str) -> Result<Vec<ContainerInfo>> {
-    let docker = docker_client();
+    let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
     let list = docker
@@ -231,7 +231,7 @@ async fn fetch_stats_for(docker: &Docker, name: &str) -> Result<ContainerHealth>
 }
 
 pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
-    let docker = docker_client();
+    let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
     let list = docker
@@ -293,7 +293,7 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
 }
 
 pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
-    let docker = docker_client();
+    let docker = docker_client()?;
     use bollard::query_parameters::LogsOptionsBuilder;
     use futures_util::StreamExt;
     let opts = LogsOptionsBuilder::default()
@@ -314,7 +314,7 @@ pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
 }
 
 pub async fn restart(name: &str) -> Result<()> {
-    let docker = docker_client();
+    let docker = docker_client()?;
     docker
         .restart_container(name, None::<RestartContainerOptions>)
         .await
@@ -324,7 +324,7 @@ pub async fn restart(name: &str) -> Result<()> {
 }
 
 pub async fn stop(name: &str) -> Result<()> {
-    let docker = docker_client();
+    let docker = docker_client()?;
     docker
         .stop_container(name, None::<StopContainerOptions>)
         .await
@@ -334,7 +334,7 @@ pub async fn stop(name: &str) -> Result<()> {
 }
 
 pub async fn pause(name: &str) -> Result<()> {
-    let docker = docker_client();
+    let docker = docker_client()?;
     docker
         .pause_container(name)
         .await
@@ -349,7 +349,7 @@ pub async fn exec_in_container(name: &str, cmd: &str) -> Result<()> {
     use bollard::exec::StartExecResults;
     use futures_util::StreamExt;
 
-    let docker = docker_client();
+    let docker = docker_client()?;
     // Create exec instance
     let exec = docker
         .create_exec(
