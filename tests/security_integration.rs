@@ -1,16 +1,16 @@
-use axum::{Router, body::Body};
 use axum::http::{Request, StatusCode};
+use axum::{body::Body, Router};
+use base64::{engine::general_purpose, Engine};
+use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
-use tower::ServiceExt; // for Router::oneshot
 use serde_json::json;
-use std::sync::Arc;
+use sha2::Sha256;
 use status_panel::agent::config::{Config, ReqData};
 use status_panel::comms::local_api::{create_router, AppState};
-use uuid::Uuid;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use base64::{engine::general_purpose, Engine};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
+use tower::ServiceExt; // for Router::oneshot
+use uuid::Uuid;
 
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
@@ -25,7 +25,9 @@ fn test_config() -> Arc<Config> {
         domain: Some("test.example.com".to_string()),
         subdomains: None,
         apps_info: None,
-        reqdata: ReqData { email: "test@example.com".to_string() },
+        reqdata: ReqData {
+            email: "test@example.com".to_string(),
+        },
         ssl: Some("letsencrypt".to_string()),
     })
 }
@@ -48,23 +50,34 @@ fn sign_b64(token: &str, body: &[u8]) -> String {
     general_purpose::STANDARD.encode(sig)
 }
 
-async fn post_with_sig(app: &Router, path: &str, agent_id: &str, token: &str, body_json: serde_json::Value, request_id: Option<String>) -> (StatusCode, bytes::Bytes) {
+async fn post_with_sig(
+    app: &Router,
+    path: &str,
+    agent_id: &str,
+    token: &str,
+    body_json: serde_json::Value,
+    request_id: Option<String>,
+) -> (StatusCode, bytes::Bytes) {
     let body_str = body_json.to_string();
     let ts = format!("{}", chrono::Utc::now().timestamp());
     let rid = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let sig = sign_b64(token, body_str.as_bytes());
-    let response = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri(path)
-            .header("content-type", "application/json")
-            .header("X-Agent-Id", agent_id)
-            .header("X-Timestamp", ts)
-            .header("X-Request-Id", rid)
-            .header("X-Agent-Signature", sig)
-            .body(Body::from(body_str))
-            .unwrap()
-    ).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("X-Agent-Id", agent_id)
+                .header("X-Timestamp", ts)
+                .header("X-Request-Id", rid)
+                .header("X-Agent-Signature", sig)
+                .body(Body::from(body_str))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     (status, body)
@@ -76,28 +89,38 @@ async fn execute_requires_signature_and_scope() {
     let app = router_with_env("agent-1", "secret-token", "commands:execute");
 
     // Missing signature
-    let response = app.clone().oneshot(
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/commands/execute")
-            .header("content-type", "application/json")
-            .header("X-Agent-Id", "agent-1")
-            .body(Body::from(json!({
-                "id": "cmd-1",
-                "name": "echo hello",
-                "params": {"timeout_secs": 2}
-            }).to_string()))
-            .unwrap()
-    ).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/commands/execute")
+                .header("content-type", "application/json")
+                .header("X-Agent-Id", "agent-1")
+                .body(Body::from(
+                    json!({
+                        "id": "cmd-1",
+                        "name": "echo hello",
+                        "params": {"timeout_secs": 2}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     // With signature & scope
-    let (status, _) = post_with_sig(&app, 
-        "/api/v1/commands/execute", 
-        "agent-1", "secret-token",
+    let (status, _) = post_with_sig(
+        &app,
+        "/api/v1/commands/execute",
+        "agent-1",
+        "secret-token",
         json!({"id": "cmd-2", "name": "echo hi", "params": {"timeout_secs": 2}}),
-        None
-    ).await;
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -109,7 +132,15 @@ async fn replay_detection_returns_409() {
     let path = "/api/v1/commands/execute";
     let body = json!({"id": "cmd-3", "name": "echo hi", "params": {}});
 
-    let (s1, _) = post_with_sig(&app, path, "agent-1", "secret-token", body.clone(), Some(rid.clone())).await;
+    let (s1, _) = post_with_sig(
+        &app,
+        path,
+        "agent-1",
+        "secret-token",
+        body.clone(),
+        Some(rid.clone()),
+    )
+    .await;
     assert_eq!(s1, StatusCode::OK);
 
     let (s2, b2) = post_with_sig(&app, path, "agent-1", "secret-token", body, Some(rid)).await;
@@ -130,10 +161,26 @@ async fn rate_limit_returns_429() {
     let app = create_router(state);
     let path = "/api/v1/commands/execute";
 
-    let (s1, _) = post_with_sig(&app, path, "agent-1", "secret-token", json!({"id":"r1","name":"echo a","params":{}}), None).await;
+    let (s1, _) = post_with_sig(
+        &app,
+        path,
+        "agent-1",
+        "secret-token",
+        json!({"id":"r1","name":"echo a","params":{}}),
+        None,
+    )
+    .await;
     assert_eq!(s1, StatusCode::OK);
 
-    let (s2, _) = post_with_sig(&app, path, "agent-1", "secret-token", json!({"id":"r2","name":"echo b","params":{}}), None).await;
+    let (s2, _) = post_with_sig(
+        &app,
+        path,
+        "agent-1",
+        "secret-token",
+        json!({"id":"r2","name":"echo b","params":{}}),
+        None,
+    )
+    .await;
     assert_eq!(s2, StatusCode::TOO_MANY_REQUESTS);
 }
 
@@ -142,12 +189,15 @@ async fn scope_denied_returns_403() {
     let _g = lock_tests();
     // Do not include commands:execute
     let app = router_with_env("agent-1", "secret-token", "commands:report");
-    let (status, body) = post_with_sig(&app, 
-        "/api/v1/commands/execute", 
-        "agent-1", "secret-token",
+    let (status, body) = post_with_sig(
+        &app,
+        "/api/v1/commands/execute",
+        "agent-1",
+        "secret-token",
         json!({"id": "cmd-4", "name": "echo hi", "params": {}}),
-        None
-    ).await;
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let msg: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(msg["error"], "insufficient scope");
@@ -161,31 +211,39 @@ async fn wait_can_require_signature() {
     let app = router_with_env("agent-1", "secret-token", "commands:wait");
 
     // Missing signature should fail
-    let response = app.clone().oneshot(
-        Request::builder()
-            .method("GET")
-            .uri("/api/v1/commands/wait/session?timeout=1")
-            .header("X-Agent-Id", "agent-1")
-            .body(Body::empty())
-            .unwrap()
-    ).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/commands/wait/session?timeout=1")
+                .header("X-Agent-Id", "agent-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     // Provide signature over empty body
     let ts = format!("{}", chrono::Utc::now().timestamp());
     let rid = Uuid::new_v4().to_string();
     let sig = sign_b64("secret-token", b"");
-    let response = app.clone().oneshot(
-        Request::builder()
-            .method("GET")
-            .uri("/api/v1/commands/wait/session?timeout=1")
-            .header("X-Agent-Id", "agent-1")
-            .header("X-Timestamp", ts)
-            .header("X-Request-Id", rid)
-            .header("X-Agent-Signature", sig)
-            .body(Body::empty())
-            .unwrap()
-    ).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/commands/wait/session?timeout=1")
+                .header("X-Agent-Id", "agent-1")
+                .header("X-Timestamp", ts)
+                .header("X-Request-Id", rid)
+                .header("X-Agent-Signature", sig)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     // No commands queued -> 204 No Content
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }

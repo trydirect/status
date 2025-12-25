@@ -1,9 +1,9 @@
-use tokio::time::{sleep, Duration};
-use tracing::{info, warn, debug};
 use rand::Rng;
+use tokio::time::{sleep, Duration};
+use tracing::{debug, info, warn};
 
-use crate::security::vault_client::VaultClient;
 use crate::security::token_cache::TokenCache;
+use crate::security::vault_client::VaultClient;
 
 /// Background task that refreshes the agent token from Vault.
 ///

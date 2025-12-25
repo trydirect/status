@@ -1,8 +1,8 @@
-use anyhow::Result;
 use crate::commands::DockerOperation;
 use crate::transport::CommandResult;
-use tracing::{info, error};
+use anyhow::Result;
 use std::time::Instant;
+use tracing::{error, info};
 
 #[cfg(feature = "docker")]
 use crate::agent::docker;
@@ -17,45 +17,52 @@ pub async fn execute_docker_operation(
     let container_name = operation.container_name().to_string();
     let op_type = operation.operation_type().to_string();
 
-    info!("Executing Docker operation: {} on container: {}", op_type, container_name);
+    info!(
+        "Executing Docker operation: {} on container: {}",
+        op_type, container_name
+    );
 
     let (exit_code, stdout, stderr) = match operation {
-        DockerOperation::Restart(ref name) => {
-            match docker::restart(name).await {
-                Ok(_) => {
-                    let msg = format!("Container '{}' restarted successfully", name);
-                    info!("{}", msg);
-                    (0, msg, String::new())
-                }
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    error!("Failed to restart container '{}': {}", name, err_msg);
-                    (1, String::new(), err_msg)
-                }
+        DockerOperation::Restart(ref name) => match docker::restart(name).await {
+            Ok(_) => {
+                let msg = format!("Container '{}' restarted successfully", name);
+                info!("{}", msg);
+                (0, msg, String::new())
             }
-        }
+            Err(e) => {
+                let err_msg = e.to_string();
+                error!("Failed to restart container '{}': {}", name, err_msg);
+                (1, String::new(), err_msg)
+            }
+        },
 
-        DockerOperation::Stop(ref name) => {
-            match docker::stop(name).await {
-                Ok(_) => {
-                    let msg = format!("Container '{}' stopped successfully", name);
-                    info!("{}", msg);
-                    (0, msg, String::new())
-                }
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    error!("Failed to stop container '{}': {}", name, err_msg);
-                    (1, String::new(), err_msg)
-                }
+        DockerOperation::Stop(ref name) => match docker::stop(name).await {
+            Ok(_) => {
+                let msg = format!("Container '{}' stopped successfully", name);
+                info!("{}", msg);
+                (0, msg, String::new())
             }
-        }
+            Err(e) => {
+                let err_msg = e.to_string();
+                error!("Failed to stop container '{}': {}", name, err_msg);
+                (1, String::new(), err_msg)
+            }
+        },
 
         DockerOperation::Logs(ref name, tail) => {
-            match docker::list_containers_with_logs(tail.map(|t| t.to_string()).as_deref().unwrap_or("100")).await {
+            match docker::list_containers_with_logs(
+                tail.map(|t| t.to_string()).as_deref().unwrap_or("100"),
+            )
+            .await
+            {
                 Ok(containers) => {
                     if let Some(container) = containers.iter().find(|c| c.name == *name) {
                         let logs = container.logs.clone();
-                        let msg = format!("Retrieved {} bytes of logs from container '{}'", logs.len(), name);
+                        let msg = format!(
+                            "Retrieved {} bytes of logs from container '{}'",
+                            logs.len(),
+                            name
+                        );
                         info!("{}", msg);
                         (0, logs, String::new())
                     } else {
@@ -72,42 +79,38 @@ pub async fn execute_docker_operation(
             }
         }
 
-        DockerOperation::Inspect(ref name) => {
-            match docker::list_containers().await {
-                Ok(containers) => {
-                    if let Some(container) = containers.iter().find(|c| c.name == *name) {
-                        let inspect_json = serde_json::to_string_pretty(container)
-                            .unwrap_or_else(|_| format!("Container: {}", container.name));
-                        info!("Inspected container '{}'", name);
-                        (0, inspect_json, String::new())
-                    } else {
-                        let err_msg = format!("Container '{}' not found", name);
-                        error!("{}", err_msg);
-                        (1, String::new(), err_msg)
-                    }
-                }
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    error!("Failed to inspect container '{}': {}", name, err_msg);
+        DockerOperation::Inspect(ref name) => match docker::list_containers().await {
+            Ok(containers) => {
+                if let Some(container) = containers.iter().find(|c| c.name == *name) {
+                    let inspect_json = serde_json::to_string_pretty(container)
+                        .unwrap_or_else(|_| format!("Container: {}", container.name));
+                    info!("Inspected container '{}'", name);
+                    (0, inspect_json, String::new())
+                } else {
+                    let err_msg = format!("Container '{}' not found", name);
+                    error!("{}", err_msg);
                     (1, String::new(), err_msg)
                 }
             }
-        }
+            Err(e) => {
+                let err_msg = e.to_string();
+                error!("Failed to inspect container '{}': {}", name, err_msg);
+                (1, String::new(), err_msg)
+            }
+        },
 
-        DockerOperation::Pause(ref name) => {
-            match docker::pause(name).await {
-                Ok(_) => {
-                    let msg = format!("Container '{}' paused successfully", name);
-                    info!("{}", msg);
-                    (0, msg, String::new())
-                }
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    error!("Failed to pause container '{}': {}", name, err_msg);
-                    (1, String::new(), err_msg)
-                }
+        DockerOperation::Pause(ref name) => match docker::pause(name).await {
+            Ok(_) => {
+                let msg = format!("Container '{}' paused successfully", name);
+                info!("{}", msg);
+                (0, msg, String::new())
             }
-        }
+            Err(e) => {
+                let err_msg = e.to_string();
+                error!("Failed to pause container '{}': {}", name, err_msg);
+                (1, String::new(), err_msg)
+            }
+        },
     };
 
     let duration_secs = start.elapsed().as_secs();
@@ -123,11 +126,7 @@ pub async fn execute_docker_operation(
             "container": container_name,
             "stdout": stdout,
         })),
-        error: if exit_code != 0 {
-            Some(stderr)
-        } else {
-            None
-        },
+        error: if exit_code != 0 { Some(stderr) } else { None },
     })
 }
 
@@ -138,5 +137,7 @@ pub async fn execute_docker_operation(
     _operation: DockerOperation,
 ) -> Result<CommandResult> {
     use anyhow::anyhow;
-    Err(anyhow!("Docker operations not available: build without docker feature"))
+    Err(anyhow!(
+        "Docker operations not available: build without docker feature"
+    ))
 }

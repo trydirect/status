@@ -25,7 +25,7 @@ impl DockerOperation {
     /// - "docker:inspect:nginx"
     pub fn parse(cmd: &str) -> Result<Self> {
         let parts: Vec<&str> = cmd.split(':').collect();
-        
+
         match (parts.get(0), parts.get(1), parts.get(2)) {
             (Some(&"docker"), Some(&"restart"), Some(&name)) => {
                 validate_container_name(name)?;
@@ -86,7 +86,10 @@ fn validate_container_name(name: &str) -> Result<()> {
     }
 
     // Docker allows alphanumeric, dash, underscore
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
         bail!("Container name contains invalid characters (only alphanumeric, dash, underscore allowed)");
     }
 

@@ -1,12 +1,13 @@
 #![cfg(feature = "docker")]
 use anyhow::{Context, Result};
-use bollard::Docker;
-use bollard::query_parameters::{
-    ListContainersOptions, ListContainersOptionsBuilder, RestartContainerOptions, StopContainerOptions,
-};
 use bollard::container::StatsOptions;
 use bollard::exec::CreateExecOptions;
 use bollard::models::{ContainerStatsResponse, ContainerSummaryStateEnum};
+use bollard::query_parameters::{
+    ListContainersOptions, ListContainersOptionsBuilder, RestartContainerOptions,
+    StopContainerOptions,
+};
+use bollard::Docker;
 use serde::Serialize;
 use tracing::{debug, error};
 
@@ -43,11 +44,8 @@ fn docker_client() -> Docker {
 
 pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
     let docker = docker_client();
-    let opts: Option<ListContainersOptions> = Some(
-        ListContainersOptionsBuilder::default()
-            .all(true)
-            .build()
-    );
+    let opts: Option<ListContainersOptions> =
+        Some(ListContainersOptionsBuilder::default().all(true).build());
     let list = docker
         .list_containers(opts)
         .await
@@ -79,11 +77,8 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
 
 pub async fn list_containers_with_logs(tail: &str) -> Result<Vec<ContainerInfo>> {
     let docker = docker_client();
-    let opts: Option<ListContainersOptions> = Some(
-        ListContainersOptionsBuilder::default()
-            .all(true)
-            .build()
-    );
+    let opts: Option<ListContainersOptions> =
+        Some(ListContainersOptionsBuilder::default().all(true).build());
     let list = docker
         .list_containers(opts)
         .await
@@ -147,17 +142,14 @@ fn calc_cpu_percent(stats: &ContainerStatsResponse) -> f32 {
         return 0.0;
     }
 
-    let online_cpus = cpu_stats
-        .online_cpus
-        .map(|v| v as f64)
-        .unwrap_or_else(|| {
-            cpu_stats
-                .cpu_usage
-                .as_ref()
-                .and_then(|c| c.percpu_usage.as_ref())
-                .map(|v: &Vec<u64>| v.len() as f64)
-                .unwrap_or(1.0)
-        });
+    let online_cpus = cpu_stats.online_cpus.map(|v| v as f64).unwrap_or_else(|| {
+        cpu_stats
+            .cpu_usage
+            .as_ref()
+            .and_then(|c| c.percpu_usage.as_ref())
+            .map(|v: &Vec<u64>| v.len() as f64)
+            .unwrap_or(1.0)
+    });
 
     ((total_delta as f64 / system_delta as f64) * online_cpus * 100.0) as f32
 }
@@ -200,7 +192,13 @@ fn calc_network(stats: &ContainerStatsResponse) -> (u64, u64) {
 async fn fetch_stats_for(docker: &Docker, name: &str) -> Result<ContainerHealth> {
     use futures_util::StreamExt;
 
-    let mut stream = docker.stats(name, Some(StatsOptions { stream: false, one_shot: true }));
+    let mut stream = docker.stats(
+        name,
+        Some(StatsOptions {
+            stream: false,
+            one_shot: true,
+        }),
+    );
     let mut health = ContainerHealth {
         name: name.to_string(),
         status: "unknown".to_string(),
@@ -234,11 +232,8 @@ async fn fetch_stats_for(docker: &Docker, name: &str) -> Result<ContainerHealth>
 
 pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
     let docker = docker_client();
-    let opts: Option<ListContainersOptions> = Some(
-        ListContainersOptionsBuilder::default()
-            .all(true)
-            .build()
-    );
+    let opts: Option<ListContainersOptions> =
+        Some(ListContainersOptionsBuilder::default().all(true).build());
     let list = docker
         .list_containers(opts)
         .await
@@ -267,7 +262,14 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
         };
 
         // Only attempt stats if container is running or paused
-        if matches!(c.state, Some(ContainerSummaryStateEnum::RUNNING | ContainerSummaryStateEnum::RESTARTING | ContainerSummaryStateEnum::PAUSED)) {
+        if matches!(
+            c.state,
+            Some(
+                ContainerSummaryStateEnum::RUNNING
+                    | ContainerSummaryStateEnum::RESTARTING
+                    | ContainerSummaryStateEnum::PAUSED
+            )
+        ) {
             match fetch_stats_for(&docker, &name).await {
                 Ok(stats) => {
                     item.cpu_pct = stats.cpu_pct;
@@ -299,8 +301,7 @@ pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
         .follow(false)
         .tail(tail)
         .build();
-    let mut logs = docker
-        .logs(name, Some(opts));
+    let mut logs = docker.logs(name, Some(opts));
     let mut log_text = String::new();
     while let Some(log_line) = logs.next().await {
         match log_line {
@@ -344,8 +345,8 @@ pub async fn pause(name: &str) -> Result<()> {
 /// Execute a shell command inside a running container.
 /// Returns Ok(()) on success (exit code 0), Err otherwise.
 pub async fn exec_in_container(name: &str, cmd: &str) -> Result<()> {
-    use futures_util::StreamExt;
     use bollard::exec::StartExecResults;
+    use futures_util::StreamExt;
 
     let docker = docker_client();
     // Create exec instance
@@ -356,7 +357,11 @@ pub async fn exec_in_container(name: &str, cmd: &str) -> Result<()> {
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
                 tty: Some(false),
-                cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()]),
+                cmd: Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    cmd.to_string(),
+                ]),
                 ..Default::default()
             },
         )
@@ -388,13 +393,26 @@ pub async fn exec_in_container(name: &str, cmd: &str) -> Result<()> {
     }
 
     // Inspect exec to get exit code
-    let info = docker.inspect_exec(&exec.id).await.context("inspect exec")?;
+    let info = docker
+        .inspect_exec(&exec.id)
+        .await
+        .context("inspect exec")?;
     let exit_code = info.exit_code.unwrap_or_default();
     if exit_code == 0 {
-        debug!(container = name, command = cmd, "exec completed successfully");
+        debug!(
+            container = name,
+            command = cmd,
+            "exec completed successfully"
+        );
         Ok(())
     } else {
-        error!(container = name, command = cmd, exit_code, output = combined, "exec failed");
+        error!(
+            container = name,
+            command = cmd,
+            exit_code,
+            output = combined,
+            "exec failed"
+        );
         Err(anyhow::anyhow!("exec failed with code {}", exit_code))
     }
 }

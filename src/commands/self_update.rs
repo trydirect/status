@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
-use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub enum UpdatePhase {
@@ -20,7 +20,11 @@ pub struct UpdateStatus {
 }
 
 impl UpdateStatus {
-    pub fn new() -> Self { Self { phase: UpdatePhase::Pending } }
+    pub fn new() -> Self {
+        Self {
+            phase: UpdatePhase::Pending,
+        }
+    }
 }
 
 pub type UpdateJobs = Arc<RwLock<HashMap<String, UpdateStatus>>>;
@@ -50,7 +54,12 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
         } else if let (Some(srv), Some(ver)) = (server_url, target_version.clone()) {
             // Detect platform and construct binary name
             let binary_name = detect_binary_name();
-            format!("{}/releases/{}/{}", srv.trim_end_matches('/'), ver, binary_name)
+            format!(
+                "{}/releases/{}/{}",
+                srv.trim_end_matches('/'),
+                ver,
+                binary_name
+            )
         } else {
             let mut w = jobs_clone.write().await;
             if let Some(st) = w.get_mut(&id_clone) {
@@ -61,7 +70,9 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
 
         {
             let mut w = jobs_clone.write().await;
-            if let Some(st) = w.get_mut(&id_clone) { st.phase = UpdatePhase::Downloading; }
+            if let Some(st) = w.get_mut(&id_clone) {
+                st.phase = UpdatePhase::Downloading;
+            }
         }
 
         let tmp_path = format!("/tmp/status-panel.{}.bin", id_clone);
@@ -69,31 +80,40 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
             let resp = reqwest::Client::new()
                 .get(&url)
                 .timeout(std::time::Duration::from_secs(300))
-                .send().await
+                .send()
+                .await
                 .context("download request failed")?;
             if !resp.status().is_success() {
                 anyhow::bail!("download returned status {}", resp.status());
             }
             let bytes = resp.bytes().await.context("reading download bytes")?;
-            tokio::fs::write(&tmp_path, &bytes).await.context("writing temp binary")?;
+            tokio::fs::write(&tmp_path, &bytes)
+                .await
+                .context("writing temp binary")?;
             Result::<()>::Ok(())
         };
 
         if let Err(e) = dl.await {
             let mut w = jobs_clone.write().await;
-            if let Some(st) = w.get_mut(&id_clone) { st.phase = UpdatePhase::Failed(e.to_string()); }
+            if let Some(st) = w.get_mut(&id_clone) {
+                st.phase = UpdatePhase::Failed(e.to_string());
+            }
             return;
         }
 
         {
             let mut w = jobs_clone.write().await;
-            if let Some(st) = w.get_mut(&id_clone) { st.phase = UpdatePhase::Verifying; }
+            if let Some(st) = w.get_mut(&id_clone) {
+                st.phase = UpdatePhase::Verifying;
+            }
         }
 
         // Optional SHA256 verification
         if let Some(expected) = expected_sha {
             let verify_res = async {
-                let data = tokio::fs::read(&tmp_path).await.context("reading temp binary for sha256")?;
+                let data = tokio::fs::read(&tmp_path)
+                    .await
+                    .context("reading temp binary for sha256")?;
                 let mut hasher = Sha256::new();
                 hasher.update(&data);
                 let got = format!("{:x}", hasher.finalize());
@@ -101,18 +121,23 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
                     anyhow::bail!("sha256 mismatch: got {} expected {}", got, expected);
                 }
                 Result::<()>::Ok(())
-            }.await;
+            }
+            .await;
 
             if let Err(e) = verify_res {
                 let mut w = jobs_clone.write().await;
-                if let Some(st) = w.get_mut(&id_clone) { st.phase = UpdatePhase::Failed(e.to_string()); }
+                if let Some(st) = w.get_mut(&id_clone) {
+                    st.phase = UpdatePhase::Failed(e.to_string());
+                }
                 return;
             }
         }
 
         // Completed preparation (download + verify). Deployment handled in a later phase.
         let mut w = jobs_clone.write().await;
-        if let Some(st) = w.get_mut(&id_clone) { st.phase = UpdatePhase::Completed; }
+        if let Some(st) = w.get_mut(&id_clone) {
+            st.phase = UpdatePhase::Completed;
+        }
     });
 
     Ok(id)

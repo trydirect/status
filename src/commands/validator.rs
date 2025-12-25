@@ -18,7 +18,11 @@ impl Default for ValidatorConfig {
     fn default() -> Self {
         let mut allowed_programs = HashSet::new();
         // Minimal safe defaults; expand as needed
-        for p in ["echo", "sleep", "ls", "tar", "gzip", "uname", "date", "df", "du"].iter() {
+        for p in [
+            "echo", "sleep", "ls", "tar", "gzip", "uname", "date", "df", "du",
+        ]
+        .iter()
+        {
             allowed_programs.insert(p.to_string());
         }
 
@@ -44,7 +48,9 @@ impl CommandValidator {
     }
 
     pub fn default_secure() -> Self {
-        Self { config: ValidatorConfig::default() }
+        Self {
+            config: ValidatorConfig::default(),
+        }
     }
 
     /// Validate a command; returns Ok if safe else Err explaining the issue
@@ -80,7 +86,11 @@ impl CommandValidator {
 
         // Argument constraints
         if args.len() > self.config.max_args {
-            bail!(format!("too many arguments: {} > {}", args.len(), self.config.max_args));
+            bail!(format!(
+                "too many arguments: {} > {}",
+                args.len(),
+                self.config.max_args
+            ));
         }
 
         // Disallowed metacharacters commonly used for command injection
@@ -136,16 +146,17 @@ impl CommandValidator {
 
     fn is_safe_string(&self, s: &str) -> bool {
         // Allow letters, numbers, space, underscore, dash, dot, slash, colon, equals
-        s.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | '/' | ':' | '='))
+        s.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | '/' | ':' | '='))
     }
 
     /// Validate Docker command in format: docker:operation:container_name
     fn validate_docker_command(&self, cmd: &str) -> Result<()> {
         use crate::commands::DockerOperation;
-        
+
         // Parse and validate the Docker operation
         let _op = DockerOperation::parse(cmd)?;
-        
+
         // If parsing succeeds, the command is valid
         Ok(())
     }
@@ -162,7 +173,11 @@ mod tests {
     use super::*;
 
     fn cmd(id: &str, name: &str) -> AgentCommand {
-        AgentCommand { id: id.to_string(), name: name.to_string(), params: serde_json::json!({}) }
+        AgentCommand {
+            id: id.to_string(),
+            name: name.to_string(),
+            params: serde_json::json!({}),
+        }
     }
 
     #[test]

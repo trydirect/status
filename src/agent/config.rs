@@ -1,12 +1,17 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use anyhow::{Result, Context};
 use std::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReqData { pub email: String }
+pub struct ReqData {
+    pub email: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppInfo { pub name: String, pub version: String }
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -27,7 +32,10 @@ impl Config {
                     let mut parts = item.split('-');
                     let name = parts.next()?;
                     let version = parts.next().unwrap_or("");
-                    Some(AppInfo { name: name.to_string(), version: version.to_string() })
+                    Some(AppInfo {
+                        name: name.to_string(),
+                        version: version.to_string(),
+                    })
                 })
                 .collect::<Vec<_>>()
         });
@@ -43,8 +51,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_config_parsing() {
@@ -64,7 +72,7 @@ mod tests {
         assert_eq!(config.domain, Some("example.com".to_string()));
         assert_eq!(config.reqdata.email, "test@example.com");
         assert_eq!(config.ssl, Some("letsencrypt".to_string()));
-        
+
         let apps = config.apps_info.unwrap();
         assert_eq!(apps.len(), 2);
         assert_eq!(apps[0].name, "app1");
@@ -83,7 +91,7 @@ mod tests {
     fn test_config_invalid_json() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "{{invalid json").unwrap();
-        
+
         let result = Config::from_file(file.path().to_str().unwrap());
         assert!(result.is_err());
     }
@@ -102,7 +110,7 @@ mod tests {
 
         let config = Config::from_file(file.path().to_str().unwrap()).unwrap();
         let apps = config.apps_info.unwrap();
-        
+
         assert_eq!(apps.len(), 3);
         assert_eq!(apps[0].name, "nginx");
         assert_eq!(apps[0].version, "latest");

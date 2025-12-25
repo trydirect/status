@@ -1,9 +1,9 @@
-use status_panel::commands::{start_update_job, get_update_status, UpdatePhase};
-use tokio::time::{sleep, Duration};
+use sha2::{Digest, Sha256};
+use status_panel::commands::{get_update_status, start_update_job, UpdatePhase};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
-use sha2::{Digest, Sha256};
+use tokio::time::{sleep, Duration};
 
 // Integration test covering download + optional sha256 verification.
 #[tokio::test]
@@ -37,14 +37,16 @@ async fn start_update_job_downloads_and_verifies() {
     for _ in 0..30 {
         if let Some(st) = get_update_status(jobs.clone(), &job_id).await {
             phase = st.phase;
-            if matches!(phase, UpdatePhase::Completed | UpdatePhase::Failed(_)) { break; }
+            if matches!(phase, UpdatePhase::Completed | UpdatePhase::Failed(_)) {
+                break;
+            }
         }
         sleep(Duration::from_millis(100)).await;
     }
 
     mock.assert_async().await;
     match phase {
-        UpdatePhase::Completed => {},
+        UpdatePhase::Completed => {}
         UpdatePhase::Failed(msg) => panic!("update failed: {}", msg),
         other => panic!("unexpected phase: {:?}", other),
     }

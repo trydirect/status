@@ -1,46 +1,60 @@
 use anyhow::Result;
-use axum::{
-    routing::{get, post},
-    Router, response::IntoResponse, extract::Path,
-    http::{StatusCode, HeaderMap}, Json, response::Html, response::Redirect,
-    extract::Form, extract::State, extract::WebSocketUpgrade, extract::Query,
-};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use axum::{
+    extract::Form,
+    extract::Path,
+    extract::Query,
+    extract::State,
+    extract::WebSocketUpgrade,
+    http::{HeaderMap, StatusCode},
+    response::Html,
+    response::IntoResponse,
+    response::Redirect,
+    routing::{get, post},
+    Json, Router,
+};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::VecDeque;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::collections::VecDeque;
 use std::time::Duration;
-use std::future::IntoFuture;
-use tracing::{info, error, debug};
 use tera::Tera;
 use tokio::sync::{broadcast, Mutex, Notify};
-use bytes::Bytes;
+use tracing::{debug, error, info};
 
-use crate::agent::config::Config;
 use crate::agent::backup::BackupSigner;
-use crate::security::auth::{SessionStore, SessionUser, Credentials};
-use crate::security::audit_log::AuditLogger;
-use crate::security::request_signer::verify_signature;
-use crate::security::rate_limit::RateLimiter;
-use crate::security::replay::ReplayProtection;
-use crate::security::scopes::Scopes;
-use crate::security::vault_client::VaultClient;
-use crate::security::token_cache::TokenCache;
-use crate::security::token_refresh::spawn_token_refresh;
-use crate::monitoring::{MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx, spawn_heartbeat};
+use crate::agent::config::Config;
 #[cfg(feature = "docker")]
 use crate::agent::docker;
-use crate::commands::{CommandValidator, TimeoutStrategy, DockerOperation};
-use crate::commands::{check_remote_version, start_update_job, get_update_status, UpdateJobs, UpdateStatus, UpdatePhase};
-use crate::commands::{backup_current_binary, deploy_temp_binary, restart_service, record_rollback, rollback_latest};
-use crate::VERSION;
-use crate::commands::executor::CommandExecutor;
 use crate::commands::execute_docker_operation;
+use crate::commands::executor::CommandExecutor;
+use crate::commands::{
+    backup_current_binary, deploy_temp_binary, record_rollback, restart_service, rollback_latest,
+};
+use crate::commands::{
+    check_remote_version, get_update_status, start_update_job, UpdateJobs, UpdatePhase,
+    UpdateStatus,
+};
+use crate::commands::{CommandValidator, DockerOperation, TimeoutStrategy};
+use crate::monitoring::{
+    spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx,
+};
+use crate::security::audit_log::AuditLogger;
+use crate::security::auth::{Credentials, SessionStore, SessionUser};
+use crate::security::rate_limit::RateLimiter;
+use crate::security::replay::ReplayProtection;
+use crate::security::request_signer::verify_signature;
+use crate::security::scopes::Scopes;
+use crate::security::token_cache::TokenCache;
+use crate::security::token_refresh::spawn_token_refresh;
+use crate::security::vault_client::VaultClient;
 use crate::transport::{Command as AgentCommand, CommandResult};
+use crate::VERSION;
 
 type SharedState = Arc<AppState>;
 
@@ -122,19 +136,16 @@ impl AppState {
         } else {
             None
         };
-        
-        let vault_client = VaultClient::from_env()
-            .ok()
-            .flatten()
-            .map(|vc| {
-                debug!("Vault client initialized for token rotation");
-                vc
-            });
-        
-        let token_cache = vault_client.is_some().then(|| {
-            TokenCache::new(std::env::var("AGENT_TOKEN").unwrap_or_default())
+
+        let vault_client = VaultClient::from_env().ok().flatten().map(|vc| {
+            debug!("Vault client initialized for token rotation");
+            vc
         });
-        
+
+        let token_cache = vault_client
+            .is_some()
+            .then(|| TokenCache::new(std::env::var("AGENT_TOKEN").unwrap_or_default()));
+
         Self {
             session_store: SessionStore::new(),
             config,
@@ -152,16 +163,18 @@ impl AppState {
                 std::env::var("RATE_LIMIT_PER_MIN")
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(120)
+                    .unwrap_or(120),
             ),
             replay: ReplayProtection::new_ttl(
                 std::env::var("REPLAY_TTL_SECS")
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(600)
+                    .unwrap_or(600),
             ),
             scopes: Scopes::from_env(),
-            agent_token: Arc::new(tokio::sync::RwLock::new(std::env::var("AGENT_TOKEN").unwrap_or_default())),
+            agent_token: Arc::new(tokio::sync::RwLock::new(
+                std::env::var("AGENT_TOKEN").unwrap_or_default(),
+            )),
             vault_client,
             token_cache,
             update_jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -205,9 +218,7 @@ pub struct HealthResponse {
     pub last_refresh_ok: Option<bool>,
 }
 
-async fn health(
-    State(state): State<SharedState>,
-) -> impl IntoResponse {
+async fn health(State(state): State<SharedState>) -> impl IntoResponse {
     let token_age_seconds = if let Some(cache) = &state.token_cache {
         cache.age_seconds().await
     } else {
@@ -229,19 +240,18 @@ async fn health(
 }
 
 // Login form (GET)
-async fn login_page(
-    State(state): State<SharedState>,
-) -> impl IntoResponse {
+async fn login_page(State(state): State<SharedState>) -> impl IntoResponse {
     if state.with_ui {
         if let Some(templates) = &state.templates {
             let mut context = tera::Context::new();
             context.insert("error", &false);
-            
+
             match templates.render("login.html", &context) {
                 Ok(html) => Html(html).into_response(),
                 Err(e) => {
                     error!("Template render error: {}", e);
-                    Html("<html><body>Error rendering template</body></html>".to_string()).into_response()
+                    Html("<html><body>Error rendering template</body></html>".to_string())
+                        .into_response()
                 }
             }
         } else {
@@ -272,15 +282,13 @@ async fn login_handler(
                 let mut context = tera::Context::new();
                 context.insert("error", &true);
                 match templates.render("login.html", &context) {
-                    Ok(html) => Err((
-                        StatusCode::UNAUTHORIZED,
-                        Html(html).into_response(),
-                    )),
+                    Ok(html) => Err((StatusCode::UNAUTHORIZED, Html(html).into_response())),
                     Err(e) => {
                         error!("Template render error: {}", e);
                         Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            Html("<html><body>Login failed</body></html>".to_string()).into_response(),
+                            Html("<html><body>Login failed</body></html>".to_string())
+                                .into_response(),
                         ))
                     }
                 }
@@ -295,16 +303,15 @@ async fn login_handler(
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse {
                     error: "Invalid credentials".to_string(),
-                }).into_response(),
+                })
+                .into_response(),
             ))
         }
     }
 }
 
 // Logout handler
-async fn logout_handler(
-    State(state): State<SharedState>,
-) -> impl IntoResponse {
+async fn logout_handler(State(state): State<SharedState>) -> impl IntoResponse {
     // @todo Extract session ID from cookies and delete
     debug!("user logged out");
     if state.with_ui {
@@ -316,9 +323,7 @@ async fn logout_handler(
 
 // Get home (list containers, config)
 #[cfg(feature = "docker")]
-async fn home(
-    State(state): State<SharedState>,
-) -> impl IntoResponse {
+async fn home(State(state): State<SharedState>) -> impl IntoResponse {
     use crate::agent::docker;
     let list_result = if state.with_ui {
         docker::list_containers_with_logs("200").await
@@ -333,7 +338,10 @@ async fn home(
                     let mut context = tera::Context::new();
                     // Match template expectations
                     context.insert("container_list", &containers);
-                    context.insert("apps_info", &state.config.apps_info.clone().unwrap_or_default());
+                    context.insert(
+                        "apps_info",
+                        &state.config.apps_info.clone().unwrap_or_default(),
+                    );
                     context.insert("errors", &Option::<String>::None);
                     context.insert("ip", &Option::<String>::None);
                     context.insert("domainIp", &Option::<String>::None);
@@ -342,7 +350,7 @@ async fn home(
                     context.insert("ssl_enabled", &state.config.ssl.is_some());
                     context.insert("can_enable", &false); // TODO: implement DNS check
                     context.insert("ip_help_link", "https://www.whatismyip.com/");
-                    
+
                     match templates.render("index.html", &context) {
                         Ok(html) => Html(html).into_response(),
                         Err(e) => {
@@ -360,7 +368,8 @@ async fn home(
                         "domain": state.config.domain,
                         "apps_info": state.config.apps_info,
                     }
-                })).into_response()
+                }))
+                .into_response()
             }
         }
         Err(e) => {
@@ -424,7 +433,12 @@ fn build_certbot_cmds(config: &Config) -> (String, String) {
 async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoResponse {
     let nginx = std::env::var("NGINX_CONTAINER").unwrap_or_else(|_| "nginx".to_string());
     // Prepare challenge directory
-    if let Err(e) = docker::exec_in_container(&nginx, "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge").await {
+    if let Err(e) = docker::exec_in_container(
+        &nginx,
+        "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge",
+    )
+    .await
+    {
         error!("failed to prepare acme-challenge dir: {}", e);
         return Redirect::to("/").into_response();
     }
@@ -447,13 +461,24 @@ async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoRespon
         if let Some(ref sd) = state.config.subdomains {
             match sd {
                 serde_json::Value::Object(map) => {
-                    for k in map.keys() { names.push(k.clone()); }
+                    for k in map.keys() {
+                        names.push(k.clone());
+                    }
                 }
                 serde_json::Value::Array(arr) => {
-                    for v in arr { if let Some(s) = v.as_str() { names.push(s.to_string()); } }
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            names.push(s.to_string());
+                        }
+                    }
                 }
                 serde_json::Value::String(s) => {
-                    for part in s.split(',') { let p = part.trim(); if !p.is_empty() { names.push(p.to_string()); } }
+                    for part in s.split(',') {
+                        let p = part.trim();
+                        if !p.is_empty() {
+                            names.push(p.to_string());
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -479,9 +504,26 @@ async fn disable_ssl_handler(State(state): State<SharedState>) -> impl IntoRespo
     let mut names: Vec<String> = Vec::new();
     if let Some(ref sd) = state.config.subdomains {
         match sd {
-            serde_json::Value::Object(map) => { for k in map.keys() { names.push(k.clone()); } }
-            serde_json::Value::Array(arr) => { for v in arr { if let Some(s) = v.as_str() { names.push(s.to_string()); } } }
-            serde_json::Value::String(s) => { for part in s.split(',') { let p = part.trim(); if !p.is_empty() { names.push(p.to_string()); } } }
+            serde_json::Value::Object(map) => {
+                for k in map.keys() {
+                    names.push(k.clone());
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    if let Some(s) = v.as_str() {
+                        names.push(s.to_string());
+                    }
+                }
+            }
+            serde_json::Value::String(s) => {
+                for part in s.split(',') {
+                    let p = part.trim();
+                    if !p.is_empty() {
+                        names.push(p.to_string());
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -510,7 +552,8 @@ async fn restart_container(
             if state.with_ui {
                 Redirect::to("/").into_response()
             } else {
-                Json(json!({"action": "restart", "container": name, "status": "ok"})).into_response()
+                Json(json!({"action": "restart", "container": name, "status": "ok"}))
+                    .into_response()
             }
         }
         Err(e) => {
@@ -587,8 +630,8 @@ async fn backup_ping(
     }
 
     // Get deployment hash from environment
-    let deployment_hash = std::env::var("DEPLOYMENT_HASH")
-        .unwrap_or_else(|_| "default_deployment_hash".to_string());
+    let deployment_hash =
+        std::env::var("DEPLOYMENT_HASH").unwrap_or_else(|_| "default_deployment_hash".to_string());
 
     let signer = BackupSigner::new(deployment_hash.as_bytes());
 
@@ -602,9 +645,10 @@ async fn backup_ping(
 
     if is_valid {
         // Generate new signed hash
-        let new_hash = signer.sign(&deployment_hash)
+        let new_hash = signer
+            .sign(&deployment_hash)
             .unwrap_or_else(|_| deployment_hash.clone());
-        
+
         debug!("Backup ping verified from {}", request_ip);
         Ok(Json(BackupPingResponse {
             status: "OK".to_string(),
@@ -627,7 +671,6 @@ async fn backup_download(
     ClientIp(request_ip): ClientIp,
     Path((hash, target_ip)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
-
     // Check if request is from target IP
     if request_ip != target_ip {
         error!(
@@ -643,8 +686,8 @@ async fn backup_download(
     }
 
     // Get deployment hash and verify
-    let deployment_hash = std::env::var("DEPLOYMENT_HASH")
-        .unwrap_or_else(|_| "default_deployment_hash".to_string());
+    let deployment_hash =
+        std::env::var("DEPLOYMENT_HASH").unwrap_or_else(|_| "default_deployment_hash".to_string());
 
     let signer = BackupSigner::new(deployment_hash.as_bytes());
 
@@ -677,17 +720,19 @@ async fn backup_download(
                         .unwrap_or("backup.tar.gz.cpt");
 
                     debug!("Backup downloaded by {}: {}", request_ip, filename);
-                    
+
                     // Use HeaderMap to avoid lifetime issues
                     use axum::http::HeaderMap;
                     let mut headers = HeaderMap::new();
                     headers.insert(
                         axum::http::header::CONTENT_TYPE,
-                        "application/octet-stream".parse().unwrap()
+                        "application/octet-stream".parse().unwrap(),
                     );
                     headers.insert(
                         axum::http::header::CONTENT_DISPOSITION,
-                        format!("attachment; filename=\"{}\"", filename).parse().unwrap()
+                        format!("attachment; filename=\"{}\"", filename)
+                            .parse()
+                            .unwrap(),
                     );
 
                     Ok((StatusCode::OK, headers, content))
@@ -724,7 +769,8 @@ async fn stack_health() -> impl IntoResponse {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": e.to_string()})),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -740,7 +786,10 @@ async fn metrics_handler(State(state): State<SharedState>) -> impl IntoResponse 
     Json(snapshot)
 }
 
-async fn metrics_ws_handler(State(state): State<SharedState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+async fn metrics_ws_handler(
+    State(state): State<SharedState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| metrics_ws_stream(state, socket))
 }
 
@@ -822,77 +871,165 @@ async fn self_version(State(_state): State<SharedState>) -> impl IntoResponse {
         available = Some(rv.version);
     }
     let has_update = available.as_ref().map(|a| a != &current).unwrap_or(false);
-    Json(SelfVersionResponse { current, available, has_update })
+    Json(SelfVersionResponse {
+        current,
+        available,
+        has_update,
+    })
 }
 
 #[derive(Deserialize)]
-struct StartUpdateRequest { version: Option<String> }
+struct StartUpdateRequest {
+    version: Option<String>,
+}
 
-async fn self_update_start(State(state): State<SharedState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
+async fn self_update_start(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
     // Require agent id header as with v2.0 endpoints
-    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+    if let Err(resp) = validate_agent_id(&headers) {
+        return resp.into_response();
+    }
     let req: StartUpdateRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     match start_update_job(state.update_jobs.clone(), req.version).await {
         Ok(id) => (StatusCode::ACCEPTED, Json(json!({"job_id": id}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-async fn self_update_status(State(state): State<SharedState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn self_update_status(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match get_update_status(state.update_jobs.clone(), &id).await {
         Some(st) => {
-            let phase = match st.phase { UpdatePhase::Pending => "pending", UpdatePhase::Downloading => "downloading", UpdatePhase::Verifying => "verifying", UpdatePhase::Completed => "completed", UpdatePhase::Failed(_) => "failed" };
+            let phase = match st.phase {
+                UpdatePhase::Pending => "pending",
+                UpdatePhase::Downloading => "downloading",
+                UpdatePhase::Verifying => "verifying",
+                UpdatePhase::Completed => "completed",
+                UpdatePhase::Failed(_) => "failed",
+            };
             Json(json!({"job_id": id, "phase": phase})).into_response()
-        },
-        None => (StatusCode::NOT_FOUND, Json(json!({"error": "job not found"}))).into_response(),
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "job not found"})),
+        )
+            .into_response(),
     }
 }
 
 #[derive(Deserialize)]
-struct DeployRequest { job_id: String, install_path: Option<String>, service_name: Option<String> }
+struct DeployRequest {
+    job_id: String,
+    install_path: Option<String>,
+    service_name: Option<String>,
+}
 
-async fn self_update_deploy(State(state): State<SharedState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
-    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+async fn self_update_deploy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(resp) = validate_agent_id(&headers) {
+        return resp.into_response();
+    }
     let req: DeployRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
-    let install_path = req.install_path.unwrap_or_else(|| "/usr/local/bin/status".to_string());
+    let install_path = req
+        .install_path
+        .unwrap_or_else(|| "/usr/local/bin/status".to_string());
     // Backup current
     match backup_current_binary(&install_path, &req.job_id).await {
         Ok(backup_path) => {
             if let Err(e) = record_rollback(&req.job_id, &backup_path, &install_path).await {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
             }
-        },
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("backup failed: {}", e)}))).into_response(),
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("backup failed: {}", e)})),
+            )
+                .into_response()
+        }
     }
 
     // Deploy temp binary
     if let Err(e) = deploy_temp_binary(&req.job_id, &install_path).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("deploy failed: {}", e)}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("deploy failed: {}", e)})),
+        )
+            .into_response();
     }
 
     // Try to restart service if provided
     if let Some(svc) = req.service_name {
         if let Err(e) = restart_service(&svc).await {
             // Best-effort: return 202 with warning so external orchestrator can proceed
-            return (StatusCode::ACCEPTED, Json(json!({"deployed": true, "restart_error": e.to_string()}))).into_response();
+            return (
+                StatusCode::ACCEPTED,
+                Json(json!({"deployed": true, "restart_error": e.to_string()})),
+            )
+                .into_response();
         }
     }
 
     (StatusCode::ACCEPTED, Json(json!({"deployed": true}))).into_response()
 }
 
-async fn self_update_rollback(State(_state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+async fn self_update_rollback(
+    State(_state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = validate_agent_id(&headers) {
+        return resp.into_response();
+    }
     match rollback_latest().await {
-        Ok(Some(entry)) => (StatusCode::ACCEPTED, Json(json!({"rolled_back": true, "install_path": entry.install_path}))).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "no backups available"}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(Some(entry)) => (
+            StatusCode::ACCEPTED,
+            Json(json!({"rolled_back": true, "install_path": entry.install_path})),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no backups available"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -907,14 +1044,23 @@ struct WaitParams {
     priority: Option<String>,
 }
 
-fn default_wait_timeout() -> u64 { 30 }
+fn default_wait_timeout() -> u64 {
+    30
+}
 
 fn validate_agent_id(headers: &HeaderMap) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let expected = std::env::var("AGENT_ID").unwrap_or_default();
-    if expected.is_empty() { return Ok(()); }
+    if expected.is_empty() {
+        return Ok(());
+    }
     match headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()) {
         Some(got) if got == expected => Ok(()),
-        _ => Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse{ error: "Invalid or missing X-Agent-Id".to_string() }))),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Invalid or missing X-Agent-Id".to_string(),
+            }),
+        )),
     }
 }
 
@@ -928,40 +1074,82 @@ async fn verify_stacker_post(
     body: &[u8],
     required_scope: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if let Err(resp) = validate_agent_id(headers) { return Err(resp); }
+    if let Err(resp) = validate_agent_id(headers) {
+        return Err(resp);
+    }
 
     // Rate limiting per agent
     let agent_id = header_str(headers, "X-Agent-Id").unwrap_or("");
     if !state.rate_limiter.allow(agent_id).await {
-        state.audit.rate_limited(agent_id, header_str(headers, "X-Request-Id"));
-        return Err((StatusCode::TOO_MANY_REQUESTS, Json(ErrorResponse{ error: "rate limited".into() })));
+        state
+            .audit
+            .rate_limited(agent_id, header_str(headers, "X-Request-Id"));
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: "rate limited".into(),
+            }),
+        ));
     }
 
     // HMAC signature verify
     let token = { state.agent_token.read().await.clone() };
-    let skew = std::env::var("SIGNATURE_MAX_SKEW_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(300);
+    let skew = std::env::var("SIGNATURE_MAX_SKEW_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(300);
     if let Err(e) = verify_signature(headers, body, &token, skew) {
-        state.audit.signature_invalid(Some(agent_id), header_str(headers, "X-Request-Id"));
-        return Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse{ error: format!("invalid signature: {}", e) })));
+        state
+            .audit
+            .signature_invalid(Some(agent_id), header_str(headers, "X-Request-Id"));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: format!("invalid signature: {}", e),
+            }),
+        ));
     }
 
     // Replay prevention
     if let Some(req_id) = header_str(headers, "X-Request-Id") {
         if state.replay.check_and_store(req_id).await.is_err() {
             state.audit.replay_detected(Some(agent_id), Some(req_id));
-            return Err((StatusCode::CONFLICT, Json(ErrorResponse{ error: "replay detected".into() })));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "replay detected".into(),
+                }),
+            ));
         }
     } else {
-        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse{ error: "missing X-Request-Id".into() })));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "missing X-Request-Id".into(),
+            }),
+        ));
     }
 
     // Scope authorization
     if !state.scopes.is_allowed(required_scope) {
-        state.audit.scope_denied(agent_id, header_str(headers, "X-Request-Id"), required_scope);
-        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse{ error: "insufficient scope".into() })));
+        state.audit.scope_denied(
+            agent_id,
+            header_str(headers, "X-Request-Id"),
+            required_scope,
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "insufficient scope".into(),
+            }),
+        ));
     }
 
-    state.audit.auth_success(agent_id, header_str(headers, "X-Request-Id"), required_scope);
+    state.audit.auth_success(
+        agent_id,
+        header_str(headers, "X-Request-Id"),
+        required_scope,
+    );
     Ok(())
 }
 
@@ -971,25 +1159,55 @@ async fn commands_wait(
     Query(params): Query<WaitParams>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+    if let Err(resp) = validate_agent_id(&headers) {
+        return resp.into_response();
+    }
     // Optional signing for GET /wait (empty body) controlled by env flag
-    let require_sig = std::env::var("WAIT_REQUIRE_SIGNATURE").map(|v| v == "true").unwrap_or(false);
+    let require_sig = std::env::var("WAIT_REQUIRE_SIGNATURE")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     if require_sig {
-        if let Err(resp) = verify_stacker_post(&state, &headers, &[], "commands:wait").await { return resp.into_response(); }
+        if let Err(resp) = verify_stacker_post(&state, &headers, &[], "commands:wait").await {
+            return resp.into_response();
+        }
     } else {
         // Lightweight rate limiting without signature
-        if !state.rate_limiter.allow(headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()).unwrap_or("")).await {
-            state.audit.rate_limited(headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()).unwrap_or(""), None);
-            return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": "rate limited"}))).into_response();
+        if !state
+            .rate_limiter
+            .allow(
+                headers
+                    .get("X-Agent-Id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(""),
+            )
+            .await
+        {
+            state.audit.rate_limited(
+                headers
+                    .get("X-Agent-Id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(""),
+                None,
+            );
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error": "rate limited"})),
+            )
+                .into_response();
         }
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(params.timeout);
     loop {
-        if let Some(cmd) = { let mut q = state.commands_queue.lock().await; q.pop_front() } {
+        if let Some(cmd) = {
+            let mut q = state.commands_queue.lock().await;
+            q.pop_front()
+        } {
             return Json(cmd).into_response();
         }
         let now = tokio::time::Instant::now();
-        if now >= deadline { return (StatusCode::NO_CONTENT, "").into_response(); }
+        if now >= deadline {
+            return (StatusCode::NO_CONTENT, "").into_response();
+        }
         let wait = deadline - now;
         tokio::select! {
             _ = state.commands_notify.notified() => {},
@@ -998,22 +1216,46 @@ async fn commands_wait(
     }
 }
 
-async fn commands_report(State(state): State<SharedState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
-    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:report").await { return resp.into_response(); }
+async fn commands_report(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:report").await {
+        return resp.into_response();
+    }
     let res: CommandResult = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     info!(command_id = %res.command_id, status = %res.status, "command result reported");
     (StatusCode::OK, Json(json!({"accepted": true}))).into_response()
 }
 
 // Execute a validated command with a simple timeout strategy
-async fn commands_execute(State(state): State<SharedState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
-    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:execute").await { return resp.into_response(); }
+async fn commands_execute(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:execute").await {
+        return resp.into_response();
+    }
     let cmd: AgentCommand = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     // Check if this is a Docker operation
     if cmd.name.starts_with("docker:") {
@@ -1031,7 +1273,8 @@ async fn commands_execute(State(state): State<SharedState>, headers: HeaderMap, 
                     return (
                         StatusCode::FORBIDDEN,
                         Json(json!({"error": "insufficient scope for docker operation"})),
-                    ).into_response();
+                    )
+                        .into_response();
                 }
                 #[cfg(feature = "docker")]
                 match execute_docker_operation(&cmd.id, op).await {
@@ -1096,10 +1339,18 @@ async fn commands_enqueue(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:enqueue").await { return resp.into_response(); }
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:enqueue").await {
+        return resp.into_response();
+    }
     let cmd: AgentCommand = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     {
         let mut q = state.commands_queue.lock().await;
@@ -1110,24 +1361,40 @@ async fn commands_enqueue(
 }
 
 #[derive(Deserialize)]
-struct RotateTokenRequest { new_token: String }
+struct RotateTokenRequest {
+    new_token: String,
+}
 
 async fn rotate_token(
     State(state): State<SharedState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "auth:rotate").await { return resp.into_response(); }
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "auth:rotate").await {
+        return resp.into_response();
+    }
     let req: RotateTokenRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     {
         let mut token = state.agent_token.write().await;
         *token = req.new_token.clone();
     }
-    let agent_id = headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()).unwrap_or("");
-    state.audit.token_rotated(agent_id, headers.get("X-Request-Id").and_then(|v| v.to_str().ok()));
+    let agent_id = headers
+        .get("X-Agent-Id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    state.audit.token_rotated(
+        agent_id,
+        headers.get("X-Request-Id").and_then(|v| v.to_str().ok()),
+    );
     (StatusCode::OK, Json(json!({"rotated": true}))).into_response()
 }
 
@@ -1137,13 +1404,14 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
 
     // Spawn token refresh task if Vault is configured
     if let (Some(vault_client), Some(token_cache)) = (&state.vault_client, &state.token_cache) {
-        let deployment_hash = std::env::var("DEPLOYMENT_HASH")
-            .unwrap_or_else(|_| "default".to_string());
-        
+        let deployment_hash =
+            std::env::var("DEPLOYMENT_HASH").unwrap_or_else(|_| "default".to_string());
+
         let vault_client_clone = vault_client.clone();
         let token_cache_clone = token_cache.clone();
-        
-        let _refresh_task = spawn_token_refresh(vault_client_clone, deployment_hash, token_cache_clone);
+
+        let _refresh_task =
+            spawn_token_refresh(vault_client_clone, deployment_hash, token_cache_clone);
         info!("Token refresh background task spawned");
     }
 
@@ -1160,9 +1428,8 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
         state.metrics_webhook.clone(),
     );
 
-    let app = create_router(state.clone())
-        .into_make_service_with_connect_info::<SocketAddr>();
-    
+    let app = create_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+
     if with_ui {
         info!("HTTP server with UI starting on port {}", port);
     } else {
