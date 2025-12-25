@@ -96,6 +96,7 @@ pub fn spawn_heartbeat(
 	webhook: Option<String>,
 ) -> JoinHandle<()> {
 	let client = webhook.as_ref().map(|_| Client::new());
+	let agent_id = std::env::var("AGENT_ID").ok();
 	tokio::spawn(async move {
 		loop {
 			let snapshot = collector.snapshot().await;
@@ -113,9 +114,42 @@ pub fn spawn_heartbeat(
 				let http = http.clone();
 				let url = url.clone();
 				let payload = snapshot.clone();
+				let agent = agent_id.clone();
 				tokio::spawn(async move {
-					if let Err(e) = http.post(url).json(&payload).send().await {
-						tracing::warn!("metrics webhook push failed: {}", e);
+					// Exponential backoff with jitter; stop on success or client 4xx
+					let max_retries: u8 = 5;
+					let mut delay = Duration::from_millis(500);
+					for attempt in 1..=max_retries {
+						let mut req = http.post(url.clone()).json(&payload);
+						if let Some(aid) = agent.as_ref() {
+							req = req.header("X-Agent-Id", aid);
+						}
+
+						match req.send().await {
+							Ok(resp) => {
+								let status = resp.status();
+								if status.is_success() {
+									tracing::debug!(attempt, status = %status, "metrics webhook push succeeded");
+									break;
+								} else if status.is_client_error() {
+									// Do not retry on client-side errors (e.g., 401/403/404)
+									tracing::warn!(attempt, status = %status, "metrics webhook push client error; not retrying");
+									break;
+								} else {
+									tracing::warn!(attempt, status = %status, "metrics webhook push server error; will retry");
+								}
+							}
+							Err(e) => {
+								tracing::warn!(attempt, error = %e, "metrics webhook push failed; will retry");
+							}
+						}
+
+						// Jitter derived from current time to avoid herd effects
+						let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+						let jitter = Duration::from_millis(50 + (nanos % 200) as u64);
+						tokio::time::sleep(delay + jitter).await;
+						// Exponential backoff capped at ~8s
+						delay = delay.saturating_mul(2).min(Duration::from_secs(8));
 					}
 				});
 			}

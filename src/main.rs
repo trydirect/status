@@ -1,4 +1,5 @@
 use status_panel::{agent, comms, security, monitoring, utils};
+use dotenvy::dotenv;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -58,6 +59,8 @@ fn run_daemon() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment variables from .env if present
+    let _ = dotenv();
     utils::logging::init();
 
     let args = AppCli::parse();

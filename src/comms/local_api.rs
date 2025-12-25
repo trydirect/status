@@ -2,8 +2,8 @@ use anyhow::Result;
 use axum::{
     routing::{get, post},
     Router, response::IntoResponse, extract::Path,
-    http::StatusCode, Json, response::Html, response::Redirect,
-    extract::Form, extract::State, extract::WebSocketUpgrade,
+    http::{StatusCode, HeaderMap}, Json, response::Html, response::Redirect,
+    extract::Form, extract::State, extract::WebSocketUpgrade, extract::Query,
 };
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::FromRequestParts;
@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::collections::VecDeque;
 use std::time::Duration;
 use std::future::IntoFuture;
 use tracing::{info, error, debug};
 use tera::Tera;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::agent::config::Config;
 use crate::agent::backup::BackupSigner;
@@ -24,6 +25,9 @@ use crate::security::auth::{SessionStore, SessionUser, Credentials};
 use crate::monitoring::{MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx, spawn_heartbeat};
 #[cfg(feature = "docker")]
 use crate::agent::docker;
+use crate::commands::{CommandValidator, TimeoutStrategy};
+use crate::commands::executor::CommandExecutor;
+use crate::transport::{Command as AgentCommand, CommandResult};
 
 type SharedState = Arc<AppState>;
 
@@ -77,6 +81,8 @@ pub struct AppState {
     pub metrics_tx: MetricsTx,
     pub metrics_webhook: Option<String>,
     pub backup_path: Option<String>,
+    pub commands_queue: Arc<Mutex<VecDeque<AgentCommand>>>,
+    pub commands_notify: Arc<Notify>,
 }
 
 impl AppState {
@@ -106,6 +112,8 @@ impl AppState {
             metrics_tx: broadcast::channel(32).0,
             metrics_webhook: std::env::var("METRICS_WEBHOOK").ok(),
             backup_path: std::env::var("BACKUP_PATH").ok(),
+            commands_queue: Arc::new(Mutex::new(VecDeque::new())),
+            commands_notify: Arc::new(Notify::new()),
         }
     }
 }
@@ -283,6 +291,133 @@ async fn home(
             Json(json!({"error": e.to_string()})).into_response()
         }
     }
+}
+
+// ---- SSL enable/disable (Let’s Encrypt or self-signed) ----
+#[cfg(feature = "docker")]
+fn build_certbot_cmds(config: &Config) -> (String, String) {
+    // Domains from subdomains can be object, array, or comma-separated string
+    let mut domains: Vec<String> = Vec::new();
+    if let Some(ref sd) = config.subdomains {
+        match sd {
+            serde_json::Value::Object(map) => {
+                for v in map.values() {
+                    if let Some(s) = v.as_str() {
+                        domains.push(s.to_string());
+                    }
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    if let Some(s) = v.as_str() {
+                        domains.push(s.to_string());
+                    }
+                }
+            }
+            serde_json::Value::String(s) => {
+                for part in s.split(',') {
+                    let p = part.trim();
+                    if !p.is_empty() {
+                        domains.push(p.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let domains_flags = domains
+        .into_iter()
+        .map(|d| format!("-d {}", d))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let email = config.reqdata.email.clone();
+    let reg_cmd = format!("certbot register --email {} --agree-tos -n", email);
+    let crt_cmd = if domains_flags.is_empty() {
+        "certbot --nginx --redirect".to_string()
+    } else {
+        format!("certbot --nginx --redirect {}", domains_flags)
+    };
+
+    (reg_cmd, crt_cmd)
+}
+
+#[cfg(feature = "docker")]
+async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let nginx = std::env::var("NGINX_CONTAINER").unwrap_or_else(|_| "nginx".to_string());
+    // Prepare challenge directory
+    if let Err(e) = docker::exec_in_container(&nginx, "mkdir -p /tmp/letsencrypt/.well-known/acme-challenge").await {
+        error!("failed to prepare acme-challenge dir: {}", e);
+        return Redirect::to("/").into_response();
+    }
+
+    if state.config.ssl.as_deref() == Some("letsencrypt") {
+        let (reg_cmd, crt_cmd) = build_certbot_cmds(&state.config);
+        info!("starting certbot registration and certificate issue");
+        if let Err(e) = docker::exec_in_container(&nginx, &reg_cmd).await {
+            error!("certbot register failed: {}", e);
+            return Redirect::to("/").into_response();
+        }
+        if let Err(e) = docker::exec_in_container(&nginx, &crt_cmd).await {
+            error!("certbot issue failed: {}", e);
+            return Redirect::to("/").into_response();
+        }
+        let _ = docker::restart(&nginx).await;
+    } else {
+        // Self-signed path: replace conf files
+        let mut names: Vec<String> = Vec::new();
+        if let Some(ref sd) = state.config.subdomains {
+            match sd {
+                serde_json::Value::Object(map) => {
+                    for k in map.keys() { names.push(k.clone()); }
+                }
+                serde_json::Value::Array(arr) => {
+                    for v in arr { if let Some(s) = v.as_str() { names.push(s.to_string()); } }
+                }
+                serde_json::Value::String(s) => {
+                    for part in s.split(',') { let p = part.trim(); if !p.is_empty() { names.push(p.to_string()); } }
+                }
+                _ => {}
+            }
+        }
+        for fname in names {
+            let src = format!("./origin_conf/ssl-conf.d/{}.conf", fname);
+            let dst = format!("./destination_conf/conf.d/{}.conf", fname);
+            if let Err(e) = std::fs::copy(&src, &dst) {
+                error!("failed to copy {} -> {}: {}", src, dst, e);
+                return Redirect::to("/").into_response();
+            }
+        }
+        let _ = docker::restart(&nginx).await;
+        debug!("self-signed SSL conf files replaced");
+    }
+
+    Redirect::to("/").into_response()
+}
+
+#[cfg(feature = "docker")]
+async fn disable_ssl_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let nginx = std::env::var("NGINX_CONTAINER").unwrap_or_else(|_| "nginx".to_string());
+    let mut names: Vec<String> = Vec::new();
+    if let Some(ref sd) = state.config.subdomains {
+        match sd {
+            serde_json::Value::Object(map) => { for k in map.keys() { names.push(k.clone()); } }
+            serde_json::Value::Array(arr) => { for v in arr { if let Some(s) = v.as_str() { names.push(s.to_string()); } } }
+            serde_json::Value::String(s) => { for part in s.split(',') { let p = part.trim(); if !p.is_empty() { names.push(p.to_string()); } } }
+            _ => {}
+        }
+    }
+    for fname in names {
+        let src = format!("./origin_conf/conf.d/{}.conf", fname);
+        let dst = format!("./destination_conf/conf.d/{}.conf", fname);
+        if let Err(e) = std::fs::copy(&src, &dst) {
+            error!("failed to copy {} -> {}: {}", src, dst, e);
+            return Redirect::to("/").into_response();
+        }
+    }
+    let _ = docker::restart(&nginx).await;
+    Redirect::to("/").into_response()
 }
 
 // Restart container
@@ -559,10 +694,12 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/logout", get(logout_handler))
         .route("/backup/ping", post(backup_ping))
         .route("/backup/{hash}/{target_ip}", get(backup_download));
-    // v2.0 scaffolding: agent-side stubs for dashboard endpoints
+    // v2.0 endpoints: long-poll commands wait/report and execute
     router = router
-        .route("/api/v1/commands/wait/{hash}", get(commands_wait_stub))
-        .route("/api/v1/commands/report", post(commands_report_stub));
+        .route("/api/v1/commands/wait/{hash}", get(commands_wait))
+        .route("/api/v1/commands/report", post(commands_report))
+        .route("/api/v1/commands/execute", post(commands_execute))
+        .route("/api/v1/commands/enqueue", post(commands_enqueue));
 
     #[cfg(feature = "docker")]
     {
@@ -572,6 +709,10 @@ pub fn create_router(state: SharedState) -> Router {
             .route("/stop/{name}", get(stop_container))
             .route("/pause/{name}", get(pause_container))
             .route("/stack/health", get(stack_health));
+        // SSL management routes
+        router = router
+            .route("/enable_ssl", get(enable_ssl_handler))
+            .route("/disable_ssl", get(disable_ssl_handler));
     }
 
     // Add static file serving when UI is enabled
@@ -583,24 +724,109 @@ pub fn create_router(state: SharedState) -> Router {
     router.with_state(state)
 }
 
-// ------- v2.0 stubs: commands wait/report --------
-use crate::transport::CommandResult;
+// ------- v2.0 long-poll and execute endpoints --------
 
-async fn commands_wait_stub(Path(_hash): Path<String>) -> impl IntoResponse {
-    // Placeholder: return 204 No Content to simulate no commands queued
-    (StatusCode::NO_CONTENT, "").into_response()
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct WaitParams {
+    #[serde(default = "default_wait_timeout")]
+    timeout: u64,
+    #[serde(default)]
+    priority: Option<String>,
 }
 
-async fn commands_report_stub(Json(_res): Json<CommandResult>) -> impl IntoResponse {
-    // Placeholder: accept and return 200 OK
+fn default_wait_timeout() -> u64 { 30 }
+
+fn validate_agent_id(headers: &HeaderMap) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let expected = std::env::var("AGENT_ID").unwrap_or_default();
+    if expected.is_empty() { return Ok(()); }
+    match headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()) {
+        Some(got) if got == expected => Ok(()),
+        _ => Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse{ error: "Invalid or missing X-Agent-Id".to_string() }))),
+    }
+}
+
+async fn commands_wait(
+    State(state): State<SharedState>,
+    Path(_hash): Path<String>,
+    Query(params): Query<WaitParams>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(params.timeout);
+    loop {
+        if let Some(cmd) = { let mut q = state.commands_queue.lock().await; q.pop_front() } {
+            return Json(cmd).into_response();
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline { return (StatusCode::NO_CONTENT, "").into_response(); }
+        let wait = deadline - now;
+        tokio::select! {
+            _ = state.commands_notify.notified() => {},
+            _ = tokio::time::sleep(wait) => { return (StatusCode::NO_CONTENT, "").into_response(); }
+        }
+    }
+}
+
+async fn commands_report(headers: HeaderMap, Json(res): Json<CommandResult>) -> impl IntoResponse {
+    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+    info!(command_id = %res.command_id, status = %res.status, "command result reported");
     (StatusCode::OK, Json(json!({"accepted": true}))).into_response()
+}
+
+// Execute a validated command with a simple timeout strategy
+async fn commands_execute(Json(cmd): Json<AgentCommand>) -> impl IntoResponse {
+    // Validate command
+    let validator = CommandValidator::default_secure();
+    if let Err(e) = validator.validate(&cmd) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid command: {}", e)})),
+        )
+            .into_response();
+    }
+
+    // Optional timeout override in params.timeout_secs
+    let timeout_secs = cmd
+        .params
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+
+    let strategy = TimeoutStrategy::quick_strategy(timeout_secs);
+    let executor = CommandExecutor::new();
+
+    match executor.execute(&cmd, strategy).await {
+        Ok(exec) => Json(exec.to_command_result()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn commands_enqueue(
+    State(state): State<SharedState>,
+    Json(cmd): Json<AgentCommand>
+) -> impl IntoResponse {
+    {
+        let mut q = state.commands_queue.lock().await;
+        q.push_back(cmd);
+    }
+    state.commands_notify.notify_waiters();
+    (StatusCode::ACCEPTED, Json(json!({"queued": true}))).into_response()
 }
 
 pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
     let cfg = Arc::new(config);
     let state = Arc::new(AppState::new(cfg, with_ui));
 
-    let heartbeat_interval = Duration::from_secs(30);
+    let heartbeat_interval = std::env::var("METRICS_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30));
     spawn_heartbeat(
         state.metrics_collector.clone(),
         state.metrics_store.clone(),

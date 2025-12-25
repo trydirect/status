@@ -5,6 +5,7 @@ use bollard::query_parameters::{
     ListContainersOptions, ListContainersOptionsBuilder, RestartContainerOptions, StopContainerOptions,
 };
 use bollard::container::StatsOptions;
+use bollard::exec::CreateExecOptions;
 use bollard::models::{ContainerStatsResponse, ContainerSummaryStateEnum};
 use serde::Serialize;
 use tracing::{debug, error};
@@ -338,4 +339,62 @@ pub async fn pause(name: &str) -> Result<()> {
         .context("pause container")?;
     debug!("paused container: {}", name);
     Ok(())
+}
+
+/// Execute a shell command inside a running container.
+/// Returns Ok(()) on success (exit code 0), Err otherwise.
+pub async fn exec_in_container(name: &str, cmd: &str) -> Result<()> {
+    use futures_util::StreamExt;
+    use bollard::exec::StartExecResults;
+
+    let docker = docker_client();
+    // Create exec instance
+    let exec = docker
+        .create_exec(
+            name,
+            CreateExecOptions {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(false),
+                cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("create exec")?;
+
+    // Start exec and capture output
+    let start = docker
+        .start_exec(&exec.id, None)
+        .await
+        .context("start exec")?;
+
+    let mut combined = String::new();
+    match start {
+        StartExecResults::Detached => {
+            debug!(container = name, command = cmd, "exec detached");
+        }
+        StartExecResults::Attached { mut output, .. } => {
+            while let Some(item) = output.next().await {
+                match item {
+                    Ok(log) => {
+                        let s = format!("{}", log);
+                        combined.push_str(&s);
+                    }
+                    Err(e) => error!("exec output stream error: {}", e),
+                }
+            }
+        }
+    }
+
+    // Inspect exec to get exit code
+    let info = docker.inspect_exec(&exec.id).await.context("inspect exec")?;
+    let exit_code = info.exit_code.unwrap_or_default();
+    if exit_code == 0 {
+        debug!(container = name, command = cmd, "exec completed successfully");
+        Ok(())
+    } else {
+        error!(container = name, command = cmd, exit_code, output = combined, "exec failed");
+        Err(anyhow::anyhow!("exec failed with code {}", exit_code))
+    }
 }
