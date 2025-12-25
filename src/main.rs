@@ -1,4 +1,4 @@
-use status_panel::{agent, comms, security, monitoring, utils};
+use status_panel::{agent, comms, utils};
 use dotenvy::dotenv;
 
 use anyhow::Result;

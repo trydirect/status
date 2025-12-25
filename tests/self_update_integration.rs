@@ -15,7 +15,7 @@ async fn start_update_job_downloads_and_verifies() {
     let expected = format!("{:x}", hasher.finalize());
 
     // Mock server hosting the binary
-    let server = mockito::Server::new_async().await;
+    let mut server = mockito::Server::new_async().await;
     let mock = server
         .mock("GET", "/releases/1.2.3/status-linux-x86_64")
         .with_status(200)
