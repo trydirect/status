@@ -1,0 +1,4 @@
+// Cleanup to avoid test pollution
+std::env::remove_var("VAULT_ADDRESS");
+std::env::remove_var("VAULT_TOKEN");
+std::env::remove_var("VAULT_AGENT_PATH_PREFIX");
