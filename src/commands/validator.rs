@@ -49,6 +49,11 @@ impl CommandValidator {
 
     /// Validate a command; returns Ok if safe else Err explaining the issue
     pub fn validate(&self, command: &AgentCommand) -> Result<()> {
+        // Check for Docker operation first (special case: docker:operation:name)
+        if command.name.starts_with("docker:") {
+            return self.validate_docker_command(&command.name);
+        }
+
         let (program, args) = self.parse_command(&command.name)?;
 
         // Basic program checks
@@ -132,6 +137,17 @@ impl CommandValidator {
     fn is_safe_string(&self, s: &str) -> bool {
         // Allow letters, numbers, space, underscore, dash, dot, slash, colon, equals
         s.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | '/' | ':' | '='))
+    }
+
+    /// Validate Docker command in format: docker:operation:container_name
+    fn validate_docker_command(&self, cmd: &str) -> Result<()> {
+        use crate::commands::DockerOperation;
+        
+        // Parse and validate the Docker operation
+        let _op = DockerOperation::parse(cmd)?;
+        
+        // If parsing succeeds, the command is valid
+        Ok(())
     }
 }
 

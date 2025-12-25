@@ -28,6 +28,8 @@ futures-util = "0.3"
 tera = "1"
 tower-http = { version = "0.6", features = ["fs"] }
 base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
 # System metrics
 sysinfo = "0.30"
 # Docker client for Rust

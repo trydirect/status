@@ -18,15 +18,22 @@ use std::future::IntoFuture;
 use tracing::{info, error, debug};
 use tera::Tera;
 use tokio::sync::{broadcast, Mutex, Notify};
+use bytes::Bytes;
 
 use crate::agent::config::Config;
 use crate::agent::backup::BackupSigner;
 use crate::security::auth::{SessionStore, SessionUser, Credentials};
+use crate::security::audit_log::AuditLogger;
+use crate::security::request_signer::verify_signature;
+use crate::security::rate_limit::RateLimiter;
+use crate::security::replay::ReplayProtection;
+use crate::security::scopes::Scopes;
 use crate::monitoring::{MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx, spawn_heartbeat};
 #[cfg(feature = "docker")]
 use crate::agent::docker;
-use crate::commands::{CommandValidator, TimeoutStrategy};
+use crate::commands::{CommandValidator, TimeoutStrategy, DockerOperation};
 use crate::commands::executor::CommandExecutor;
+use crate::commands::execute_docker_operation;
 use crate::transport::{Command as AgentCommand, CommandResult};
 
 type SharedState = Arc<AppState>;
@@ -83,6 +90,11 @@ pub struct AppState {
     pub backup_path: Option<String>,
     pub commands_queue: Arc<Mutex<VecDeque<AgentCommand>>>,
     pub commands_notify: Arc<Notify>,
+    pub audit: AuditLogger,
+    pub rate_limiter: RateLimiter,
+    pub replay: ReplayProtection,
+    pub scopes: Scopes,
+    pub agent_token: Arc<tokio::sync::RwLock<String>>,
 }
 
 impl AppState {
@@ -114,6 +126,21 @@ impl AppState {
             backup_path: std::env::var("BACKUP_PATH").ok(),
             commands_queue: Arc::new(Mutex::new(VecDeque::new())),
             commands_notify: Arc::new(Notify::new()),
+            audit: AuditLogger::new(),
+            rate_limiter: RateLimiter::new_per_minute(
+                std::env::var("RATE_LIMIT_PER_MIN")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(120)
+            ),
+            replay: ReplayProtection::new_ttl(
+                std::env::var("REPLAY_TTL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(600)
+            ),
+            scopes: Scopes::from_env(),
+            agent_token: Arc::new(tokio::sync::RwLock::new(std::env::var("AGENT_TOKEN").unwrap_or_default())),
         }
     }
 }
@@ -699,7 +726,8 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/v1/commands/wait/{hash}", get(commands_wait))
         .route("/api/v1/commands/report", post(commands_report))
         .route("/api/v1/commands/execute", post(commands_execute))
-        .route("/api/v1/commands/enqueue", post(commands_enqueue));
+        .route("/api/v1/commands/enqueue", post(commands_enqueue))
+        .route("/api/v1/auth/rotate-token", post(rotate_token));
 
     #[cfg(feature = "docker")]
     {
@@ -746,6 +774,53 @@ fn validate_agent_id(headers: &HeaderMap) -> Result<(), (StatusCode, Json<ErrorR
     }
 }
 
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+async fn verify_stacker_post(
+    state: &SharedState,
+    headers: &HeaderMap,
+    body: &[u8],
+    required_scope: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if let Err(resp) = validate_agent_id(headers) { return Err(resp); }
+
+    // Rate limiting per agent
+    let agent_id = header_str(headers, "X-Agent-Id").unwrap_or("");
+    if !state.rate_limiter.allow(agent_id).await {
+        state.audit.rate_limited(agent_id, header_str(headers, "X-Request-Id"));
+        return Err((StatusCode::TOO_MANY_REQUESTS, Json(ErrorResponse{ error: "rate limited".into() })));
+    }
+
+    // HMAC signature verify
+    let token = { state.agent_token.read().await.clone() };
+    let skew = std::env::var("SIGNATURE_MAX_SKEW_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(300);
+    if let Err(e) = verify_signature(headers, body, &token, skew) {
+        state.audit.signature_invalid(Some(agent_id), header_str(headers, "X-Request-Id"));
+        return Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse{ error: format!("invalid signature: {}", e) })));
+    }
+
+    // Replay prevention
+    if let Some(req_id) = header_str(headers, "X-Request-Id") {
+        if state.replay.check_and_store(req_id).await.is_err() {
+            state.audit.replay_detected(Some(agent_id), Some(req_id));
+            return Err((StatusCode::CONFLICT, Json(ErrorResponse{ error: "replay detected".into() })));
+        }
+    } else {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse{ error: "missing X-Request-Id".into() })));
+    }
+
+    // Scope authorization
+    if !state.scopes.is_allowed(required_scope) {
+        state.audit.scope_denied(agent_id, header_str(headers, "X-Request-Id"), required_scope);
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse{ error: "insufficient scope".into() })));
+    }
+
+    state.audit.auth_success(agent_id, header_str(headers, "X-Request-Id"), required_scope);
+    Ok(())
+}
+
 async fn commands_wait(
     State(state): State<SharedState>,
     Path(_hash): Path<String>,
@@ -753,6 +828,17 @@ async fn commands_wait(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+    // Optional signing for GET /wait (empty body) controlled by env flag
+    let require_sig = std::env::var("WAIT_REQUIRE_SIGNATURE").map(|v| v == "true").unwrap_or(false);
+    if require_sig {
+        if let Err(resp) = verify_stacker_post(&state, &headers, &[], "commands:wait").await { return resp.into_response(); }
+    } else {
+        // Lightweight rate limiting without signature
+        if !state.rate_limiter.allow(headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()).unwrap_or("")).await {
+            state.audit.rate_limited(headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()).unwrap_or(""), None);
+            return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": "rate limited"}))).into_response();
+        }
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(params.timeout);
     loop {
         if let Some(cmd) = { let mut q = state.commands_queue.lock().await; q.pop_front() } {
@@ -768,15 +854,70 @@ async fn commands_wait(
     }
 }
 
-async fn commands_report(headers: HeaderMap, Json(res): Json<CommandResult>) -> impl IntoResponse {
-    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+async fn commands_report(State(state): State<SharedState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:report").await { return resp.into_response(); }
+    let res: CommandResult = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    };
     info!(command_id = %res.command_id, status = %res.status, "command result reported");
     (StatusCode::OK, Json(json!({"accepted": true}))).into_response()
 }
 
 // Execute a validated command with a simple timeout strategy
-async fn commands_execute(Json(cmd): Json<AgentCommand>) -> impl IntoResponse {
-    // Validate command
+async fn commands_execute(State(state): State<SharedState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:execute").await { return resp.into_response(); }
+    let cmd: AgentCommand = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    };
+    // Check if this is a Docker operation
+    if cmd.name.starts_with("docker:") {
+        match DockerOperation::parse(&cmd.name) {
+            Ok(op) => {
+                // Extra scope check for specific Docker operation
+                let scope = match &op {
+                    DockerOperation::Restart(_) => "docker:restart",
+                    DockerOperation::Stop(_) => "docker:stop",
+                    DockerOperation::Logs(_, _) => "docker:logs",
+                    DockerOperation::Inspect(_) => "docker:inspect",
+                    DockerOperation::Pause(_) => "docker:pause",
+                };
+                if !state.scopes.is_allowed(scope) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": "insufficient scope for docker operation"})),
+                    ).into_response();
+                }
+                #[cfg(feature = "docker")]
+                match execute_docker_operation(&cmd.id, op).await {
+                    Ok(result) => return Json(result).into_response(),
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": e.to_string()})),
+                        )
+                            .into_response();
+                    }
+                }
+                #[cfg(not(feature = "docker"))]
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Docker operations not available"})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid docker operation: {}", e)})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Regular command validation
     let validator = CommandValidator::default_secure();
     if let Err(e) = validator.validate(&cmd) {
         return (
@@ -808,14 +949,42 @@ async fn commands_execute(Json(cmd): Json<AgentCommand>) -> impl IntoResponse {
 
 async fn commands_enqueue(
     State(state): State<SharedState>,
-    Json(cmd): Json<AgentCommand>
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:enqueue").await { return resp.into_response(); }
+    let cmd: AgentCommand = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    };
     {
         let mut q = state.commands_queue.lock().await;
         q.push_back(cmd);
     }
     state.commands_notify.notify_waiters();
     (StatusCode::ACCEPTED, Json(json!({"queued": true}))).into_response()
+}
+
+#[derive(Deserialize)]
+struct RotateTokenRequest { new_token: String }
+
+async fn rotate_token(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "auth:rotate").await { return resp.into_response(); }
+    let req: RotateTokenRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    };
+    {
+        let mut token = state.agent_token.write().await;
+        *token = req.new_token.clone();
+    }
+    let agent_id = headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()).unwrap_or("");
+    state.audit.token_rotated(agent_id, headers.get("X-Request-Id").and_then(|v| v.to_str().ok()));
+    (StatusCode::OK, Json(json!({"rotated": true}))).into_response()
 }
 
 pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
