@@ -2263,6 +2263,7 @@ dependencies = [
  "hyper",
  "mockito",
  "nix",
+ "rand 0.8.5",
  "reqwest",
  "ring",
  "serde",

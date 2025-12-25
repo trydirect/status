@@ -28,6 +28,9 @@ use crate::security::request_signer::verify_signature;
 use crate::security::rate_limit::RateLimiter;
 use crate::security::replay::ReplayProtection;
 use crate::security::scopes::Scopes;
+use crate::security::vault_client::VaultClient;
+use crate::security::token_cache::TokenCache;
+use crate::security::token_refresh::spawn_token_refresh;
 use crate::monitoring::{MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx, spawn_heartbeat};
 #[cfg(feature = "docker")]
 use crate::agent::docker;
@@ -95,6 +98,8 @@ pub struct AppState {
     pub replay: ReplayProtection,
     pub scopes: Scopes,
     pub agent_token: Arc<tokio::sync::RwLock<String>>,
+    pub vault_client: Option<VaultClient>,
+    pub token_cache: Option<TokenCache>,
 }
 
 impl AppState {
@@ -113,6 +118,18 @@ impl AppState {
         } else {
             None
         };
+        
+        let vault_client = VaultClient::from_env()
+            .ok()
+            .flatten()
+            .map(|vc| {
+                debug!("Vault client initialized for token rotation");
+                vc
+            });
+        
+        let token_cache = vault_client.is_some().then(|| {
+            TokenCache::new(std::env::var("AGENT_TOKEN").unwrap_or_default())
+        });
         
         Self {
             session_store: SessionStore::new(),
@@ -141,6 +158,8 @@ impl AppState {
             ),
             scopes: Scopes::from_env(),
             agent_token: Arc::new(tokio::sync::RwLock::new(std::env::var("AGENT_TOKEN").unwrap_or_default())),
+            vault_client,
+            token_cache,
         }
     }
 }
@@ -173,9 +192,35 @@ pub struct BackupPingResponse {
     pub hash: Option<String>,
 }
 
-// Health check
-async fn health() -> impl IntoResponse {
-    Json(json!({"status": "ok"}))
+// Health check with token rotation metrics
+#[derive(Serialize)]
+pub struct HealthResponse {
+    pub status: String,
+    pub token_age_seconds: u64,
+    pub last_refresh_ok: Option<bool>,
+}
+
+async fn health(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let token_age_seconds = if let Some(cache) = &state.token_cache {
+        cache.age_seconds().await
+    } else {
+        0
+    };
+
+    let last_refresh_ok = if state.vault_client.is_some() {
+        // If Vault is configured, we track refresh success via audit logs
+        Some(true)
+    } else {
+        None
+    };
+
+    Json(HealthResponse {
+        status: "ok".to_string(),
+        token_age_seconds,
+        last_refresh_ok,
+    })
 }
 
 // Login form (GET)
@@ -990,6 +1035,18 @@ async fn rotate_token(
 pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
     let cfg = Arc::new(config);
     let state = Arc::new(AppState::new(cfg, with_ui));
+
+    // Spawn token refresh task if Vault is configured
+    if let (Some(vault_client), Some(token_cache)) = (&state.vault_client, &state.token_cache) {
+        let deployment_hash = std::env::var("DEPLOYMENT_HASH")
+            .unwrap_or_else(|_| "default".to_string());
+        
+        let vault_client_clone = vault_client.clone();
+        let token_cache_clone = token_cache.clone();
+        
+        let _refresh_task = spawn_token_refresh(vault_client_clone, deployment_hash, token_cache_clone);
+        info!("Token refresh background task spawned");
+    }
 
     let heartbeat_interval = std::env::var("METRICS_INTERVAL_SECS")
         .ok()

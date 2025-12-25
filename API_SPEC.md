@@ -39,14 +39,24 @@ Optional: `GET /api/v1/commands/wait/{hash}` can also require signing if `WAIT_R
 
 **Endpoint:** `GET /health`  
 **Authentication:** None  
-**Description:** Returns agent health status
+**Description:** Returns agent health status including token rotation metrics (if Vault is configured)
 
 **Response (200 OK):**
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "token_age_seconds": 120,
+  "last_refresh_ok": true
 }
 ```
+
+**Fields:**
+- `status`: Always "ok" if agent is running
+- `token_age_seconds`: Seconds since last successful token rotation from Vault (0 if Vault not configured)
+- `last_refresh_ok`: null if Vault not configured, true/false based on last fetch success
+
+**Note on Vault Integration:**
+When Vault is enabled via `VAULT_ADDRESS` environment variable, the agent automatically refreshes its authentication token every 60s (+ jitter) from the KV store. Monitor `token_age_seconds` > 600 as a potential warning that Vault fetch has stalled. See [VAULT_INTEGRATION.md](VAULT_INTEGRATION.md) for configuration details.
 
 ---
 

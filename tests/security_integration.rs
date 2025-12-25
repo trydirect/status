@@ -34,6 +34,7 @@ fn router_with_env(agent_id: &str, token: &str, scopes: &str) -> Router {
     std::env::set_var("AGENT_ID", agent_id);
     std::env::set_var("AGENT_TOKEN", token);
     std::env::set_var("AGENT_SCOPES", scopes);
+    std::env::set_var("RATE_LIMIT_PER_MIN", "1000");
     let state = Arc::new(AppState::new(test_config(), false));
     create_router(state)
 }
@@ -120,9 +121,13 @@ async fn replay_detection_returns_409() {
 #[tokio::test]
 async fn rate_limit_returns_429() {
     let _g = lock_tests();
-    // Set very low rate limit
+    // Set very low rate limit BEFORE creating router
     std::env::set_var("RATE_LIMIT_PER_MIN", "1");
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    std::env::set_var("AGENT_ID", "agent-1");
+    std::env::set_var("AGENT_TOKEN", "secret-token");
+    std::env::set_var("AGENT_SCOPES", "commands:execute");
+    let state = Arc::new(AppState::new(test_config(), false));
+    let app = create_router(state);
     let path = "/api/v1/commands/execute";
 
     let (s1, _) = post_with_sig(&app, path, "agent-1", "secret-token", json!({"id":"r1","name":"echo a","params":{}}), None).await;

@@ -6,3 +6,8 @@ pub mod request_signer;
 pub mod rate_limit;
 pub mod replay;
 pub mod scopes;
+
+// Vault integration for token rotation
+pub mod vault_client;
+pub mod token_cache;
+pub mod token_refresh;
