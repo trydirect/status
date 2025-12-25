@@ -3,8 +3,8 @@ use axum::http::HeaderMap;
 use base64::{engine::general_purpose, Engine};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use subtle::ConstantTimeEq;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 // HMAC-SHA256(request_body, AGENT_TOKEN) → X-Agent-Signature (base64)
 
