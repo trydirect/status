@@ -35,6 +35,9 @@ use crate::monitoring::{MetricsCollector, MetricsSnapshot, MetricsStore, Metrics
 #[cfg(feature = "docker")]
 use crate::agent::docker;
 use crate::commands::{CommandValidator, TimeoutStrategy, DockerOperation};
+use crate::commands::{check_remote_version, start_update_job, get_update_status, UpdateJobs, UpdateStatus, UpdatePhase};
+use crate::commands::{backup_current_binary, deploy_temp_binary, restart_service, record_rollback, rollback_latest};
+use crate::VERSION;
 use crate::commands::executor::CommandExecutor;
 use crate::commands::execute_docker_operation;
 use crate::transport::{Command as AgentCommand, CommandResult};
@@ -100,6 +103,7 @@ pub struct AppState {
     pub agent_token: Arc<tokio::sync::RwLock<String>>,
     pub vault_client: Option<VaultClient>,
     pub token_cache: Option<TokenCache>,
+    pub update_jobs: UpdateJobs,
 }
 
 impl AppState {
@@ -160,6 +164,7 @@ impl AppState {
             agent_token: Arc::new(tokio::sync::RwLock::new(std::env::var("AGENT_TOKEN").unwrap_or_default())),
             vault_client,
             token_cache,
+            update_jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -762,6 +767,12 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
         .route("/metrics/stream", get(metrics_ws_handler))
+        // Self-update endpoints
+        .route("/api/self/version", get(self_version))
+        .route("/api/self/update/start", post(self_update_start))
+        .route("/api/self/update/status/{id}", get(self_update_status))
+        .route("/api/self/update/deploy", post(self_update_deploy))
+        .route("/api/self/update/rollback", post(self_update_rollback))
         .route("/login", get(login_page).post(login_handler))
         .route("/logout", get(logout_handler))
         .route("/backup/ping", post(backup_ping))
@@ -795,6 +806,94 @@ pub fn create_router(state: SharedState) -> Router {
     }
 
     router.with_state(state)
+}
+
+#[derive(Serialize)]
+struct SelfVersionResponse {
+    current: String,
+    available: Option<String>,
+    has_update: bool,
+}
+
+async fn self_version(State(_state): State<SharedState>) -> impl IntoResponse {
+    let current = VERSION.to_string();
+    let mut available: Option<String> = None;
+    if let Ok(Some(rv)) = check_remote_version().await {
+        available = Some(rv.version);
+    }
+    let has_update = available.as_ref().map(|a| a != &current).unwrap_or(false);
+    Json(SelfVersionResponse { current, available, has_update })
+}
+
+#[derive(Deserialize)]
+struct StartUpdateRequest { version: Option<String> }
+
+async fn self_update_start(State(state): State<SharedState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
+    // Require agent id header as with v2.0 endpoints
+    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+    let req: StartUpdateRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    };
+    match start_update_job(state.update_jobs.clone(), req.version).await {
+        Ok(id) => (StatusCode::ACCEPTED, Json(json!({"job_id": id}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn self_update_status(State(state): State<SharedState>, Path(id): Path<String>) -> impl IntoResponse {
+    match get_update_status(state.update_jobs.clone(), &id).await {
+        Some(st) => {
+            let phase = match st.phase { UpdatePhase::Pending => "pending", UpdatePhase::Downloading => "downloading", UpdatePhase::Verifying => "verifying", UpdatePhase::Completed => "completed", UpdatePhase::Failed(_) => "failed" };
+            Json(json!({"job_id": id, "phase": phase})).into_response()
+        },
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "job not found"}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DeployRequest { job_id: String, install_path: Option<String>, service_name: Option<String> }
+
+async fn self_update_deploy(State(state): State<SharedState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
+    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+    let req: DeployRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    };
+    let install_path = req.install_path.unwrap_or_else(|| "/usr/local/bin/status".to_string());
+    // Backup current
+    match backup_current_binary(&install_path, &req.job_id).await {
+        Ok(backup_path) => {
+            if let Err(e) = record_rollback(&req.job_id, &backup_path, &install_path).await {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+            }
+        },
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("backup failed: {}", e)}))).into_response(),
+    }
+
+    // Deploy temp binary
+    if let Err(e) = deploy_temp_binary(&req.job_id, &install_path).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("deploy failed: {}", e)}))).into_response();
+    }
+
+    // Try to restart service if provided
+    if let Some(svc) = req.service_name {
+        if let Err(e) = restart_service(&svc).await {
+            // Best-effort: return 202 with warning so external orchestrator can proceed
+            return (StatusCode::ACCEPTED, Json(json!({"deployed": true, "restart_error": e.to_string()}))).into_response();
+        }
+    }
+
+    (StatusCode::ACCEPTED, Json(json!({"deployed": true}))).into_response()
+}
+
+async fn self_update_rollback(State(_state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(resp) = validate_agent_id(&headers) { return resp.into_response(); }
+    match rollback_latest().await {
+        Ok(Some(entry)) => (StatusCode::ACCEPTED, Json(json!({"rolled_back": true, "install_path": entry.install_path}))).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "no backups available"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
 }
 
 // ------- v2.0 long-poll and execute endpoints --------
