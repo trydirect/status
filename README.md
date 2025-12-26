@@ -26,16 +26,16 @@ Daemon mode (background):
 Local API server (API-only mode):
 
 ```bash
-./target/release/status serve --port 8080
+./target/release/status serve --port 5000
 ```
 
 Local API server with UI (serves HTML templates):
 
 ```bash
-./target/release/status serve --port 8080 --with-ui
+./target/release/status serve --port 5000 --with-ui
 ```
 
-Then open your browser to `http://localhost:8080/login` to access the web interface.
+Then open your browser to `http://localhost:5000/login` to access the web interface.
 
 Docker operations (requires `--features docker`):
 
@@ -66,7 +66,7 @@ Example: run a simple echo
 ```bash
 curl -s \
 	-H 'Content-Type: application/json' \
-	-X POST http://localhost:8080/api/v1/commands/execute \
+	-X POST http://localhost:5000/api/v1/commands/execute \
 	-d '{
 		"id": "cmd-001",
 		"name": "echo hello from agent",
@@ -79,7 +79,7 @@ Example: run a short sleep
 ```bash
 curl -s \
 	-H 'Content-Type: application/json' \
-	-X POST http://localhost:8080/api/v1/commands/execute \
+	-X POST http://localhost:5000/api/v1/commands/execute \
 	-d '{
 		"id": "cmd-002",
 		"name": "sleep 2",
@@ -111,14 +111,14 @@ Start the server with agent ID:
 
 ```bash
 export AGENT_ID=test-agent
-cargo r -- serve --port 8080
+cargo r -- serve --port 5000
 ```
 
 **Terminal 1: Long-poll for commands**
 
 ```bash
 curl -H 'X-Agent-Id: test-agent' \
-  'http://localhost:8080/api/v1/commands/wait/demo?timeout=10'
+  'http://localhost:5000/api/v1/commands/wait/demo?timeout=10'
 ```
 
 **Terminal 2: Enqueue a command**
@@ -126,7 +126,7 @@ curl -H 'X-Agent-Id: test-agent' \
 ```bash
 curl -s \
   -H 'Content-Type: application/json' \
-  -X POST http://localhost:8080/api/v1/commands/enqueue \
+  -X POST http://localhost:5000/api/v1/commands/enqueue \
   -d '{
     "id": "cmd-001",
     "name": "echo hello from queue",
@@ -142,7 +142,7 @@ The long-poll in Terminal 1 will immediately return the queued command.
 curl -s \
   -H 'Content-Type: application/json' \
   -H 'X-Agent-Id: test-agent' \
-  -X POST http://localhost:8080/api/v1/commands/report \
+  -X POST http://localhost:5000/api/v1/commands/report \
   -d '{
     "command_id": "cmd-001",
     "status": "success",
@@ -186,11 +186,11 @@ The UI uses Tera templating engine (similar to Jinja2). Templates are located in
 Example (start + deploy):
 
 ```bash
-curl -X POST http://localhost:8080/api/self/update/start \
+curl -X POST http://localhost:5000/api/self/update/start \
   -H "X-Agent-Id: $AGENT_ID" \
   -d '{"version":"1.2.3"}'
 
-curl -X POST http://localhost:8080/api/self/update/deploy \
+curl -X POST http://localhost:5000/api/self/update/deploy \
   -H "X-Agent-Id: $AGENT_ID" \
   -d '{"job_id":"<returned-id>","service_name":"status-panel"}'
 ```

@@ -15,6 +15,6 @@ COPY templates templates
 COPY static static
 COPY config.json config.json
 ENV RUST_LOG=info
-EXPOSE 8080
+EXPOSE 5000
 USER 0
-ENTRYPOINT ["/status", "serve", "--port", "8080", "--with-ui"]
+ENTRYPOINT ["/status", "serve", "--port", "5000", "--with-ui"]

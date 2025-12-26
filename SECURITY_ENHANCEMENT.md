@@ -137,7 +137,7 @@ if cmd.name.starts_with("docker:") {
 
 ### Restart Container
 ```bash
-curl -X POST http://agent:8080/api/v1/commands/execute \
+curl -X POST http://agent:5000/api/v1/commands/execute \
   -H 'Content-Type: application/json' \
   -d '{
     "id": "restart-nginx",
@@ -148,7 +148,7 @@ curl -X POST http://agent:8080/api/v1/commands/execute \
 
 ### View Logs
 ```bash
-curl -X POST http://agent:8080/api/v1/commands/execute \
+curl -X POST http://agent:5000/api/v1/commands/execute \
   -H 'Content-Type: application/json' \
   -d '{
     "id": "logs-redis",
@@ -159,7 +159,7 @@ curl -X POST http://agent:8080/api/v1/commands/execute \
 
 ### Inspect Container
 ```bash
-curl -X POST http://agent:8080/api/v1/commands/execute \
+curl -X POST http://agent:5000/api/v1/commands/execute \
   -H 'Content-Type: application/json' \
   -d '{
     "id": "inspect-db",
@@ -294,10 +294,10 @@ docker build -t status-panel:latest -f Dockerfile .
 
 # Run with Docker support
 docker run -v /var/run/docker.sock:/var/run/docker.sock \
-  -p 8080:8080 \
+  -p 5000:5000 \
   -e AGENT_ID=my-agent \
   status-panel:latest \
-  serve --port 8080
+  serve --port 5000
 ```
 
 ---

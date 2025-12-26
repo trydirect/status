@@ -13,7 +13,7 @@ The Status Panel Agent exposes a REST API for remote command execution and syste
 http://<agent-host>:<port>
 ```
 
-Default port: `8080`
+Default port: `5000`
 
 ## Authentication & Signing
 
@@ -168,7 +168,7 @@ When Vault is enabled via `VAULT_ADDRESS` environment variable, the agent automa
 **Example Request:**
 ```bash
 curl -H 'X-Agent-Id: agent-001' \
-  'http://agent:8080/api/v1/commands/wait/session-hash?timeout=60'
+  'http://agent:5000/api/v1/commands/wait/session-hash?timeout=60'
 ```
 
 **Response (200 OK) - Command Available:**
@@ -264,7 +264,7 @@ For Docker operations, use the special `docker:operation:container_name` format:
 
 ```bash
 # Restart a container
-curl -X POST http://agent:8080/api/v1/commands/execute \
+curl -X POST http://agent:5000/api/v1/commands/execute \
   -H 'Content-Type: application/json' \
   -d '{
     "id": "restart-nginx",
@@ -474,17 +474,17 @@ Docker commands are allowed if `docker` is in the allowlist:
 # Restart a container
 curl -H 'X-Agent-Id: test-agent' \
   -d '{"id":"restart-1","name":"docker restart nginx"}' \
-  http://agent:8080/api/v1/commands/enqueue
+  http://agent:5000/api/v1/commands/enqueue
 
 # Stop a container
 curl -H 'X-Agent-Id: test-agent' \
   -d '{"id":"stop-1","name":"docker stop redis"}' \
-  http://agent:8080/api/v1/commands/enqueue
+  http://agent:5000/api/v1/commands/enqueue
 
 # View container logs
 curl -H 'X-Agent-Id: test-agent' \
   -d '{"id":"logs-1","name":"docker logs nginx --tail 50"}' \
-  http://agent:8080/api/v1/commands/enqueue
+  http://agent:5000/api/v1/commands/enqueue
 
 
 
@@ -539,7 +539,7 @@ Commands execute with a multi-phase timeout system:
 import requests
 import time
 
-AGENT_URL = "http://agent-host:8080"
+AGENT_URL = "http://agent-host:5000"
 AGENT_ID = "agent-001"
 
 def enqueue_command(cmd_id, command, timeout=60):
@@ -584,7 +584,7 @@ print(f"Command result: {result}")
 ```javascript
 const axios = require('axios');
 
-const AGENT_URL = 'http://agent-host:8080';
+const AGENT_URL = 'http://agent-host:5000';
 const AGENT_ID = 'agent-001';
 
 async function enqueueCommand(cmdId, command, timeoutSecs = 60) {
@@ -643,7 +643,7 @@ async function reportResult(result) {
 For real-time metrics monitoring, connect to the WebSocket endpoint:
 
 ```javascript
-const ws = new WebSocket('ws://agent-host:8080/metrics/stream');
+const ws = new WebSocket('ws://agent-host:5000/metrics/stream');
 
 ws.onmessage = (event) => {
   const metrics = JSON.parse(event.data);
