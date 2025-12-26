@@ -4,11 +4,11 @@
 
 set -e
 
-BASE_URL="http://localhost:8080"
+BASE_URL="http://localhost:5000"
 AGENT_ID="${AGENT_ID:-test-agent}"
 
 echo "=== Long-poll command queue demo ==="
-echo "Ensure server is running: cargo r -- serve --port 8080"
+echo "Ensure server is running: cargo r -- serve --port 5000"
 echo ""
 
 # Start long-poll in background

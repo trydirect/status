@@ -25,7 +25,7 @@ struct AppCli {
 enum Commands {
     /// Start HTTP server (local API)
     Serve {
-        #[arg(long, default_value_t = 8080)]
+        #[arg(long, default_value_t = 5000)]
         port: u16,
         /// Enable UI with HTML templates
         #[arg(long, default_value_t = false)]

@@ -17,5 +17,5 @@ COPY static static
 COPY config.json config.json
 ENV RUST_LOG=info
 # Expose API/UI port
-EXPOSE 8080
-CMD ["/usr/local/bin/status", "serve", "--port", "8080", "--with-ui"]
+EXPOSE 5000
+CMD ["/usr/local/bin/status", "serve", "--port", "5000", "--with-ui"]
