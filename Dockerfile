@@ -1,4 +1,4 @@
-FROM rust:1.83 AS builder
+FROM clux/muslrust:1.83.0 AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
@@ -6,12 +6,14 @@ COPY src src
 COPY templates templates
 COPY static static
 COPY config.json config.json
-RUN cargo build --release
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# Build a statically linked binary to avoid runtime glibc mismatches.
+RUN rustup target add x86_64-unknown-linux-musl && \
+	cargo build --release --target x86_64-unknown-linux-musl
+
+FROM gcr.io/distroless/cc
 WORKDIR /app
-COPY --from=builder /app/target/release/status /usr/local/bin/status
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/status /usr/local/bin/status
 COPY templates templates
 COPY static static
 COPY config.json config.json
