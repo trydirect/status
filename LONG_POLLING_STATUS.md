@@ -1,8 +1,6 @@
-# ✅ Long-Polling Implementation Complete
-
 ## Summary
 
-Successfully implemented **continuous long-polling command execution** for the Status Panel agent. The agent now:
+Implemented **continuous long-polling command execution** for the Status Panel agent. The agent now:
 
 - ✅ Starts polling immediately on daemon startup
 - ✅ Runs continuously (not one-shot requests)
@@ -59,7 +57,7 @@ EOF
 
 ### 3. Enqueue Command (from dashboard or curl)
 ```bash
-curl -X POST http://localhost:5000/api/v1/commands/enqueue \
+curl -X POST http://localhost:5000/api/v1/agent/commands/enqueue \
   -H 'Content-Type: application/json' \
   -H 'X-Agent-Id: my-agent' \
   -d '{"id": "cmd-001", "name": "date", "params": {}}'
@@ -78,7 +76,7 @@ command execution and reporting completed
 ### Polling Loop Flow
 ```
 ┌─────────────────────────────┐
-│ GET /api/v1/commands/wait   │
+│ GET /api/v1/agent/commands/wait   │
 │ (timeout: POLLING_TIMEOUT)  │
 └──────────────┬──────────────┘
                │

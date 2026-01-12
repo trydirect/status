@@ -19,6 +19,7 @@ Default port: `5000`
 
 For all POST endpoints, requests must include identity, freshness, uniqueness, and an HMAC signature over the raw body. Required headers:
 
+- `Authorization: Bearer <AGENT_TOKEN>`
 - `X-Agent-Id: <AGENT_ID>`
 - `X-Timestamp: <unix_seconds>`
 - `X-Request-Id: <uuid_v4>`
@@ -29,7 +30,7 @@ Notes:
 - Default freshness window: 300s. Default replay TTL: 600s.
 - Per-agent rate limits apply (default 120/min).
 
-Optional: `GET /api/v1/commands/wait/{hash}` can also require signing if `WAIT_REQUIRE_SIGNATURE=true` (see below). Otherwise, it only enforces `X-Agent-Id` and rate limits.
+Optional: `GET /api/v1/agent/commands/wait/{hash}` can also require signing if `WAIT_REQUIRE_SIGNATURE=true` (see below). Otherwise, it enforces `X-Agent-Id`, `Authorization: Bearer <AGENT_TOKEN>`, and rate limits.
 
 ---
 
@@ -106,7 +107,7 @@ When Vault is enabled via `VAULT_ADDRESS` environment variable, the agent automa
 
 ### 4. Enqueue Command
 
-**Endpoint:** `POST /api/v1/commands/enqueue`  
+**Endpoint:** `POST /api/v1/agent/commands/enqueue`  
 **Authentication:** HMAC-signed headers required  
 **Scopes:** `commands:enqueue`  
 **Description:** Add a command to the agent's execution queue. Used by dashboards to schedule commands for execution.
@@ -153,8 +154,8 @@ When Vault is enabled via `VAULT_ADDRESS` environment variable, the agent automa
 
 ### 5. Long-Poll for Commands
 
-**Endpoint:** `GET /api/v1/commands/wait/{hash}`  
-**Authentication:** `X-Agent-Id` required; optional HMAC signing if `WAIT_REQUIRE_SIGNATURE=true`  
+**Endpoint:** `GET /api/v1/agent/commands/wait/{hash}`  
+**Authentication:** `X-Agent-Id` header and `Authorization: Bearer <AGENT_TOKEN>` required; optional HMAC signing if `WAIT_REQUIRE_SIGNATURE=true`  
 **Scopes:** `commands:wait` (only when `WAIT_REQUIRE_SIGNATURE=true`)  
 **Description:** Long-poll for the next queued command. Blocks until a command is available or timeout is reached.
 
@@ -168,7 +169,8 @@ When Vault is enabled via `VAULT_ADDRESS` environment variable, the agent automa
 **Example Request:**
 ```bash
 curl -H 'X-Agent-Id: agent-001' \
-  'http://agent:5000/api/v1/commands/wait/session-hash?timeout=60'
+  'http://agent:5000/api/v1/agent/commands/wait/session-hash?timeout=60' \
+  -H 'Authorization: Bearer <AGENT_TOKEN>'
 ```
 
 **Response (200 OK) - Command Available:**
@@ -189,7 +191,7 @@ curl -H 'X-Agent-Id: agent-001' \
 **Response (204 No Content) - No Commands:**
 Returns empty body when timeout expires with no commands queued.
 
-**Response (401 Unauthorized) - Invalid Agent ID:**
+**Response (401 Unauthorized) - Invalid Agent ID / Missing Bearer:**
 ```json
 {
   "error": "Invalid or missing X-Agent-Id"
@@ -200,7 +202,7 @@ Returns empty body when timeout expires with no commands queued.
 
 ### 6. Execute Command Directly
 
-**Endpoint:** `POST /api/v1/commands/execute`  
+**Endpoint:** `POST /api/v1/agent/commands/execute`  
 **Authentication:** HMAC-signed headers required  
 **Scopes:** `commands:execute` and, for Docker ops, one of `docker:restart|stop|pause|logs|inspect`  
 **Description:** Execute a command immediately without queuing. Synchronous execution with timeout management.
@@ -264,7 +266,7 @@ For Docker operations, use the special `docker:operation:container_name` format:
 
 ```bash
 # Restart a container
-curl -X POST http://agent:5000/api/v1/commands/execute \
+curl -X POST http://agent:5000/api/v1/agent/commands/execute \
   -H 'Content-Type: application/json' \
   -d '{
     "id": "restart-nginx",
@@ -301,7 +303,7 @@ curl -X POST http://agent:5000/api/v1/commands/execute \
 
 ### 7. Report Command Result
 
-**Endpoint:** `POST /api/v1/commands/report`  
+**Endpoint:** `POST /api/v1/agent/commands/report`  
 **Authentication:** HMAC-signed headers required  
 **Scopes:** `commands:report`  
 **Description:** Report the result of a command execution back to the dashboard. Used by agents after executing commands received via long-poll.
@@ -474,17 +476,17 @@ Docker commands are allowed if `docker` is in the allowlist:
 # Restart a container
 curl -H 'X-Agent-Id: test-agent' \
   -d '{"id":"restart-1","name":"docker restart nginx"}' \
-  http://agent:5000/api/v1/commands/enqueue
+  http://agent:5000/api/v1/agent/commands/enqueue
 
 # Stop a container
 curl -H 'X-Agent-Id: test-agent' \
   -d '{"id":"stop-1","name":"docker stop redis"}' \
-  http://agent:5000/api/v1/commands/enqueue
+  http://agent:5000/api/v1/agent/commands/enqueue
 
 # View container logs
 curl -H 'X-Agent-Id: test-agent' \
   -d '{"id":"logs-1","name":"docker logs nginx --tail 50"}' \
-  http://agent:5000/api/v1/commands/enqueue
+  http://agent:5000/api/v1/agent/commands/enqueue
 
 
 
@@ -545,7 +547,7 @@ AGENT_ID = "agent-001"
 def enqueue_command(cmd_id, command, timeout=60):
     """Queue a command for execution."""
     response = requests.post(
-        f"{AGENT_URL}/api/v1/commands/enqueue",
+        f"{AGENT_URL}/api/v1/agent/commands/enqueue",
         json={
             "id": cmd_id,
             "name": command,
@@ -559,7 +561,7 @@ def wait_for_result(cmd_id, timeout=300):
     start = time.time()
     while time.time() - start < timeout:
         response = requests.get(
-            f"{AGENT_URL}/api/v1/commands/wait/session",
+            f"{AGENT_URL}/api/v1/agent/commands/wait/session",
             headers={"X-Agent-Id": AGENT_ID},
             params={"timeout": 30}
         )
@@ -588,7 +590,7 @@ const AGENT_URL = 'http://agent-host:5000';
 const AGENT_ID = 'agent-001';
 
 async function enqueueCommand(cmdId, command, timeoutSecs = 60) {
-  const response = await axios.post(`${AGENT_URL}/api/v1/commands/enqueue`, {
+  const response = await axios.post(`${AGENT_URL}/api/v1/agent/commands/enqueue`, {
     id: cmdId,
     name: command,
     params: { timeout_secs: timeoutSecs }
@@ -599,7 +601,7 @@ async function enqueueCommand(cmdId, command, timeoutSecs = 60) {
 async function longPollCommand(timeoutSecs = 30) {
   try {
     const response = await axios.get(
-      `${AGENT_URL}/api/v1/commands/wait/session`,
+      `${AGENT_URL}/api/v1/agent/commands/wait/session`,
       {
         headers: { 'X-Agent-Id': AGENT_ID },
         params: { timeout: timeoutSecs },
@@ -617,7 +619,7 @@ async function longPollCommand(timeoutSecs = 30) {
 
 async function reportResult(result) {
   const response = await axios.post(
-    `${AGENT_URL}/api/v1/commands/report`,
+    `${AGENT_URL}/api/v1/agent/commands/report`,
     result,
     { headers: { 'X-Agent-Id': AGENT_ID } }
   );

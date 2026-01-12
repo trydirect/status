@@ -97,11 +97,13 @@ Notes:
 
 The agent supports an in-memory command queue for dashboard-driven execution via long-polling. Commands are queued and agents poll for them with configurable timeouts.
 
+> **Note:** The built-in Axum server (for local development) exposes `/api/v1/commands/*` routes. When the agent talks to the remote Stacker dashboard it uses the dedicated `/api/v1/agent/commands/*` namespace (for example `/api/v1/agent/commands/wait/{deployment_hash}`) **and** includes `Authorization: Bearer <AGENT_TOKEN>` in every request.
+
 ### Endpoints
 
-- `GET /api/v1/commands/wait/{hash}?timeout=N` - Long-poll for next queued command (default 30s timeout)
-- `POST /api/v1/commands/report` - Report command execution result
-- `POST /api/v1/commands/enqueue` - Enqueue a command (for testing/local use)
+- `GET /api/v1/commands/wait/{hash}?timeout=N` (local) / `GET /api/v1/agent/commands/wait/{deployment_hash}?timeout=N` (Stacker) - Long-poll for next queued command (default 30s timeout)
+- `POST /api/v1/commands/report` (local) / `POST /api/v1/agent/commands/report` (Stacker) - Report command execution result
+- `POST /api/v1/commands/enqueue` (local) / `POST /api/v1/agent/commands/enqueue` (Stacker) - Enqueue a command (for testing/local use)
 
 All endpoints require `X-Agent-Id` header matching the `AGENT_ID` environment variable.
 

@@ -12,6 +12,8 @@ POLLING_BACKOFF_SECS=5
 COMMAND_TIMEOUT_SECS=300
 ```
 
+> **Note:** The commands in this quick start target the agent's local Axum API (`/api/v1/commands/*`). When the agent polls the remote Stacker dashboard it calls the `/api/v1/agent/commands/*` endpoints and sends `Authorization: Bearer $AGENT_TOKEN` (for example `/api/v1/agent/commands/wait/{deployment_hash}`).
+
 ## 2️⃣ Start the Agent
 
 ```bash

@@ -9,5 +9,5 @@
 - [x] Health: return container state, status enum (`ok|unhealthy|unknown`), last heartbeat, optional CPU/mem metrics; fail closed if container unreachable.
 - [x] Logs: support cursor + limit, streams stdout/stderr, redact secrets before returning, mark `truncated` flag.
 - [x] Restart: restart container by app_code, then emit updated state in report payload; include errors array on failure.
-- [x] Reporting: respond via `/api/v1/commands/report` with the proposed schemas in stacker/docs/AGENT_REGISTRATION_SPEC.md (keep deployment_hash + app_code).
+- [x] Reporting: respond via `/api/v1/agent/commands/report` with the proposed schemas in stacker/docs/AGENT_REGISTRATION_SPEC.md (keep deployment_hash + app_code).
 - [ ] Wire agent to `wait` loop using Vault-fetched token; refresh token on 401/403 and retry with backoff.

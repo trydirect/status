@@ -4,7 +4,7 @@ use anyhow::Result;
 use tokio::signal;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::agent::config::Config;
 use crate::commands::executor::CommandExecutor;
@@ -51,6 +51,10 @@ pub async fn run(config_path: String) -> Result<()> {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(300);
+    let agent_token = std::env::var("AGENT_TOKEN").unwrap_or_default();
+    if agent_token.is_empty() {
+        warn!("AGENT_TOKEN is not set; authenticated dashboard requests will fail");
+    }
 
     info!(
         dashboard_url = %dashboard_url,
@@ -68,6 +72,7 @@ pub async fn run(config_path: String) -> Result<()> {
             dashboard_url,
             deployment_hash,
             agent_id,
+            agent_token,
             polling_timeout,
             polling_backoff,
             command_timeout,
@@ -92,6 +97,7 @@ async fn polling_loop(
     dashboard_url: String,
     deployment_hash: String,
     agent_id: String,
+    agent_token: String,
     polling_timeout: u64,
     polling_backoff: u64,
     command_timeout: u64,
@@ -103,6 +109,7 @@ async fn polling_loop(
             &dashboard_url,
             &deployment_hash,
             &agent_id,
+            &agent_token,
             polling_timeout,
             None,
         )
@@ -120,6 +127,7 @@ async fn polling_loop(
                     &executor,
                     &dashboard_url,
                     &agent_id,
+                    &agent_token,
                     cmd,
                     command_timeout,
                 )
@@ -155,6 +163,7 @@ async fn execute_and_report(
     executor: &CommandExecutor,
     dashboard_url: &str,
     agent_id: &str,
+    agent_token: &str,
     cmd: crate::transport::Command,
     command_timeout: u64,
 ) -> Result<()> {
@@ -199,7 +208,7 @@ async fn execute_and_report(
 
     // Report the result back
     let payload = serde_json::to_value(&cmd_result)?;
-    http_polling::report_result(dashboard_url, agent_id, &payload).await?;
+    http_polling::report_result(dashboard_url, agent_id, agent_token, &payload).await?;
 
     Ok(())
 }
