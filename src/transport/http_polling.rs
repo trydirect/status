@@ -14,7 +14,7 @@ pub async fn wait_for_command(
     priority: Option<&str>,
 ) -> Result<Option<Command>> {
     let url = format!(
-        "{}/api/v1/commands/wait/{}?timeout={}&priority={}",
+        "{}/api/v1/agent/commands/wait/{}?timeout={}&priority={}",
         base_url,
         deployment_hash,
         timeout_secs,
@@ -46,7 +46,7 @@ pub async fn wait_for_command(
 
 /// Report command result back to dashboard.
 pub async fn report_result(base_url: &str, agent_id: &str, payload: &Value) -> Result<()> {
-    let url = format!("{}/api/v1/commands/report", base_url);
+    let url = format!("{}/api/v1/agent/commands/report", base_url);
     let client = reqwest::Client::new();
     let resp = client
         .post(&url)

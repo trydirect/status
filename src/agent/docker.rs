@@ -1,5 +1,6 @@
 #![cfg(feature = "docker")]
 use anyhow::{Context, Result};
+use bollard::container::LogOutput;
 use bollard::exec::CreateExecOptions;
 use bollard::models::{ContainerStatsResponse, ContainerSummaryStateEnum};
 use bollard::query_parameters::{
@@ -29,6 +30,22 @@ pub struct ContainerHealth {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub restart_count: Option<i64>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct LogFrame {
+    pub stream: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct LogWindow {
+    pub frames: Vec<LogFrame>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -290,6 +307,94 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
     }
 
     Ok(health)
+}
+
+/// Fetch container logs with stream labels, cursor pagination, and truncation awareness.
+pub async fn get_container_logs_window(
+    name: &str,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> Result<LogWindow> {
+    use bollard::query_parameters::LogsOptionsBuilder;
+    use futures_util::StreamExt;
+
+    let docker = docker_client()?;
+    let mut builder = LogsOptionsBuilder::default()
+        .stdout(true)
+        .stderr(true)
+        .follow(false)
+        .timestamps(true);
+
+    if let Some(ts) = cursor.as_deref() {
+        if let Some(epoch) = parse_cursor_to_epoch(ts) {
+            builder = builder.since(epoch as i32);
+        }
+    } else if let Some(max) = limit {
+        builder = builder.tail(&max.to_string());
+    }
+
+    let opts = builder.build();
+    let mut logs = docker.logs(name, Some(opts));
+    let mut frames: Vec<LogFrame> = Vec::new();
+    let mut truncated = false;
+    let mut last_cursor: Option<String> = None;
+
+    while let Some(item) = logs.next().await {
+        let output = match item {
+            Ok(v) => v,
+            Err(e) => {
+                error!(container = name, error = %e, "error reading log stream");
+                continue;
+            }
+        };
+
+        let (stream, bytes) = match output {
+            LogOutput::StdOut { message, .. } => ("stdout", message),
+            LogOutput::StdErr { message, .. } => ("stderr", message),
+            LogOutput::StdIn { message, .. } => ("stdin", message),
+            LogOutput::Console { message, .. } => ("console", message),
+        };
+
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let trimmed = text.trim_end_matches('\n');
+        let (timestamp, message) = if let Some((ts, rest)) = trimmed.split_once(' ') {
+            (Some(ts.to_string()), rest.to_string())
+        } else {
+            (None, trimmed.to_string())
+        };
+
+        if let Some(ts) = timestamp.clone() {
+            last_cursor = Some(ts);
+        }
+
+        frames.push(LogFrame {
+            stream: stream.to_string(),
+            message,
+            timestamp,
+        });
+
+        if let Some(max) = limit {
+            if frames.len() >= max {
+                truncated = true;
+                break;
+            }
+        }
+    }
+
+    Ok(LogWindow {
+        frames,
+        truncated,
+        next_cursor: last_cursor,
+    })
+}
+
+fn parse_cursor_to_epoch(cursor: &str) -> Option<i64> {
+    if let Ok(value) = cursor.parse::<i64>() {
+        return Some(value);
+    }
+    chrono::DateTime::parse_from_rfc3339(cursor)
+        .map(|dt| dt.timestamp())
+        .ok()
 }
 
 pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {

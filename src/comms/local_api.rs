@@ -40,7 +40,10 @@ use crate::commands::{
 use crate::commands::{
     check_remote_version, get_update_status, start_update_job, UpdateJobs, UpdatePhase,
 };
-use crate::commands::{CommandValidator, DockerOperation, TimeoutStrategy};
+use crate::commands::{
+    CommandValidator, DockerOperation, TimeoutStrategy, execute_stacker_command,
+    parse_stacker_command,
+};
 use crate::monitoring::{
     spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx,
 };
@@ -1255,6 +1258,35 @@ async fn commands_execute(
                 .into_response()
         }
     };
+    let parsed_stacker_cmd = match parse_stacker_command(&cmd) {
+        Ok(value) => value,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid stacker command payload: {}", e)})),
+            )
+                .into_response()
+        }
+    };
+    if let Some(stacker_cmd) = parsed_stacker_cmd {
+        match execute_stacker_command(&cmd, &stacker_cmd).await {
+            Ok(result) => {
+                return Json(result).into_response();
+            }
+            Err(e) => {
+                error!(
+                    command_id = %cmd.id,
+                    err = %e,
+                    "stacker command execution failed"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    }
     // Check if this is a Docker operation
     if cmd.name.starts_with("docker:") {
         match DockerOperation::parse(&cmd.name) {
@@ -1350,6 +1382,13 @@ async fn commands_enqueue(
                 .into_response()
         }
     };
+    if let Err(e) = parse_stacker_command(&cmd) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid stacker command payload: {}", e)})),
+        )
+            .into_response();
+    }
     {
         let mut q = state.commands_queue.lock().await;
         q.push_back(cmd);

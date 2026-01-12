@@ -59,6 +59,7 @@ impl ExecutionResult {
             } else {
                 Some(self.stderr.clone())
             },
+            ..CommandResult::default()
         }
     }
 }
