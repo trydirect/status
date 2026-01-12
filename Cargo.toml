@@ -32,6 +32,7 @@ hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 subtle = "2"
+regex = "1"
 # System metrics
 sysinfo = "0.30"
 # Docker client for Rust (SSL disabled to avoid OpenSSL dependency on musl)

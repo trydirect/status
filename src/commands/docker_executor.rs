@@ -130,6 +130,7 @@ pub async fn execute_docker_operation(
             "stdout": stdout,
         })),
         error: if exit_code != 0 { Some(stderr) } else { None },
+        ..CommandResult::default()
     })
 }
 

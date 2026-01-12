@@ -10,11 +10,12 @@ pub async fn wait_for_command(
     base_url: &str,
     deployment_hash: &str,
     agent_id: &str,
+    agent_token: &str,
     timeout_secs: u64,
     priority: Option<&str>,
 ) -> Result<Option<Command>> {
     let url = format!(
-        "{}/api/v1/commands/wait/{}?timeout={}&priority={}",
+        "{}/api/v1/agent/commands/wait/{}?timeout={}&priority={}",
         base_url,
         deployment_hash,
         timeout_secs,
@@ -26,12 +27,12 @@ pub async fn wait_for_command(
         .build()
         .context("building http client")?;
 
-    let resp = client
+    let request = client
         .get(&url)
         .header("X-Agent-Id", agent_id)
-        .send()
-        .await
-        .context("long poll send")?;
+        .bearer_auth(agent_token);
+
+    let resp = request.send().await.context("long poll send")?;
 
     match resp.status().as_u16() {
         200 => {
@@ -45,12 +46,18 @@ pub async fn wait_for_command(
 }
 
 /// Report command result back to dashboard.
-pub async fn report_result(base_url: &str, agent_id: &str, payload: &Value) -> Result<()> {
-    let url = format!("{}/api/v1/commands/report", base_url);
+pub async fn report_result(
+    base_url: &str,
+    agent_id: &str,
+    agent_token: &str,
+    payload: &Value,
+) -> Result<()> {
+    let url = format!("{}/api/v1/agent/commands/report", base_url);
     let client = reqwest::Client::new();
     let resp = client
         .post(&url)
         .header("X-Agent-Id", agent_id)
+        .bearer_auth(agent_token)
         .json(payload)
         .send()
         .await
