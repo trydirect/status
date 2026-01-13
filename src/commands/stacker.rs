@@ -55,21 +55,21 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
         "health" | "stacker.health" => {
             let payload: HealthCommand =
                 serde_json::from_value(cmd.params.clone()).context("invalid health payload")?;
-            let payload = payload.normalize();
+            let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Health(payload)))
         }
         "logs" | "stacker.logs" => {
             let payload: LogsCommand =
                 serde_json::from_value(cmd.params.clone()).context("invalid logs payload")?;
-            let payload = payload.normalize();
+            let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Logs(payload)))
         }
         "restart" | "stacker.restart" => {
             let payload: RestartCommand =
                 serde_json::from_value(cmd.params.clone()).context("invalid restart payload")?;
-            let payload = payload.normalize();
+            let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Restart(payload)))
         }
@@ -106,6 +106,20 @@ impl HealthCommand {
         self
     }
 
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
     fn validate(&self) -> Result<()> {
         if self.deployment_hash.is_empty() {
             bail!("deployment_hash is required");
@@ -133,7 +147,25 @@ impl LogsCommand {
                     }
                 })
                 .collect();
-            self.streams = if filtered.is_empty() { None } else { Some(filtered) };
+            self.streams = if filtered.is_empty() {
+                None
+            } else {
+                Some(filtered)
+            };
+        }
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
         }
         self
     }
@@ -160,6 +192,20 @@ impl RestartCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
         self
     }
 
@@ -243,10 +289,7 @@ async fn execute_with_docker(
 }
 
 #[cfg(feature = "docker")]
-async fn handle_health(
-    agent_cmd: &AgentCommand,
-    data: &HealthCommand,
-) -> Result<CommandResult> {
+async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "health");
     let containers = match docker::list_container_health().await {
         Ok(list) => list,
@@ -310,7 +353,13 @@ async fn handle_health(
 #[cfg(feature = "docker")]
 async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "logs");
-    let window = match docker::get_container_logs_window(&data.app_code, data.cursor.clone(), Some(data.limit)).await {
+    let window = match docker::get_container_logs_window(
+        &data.app_code,
+        data.cursor.clone(),
+        Some(data.limit),
+    )
+    .await
+    {
         Ok(win) => win,
         Err(e) => {
             let error = make_error(
@@ -349,6 +398,9 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
     }
 
     let body = json!({
+        "type": "logs",
+        "deployment_hash": data.deployment_hash.clone(),
+        "app_code": data.app_code.clone(),
         "cursor": window.next_cursor,
         "truncated": window.truncated,
         "lines": lines,
@@ -359,10 +411,7 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
 }
 
 #[cfg(feature = "docker")]
-async fn handle_restart(
-    agent_cmd: &AgentCommand,
-    data: &RestartCommand,
-) -> Result<CommandResult> {
+async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "restart");
     let mut errors: Vec<CommandError> = Vec::new();
 
@@ -472,7 +521,9 @@ fn map_container_state(raw: &str) -> &'static str {
         "starting"
     } else if normalized.contains("exit") || normalized.contains("stop") {
         "exited"
-    } else if normalized.contains("dead") || normalized.contains("kill") || normalized.contains("fail")
+    } else if normalized.contains("dead")
+        || normalized.contains("kill")
+        || normalized.contains("fail")
     {
         "failed"
     } else {
@@ -507,6 +558,8 @@ mod tests {
                 "deployment_hash": "dep",
                 "app_code": "web",
             }),
+            deployment_hash: None,
+            app_code: None,
         };
 
         let parsed = parse_stacker_command(&cmd).unwrap();
@@ -519,6 +572,8 @@ mod tests {
             id: "cmd-2".into(),
             name: "shell".into(),
             params: json!({}),
+            deployment_hash: None,
+            app_code: None,
         };
 
         let parsed = parse_stacker_command(&cmd).unwrap();

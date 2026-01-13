@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use chrono::{SecondsFormat, Utc};
+use serde::Serialize;
 use tokio::signal;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::Duration;
@@ -10,7 +12,8 @@ use crate::agent::config::Config;
 use crate::commands::executor::CommandExecutor;
 use crate::commands::TimeoutStrategy;
 use crate::monitoring::{spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore};
-use crate::transport::http_polling;
+use crate::transport::{http_polling, CommandResult};
+use serde_json::{json, Value};
 
 pub async fn run(config_path: String) -> Result<()> {
     let cfg = Config::from_file(&config_path)?;
@@ -54,11 +57,11 @@ pub async fn run(config_path: String) -> Result<()> {
     );
 
     // Parse long-polling configuration
-    let dashboard_url = std::env::var("DASHBOARD_URL")
-        .unwrap_or_else(|_| "http://localhost:5000".to_string());
+    let dashboard_url =
+        std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "http://localhost:5000".to_string());
     let agent_id = std::env::var("AGENT_ID").unwrap_or_else(|_| "default-agent".to_string());
-    let deployment_hash = std::env::var("DEPLOYMENT_HASH")
-        .unwrap_or_else(|_| "unknown-deployment".to_string());
+    let deployment_hash =
+        std::env::var("DEPLOYMENT_HASH").unwrap_or_else(|_| "unknown-deployment".to_string());
     let polling_timeout = std::env::var("POLLING_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -188,8 +191,6 @@ async fn execute_and_report(
     command_timeout: u64,
 ) -> Result<()> {
     use crate::commands::stacker::{execute_stacker_command, parse_stacker_command};
-    use crate::transport::CommandResult;
-    use serde_json::json;
 
     // First, try to parse as a stacker command (health, logs, restart)
     let cmd_result = match parse_stacker_command(&cmd) {
@@ -261,7 +262,176 @@ async fn execute_and_report(
     let payload = serde_json::to_value(&cmd_result)?;
     http_polling::report_result(dashboard_url, agent_id, agent_token, &payload).await?;
 
+    if let Some(app_status) = build_app_status_update(&cmd_result) {
+        if let Err(e) =
+            http_polling::update_app_status(dashboard_url, agent_id, agent_token, &app_status).await
+        {
+            warn!(
+                command_id = %cmd_result.command_id,
+                error = %e,
+                "failed to update app status"
+            );
+        }
+    }
+
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct AppStatusUpdate {
+    deployment_hash: String,
+    app_code: String,
+    status: String,
+    logs: Vec<String>,
+    timestamp: String,
+}
+
+fn build_app_status_update(result: &CommandResult) -> Option<AppStatusUpdate> {
+    let deployment_hash = result.deployment_hash.clone()?;
+    let app_code = result.app_code.clone()?;
+    let command_type = result.command_type.as_deref()?;
+
+    let (status, logs) = match command_type {
+        "health" => parse_health_update(result),
+        "logs" => parse_logs_update(result),
+        "restart" => parse_restart_update(result),
+        _ => return None,
+    };
+
+    Some(AppStatusUpdate {
+        deployment_hash,
+        app_code,
+        status,
+        logs,
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+    })
+}
+
+fn parse_health_update(result: &CommandResult) -> (String, Vec<String>) {
+    if let Some(body) = result.result.as_ref() {
+        let container_state = body
+            .get("container_state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let mut logs = vec![format!(
+            "status={} container_state={}",
+            body.get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+            container_state
+        )];
+
+        if let Some(errors) = body.get("errors").and_then(|v| v.as_array()) {
+            for error in errors {
+                logs.push(format_error_entry(error));
+            }
+        }
+
+        let status = if result.status == "success" {
+            container_state_to_app_status(container_state)
+        } else {
+            "error"
+        };
+
+        (status.to_string(), logs)
+    } else {
+        ("error".to_string(), default_error_logs(result))
+    }
+}
+
+fn parse_logs_update(result: &CommandResult) -> (String, Vec<String>) {
+    if let Some(body) = result.result.as_ref() {
+        let logs = body
+            .get("lines")
+            .and_then(|v| v.as_array())
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| {
+                        let ts = line.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+                        let stream = line.get("stream").and_then(|v| v.as_str()).unwrap_or("");
+                        let message = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                        format!("{ts} [{stream}] {message}")
+                    })
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_else(Vec::new);
+
+        let status = if result.status == "success" {
+            "running".to_string()
+        } else {
+            "error".to_string()
+        };
+
+        (status, logs)
+    } else {
+        ("error".to_string(), default_error_logs(result))
+    }
+}
+
+fn parse_restart_update(result: &CommandResult) -> (String, Vec<String>) {
+    if let Some(body) = result.result.as_ref() {
+        let container_state = body
+            .get("container_state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let mut logs = vec![format!(
+            "restart status={} container_state={}",
+            body.get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+            container_state
+        )];
+
+        if let Some(errors) = body.get("errors").and_then(|v| v.as_array()) {
+            for error in errors {
+                logs.push(format_error_entry(error));
+            }
+        }
+
+        let status = if result.status == "success" {
+            container_state_to_app_status(container_state)
+        } else {
+            "error"
+        };
+
+        (status.to_string(), logs)
+    } else {
+        ("error".to_string(), default_error_logs(result))
+    }
+}
+
+fn container_state_to_app_status(state: &str) -> &'static str {
+    let normalized = state.to_lowercase();
+    match normalized.as_str() {
+        "running" | "starting" => "running",
+        "paused" | "exited" | "stopped" => "stopped",
+        _ => "error",
+    }
+}
+
+fn format_error_entry(value: &Value) -> String {
+    let code = value
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let message = value
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    if let Some(details) = value.get("details").and_then(|v| v.as_str()) {
+        format!("error({code}): {message} ({details})")
+    } else {
+        format!("error({code}): {message}")
+    }
+}
+
+fn default_error_logs(result: &CommandResult) -> Vec<String> {
+    vec![result
+        .error
+        .as_deref()
+        .unwrap_or("command failed without details")
+        .to_string()]
 }
 
 fn trace_event(event: &str) {

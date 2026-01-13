@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -77,5 +78,33 @@ pub async fn report_result(
         Ok(())
     } else {
         Err(anyhow::anyhow!("report failed: {}", resp.status()))
+    }
+}
+
+/// Update app status after executing a command.
+pub async fn update_app_status<T: Serialize>(
+    base_url: &str,
+    agent_id: &str,
+    agent_token: &str,
+    payload: &T,
+) -> Result<()> {
+    let url = format!("{}/api/v1/apps/status", base_url);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("X-Agent-Id", agent_id)
+        .bearer_auth(agent_token)
+        .json(payload)
+        .send()
+        .await
+        .context("apps status send")?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "app status update failed: {}",
+            resp.status()
+        ))
     }
 }

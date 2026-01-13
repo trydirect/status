@@ -342,6 +342,8 @@ mod tests {
             id: "test-1".to_string(),
             name: "echo hello".to_string(),
             params: serde_json::json!({}),
+            deployment_hash: None,
+            app_code: None,
         };
 
         let strategy = TimeoutStrategy::quick_strategy(10);
@@ -358,6 +360,8 @@ mod tests {
             id: "test-2".to_string(),
             name: "sleep 100".to_string(),
             params: serde_json::json!({}),
+            deployment_hash: None,
+            app_code: None,
         };
 
         let strategy = TimeoutStrategy {
@@ -384,6 +388,8 @@ mod tests {
             id: "test-3".to_string(),
             name: "false".to_string(),
             params: serde_json::json!({}),
+            deployment_hash: None,
+            app_code: None,
         };
 
         let strategy = TimeoutStrategy::quick_strategy(10);
