@@ -41,4 +41,7 @@ ENV MODE="serve-ui"
 # For simple cases, override CMD at runtime:
 #   docker run ... status serve --port 5000 --with-ui
 #   docker run ... status (daemon mode with polling)
-CMD ["/usr/local/bin/status", "serve", "--port", "5000", "--with-ui"]
+# CMD ["/usr/local/bin/status", "serve", "--port", "5000", "--with-ui"]
+
+ENTRYPOINT ["/status"]
+CMD ["serve", "--port", "5000", "--with-ui"]

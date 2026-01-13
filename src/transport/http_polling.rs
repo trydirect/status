@@ -37,7 +37,17 @@ pub async fn wait_for_command(
     match resp.status().as_u16() {
         200 => {
             let val: Value = resp.json().await.context("parse command json")?;
-            let cmd: Command = serde_json::from_value(val).context("map to Command")?;
+
+            // Some dashboards return 200 with a "message" instead of 204. Gracefully treat that as no command.
+            let maybe_id = val.get("id").and_then(|v| v.as_str());
+            if maybe_id.is_none() {
+                return Ok(None);
+            }
+
+            let cmd: Command = serde_json::from_value(val.clone()).map_err(|e| {
+                // Surface the payload to simplify debugging malformed commands
+                anyhow::anyhow!("map to Command: {} | payload={} ", e, val)
+            })?;
             Ok(Some(cmd))
         }
         204 => Ok(None),

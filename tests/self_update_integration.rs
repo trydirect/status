@@ -24,6 +24,10 @@ async fn start_update_job_downloads_and_verifies() {
         .await;
 
     // Point updater to the mock server
+    std::env::set_var(
+        "UPDATE_BINARY_URL",
+        format!("{}/releases/1.2.3/status-linux-x86_64", server.url()),
+    );
     std::env::set_var("UPDATE_SERVER_URL", server.url());
     std::env::set_var("UPDATE_EXPECTED_SHA256", expected);
 
