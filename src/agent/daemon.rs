@@ -187,43 +187,74 @@ async fn execute_and_report(
     cmd: crate::transport::Command,
     command_timeout: u64,
 ) -> Result<()> {
+    use crate::commands::stacker::{execute_stacker_command, parse_stacker_command};
     use crate::transport::CommandResult;
     use serde_json::json;
 
-    let strategy = TimeoutStrategy::backup_strategy(command_timeout);
+    // First, try to parse as a stacker command (health, logs, restart)
+    let cmd_result = match parse_stacker_command(&cmd) {
+        Ok(Some(stacker_cmd)) => {
+            info!(
+                command_id = %cmd.id,
+                command_type = %cmd.name,
+                "executing stacker command"
+            );
+            match execute_stacker_command(&cmd, &stacker_cmd).await {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(command_id = %cmd.id, error = %e, "stacker command execution failed");
+                    CommandResult {
+                        command_id: cmd.id.clone(),
+                        status: "failed".to_string(),
+                        result: None,
+                        error: Some(e.to_string()),
+                        ..CommandResult::default()
+                    }
+                }
+            }
+        }
+        Ok(None) => {
+            // Not a stacker command, fall back to shell execution
+            info!(
+                command_id = %cmd.id,
+                command_name = %cmd.name,
+                "executing as shell command"
+            );
+            let strategy = TimeoutStrategy::backup_strategy(command_timeout);
+            let exec_result = executor.execute(&cmd, strategy).await;
 
-    // Execute the command
-    let exec_result = executor.execute(&cmd, strategy).await;
-
-    let cmd_result = match exec_result {
-        Ok(output) => CommandResult {
-            command_id: cmd.id.clone(),
-            status: "success".to_string(),
-            result: Some(json!({
-                "stdout": output.stdout,
-                "stderr": output.stderr,
-                "exit_code": output.exit_code,
-            })),
-            error: None,
-            deployment_hash: None,
-            app_code: None,
-            command_type: None,
-            errors: None,
-            truncated: None,
-            cursor: None,
-        },
-        Err(e) => CommandResult {
-            command_id: cmd.id.clone(),
-            status: "failed".to_string(),
-            result: None,
-            error: Some(e.to_string()),
-            deployment_hash: None,
-            app_code: None,
-            command_type: None,
-            errors: None,
-            truncated: None,
-            cursor: None,
-        },
+            match exec_result {
+                Ok(output) => CommandResult {
+                    command_id: cmd.id.clone(),
+                    status: "success".to_string(),
+                    result: Some(json!({
+                        "stdout": output.stdout,
+                        "stderr": output.stderr,
+                        "exit_code": output.exit_code,
+                    })),
+                    error: None,
+                    ..CommandResult::default()
+                },
+                Err(e) => CommandResult {
+                    command_id: cmd.id.clone(),
+                    status: "failed".to_string(),
+                    result: None,
+                    error: Some(e.to_string()),
+                    ..CommandResult::default()
+                },
+            }
+        }
+        Err(e) => {
+            // Failed to parse command parameters
+            error!(command_id = %cmd.id, error = %e, "failed to parse command");
+            CommandResult {
+                command_id: cmd.id.clone(),
+                status: "failed".to_string(),
+                result: None,
+                error: Some(format!("Invalid command parameters: {}", e)),
+                ..CommandResult::default()
+            }
+        }
     };
 
     // Report the result back
