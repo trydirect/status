@@ -10,10 +10,16 @@ fn empty_params() -> Value {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
+    #[serde(alias = "command_id")]
     pub id: String,
+    #[serde(alias = "command_type", alias = "type")]
     pub name: String,
-    #[serde(default = "empty_params")]
+    #[serde(default = "empty_params", alias = "parameters")]
     pub params: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

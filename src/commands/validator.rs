@@ -176,6 +176,8 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             params: serde_json::json!({}),
+            deployment_hash: None,
+            app_code: None,
         }
     }
 
