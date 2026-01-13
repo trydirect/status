@@ -9,12 +9,14 @@ services:
      - "5001:5000"
     volumes:
      - .:/app
-     - /var/run/docker.sock:/var/run/docker.sock
+     # NOTE: Status Panel no longer mounts Docker socket when compose-agent is enabled
+     # - /var/run/docker.sock:/var/run/docker.sock
     # - /data/encrypted:/data/encrypted
     env_file:
       - .env
     environment:
       - NGINX_CONTAINER=nginx
+      - COMPOSE_AGENT_ENABLED=true
     # Default: serve with UI
     command: ["serve", "--port", "5000", "--with-ui"]
 
@@ -23,6 +25,7 @@ services:
     image: trydirect/status:unstable
     container_name: status-agent
     volumes:
+     # Agent still needs Docker socket for monitoring
      - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env
@@ -32,5 +35,28 @@ services:
       - POLL_TIMEOUT_SECS=30
       - POLL_BACKOFF_SECS=5
       - POLL_MAX_BACKOFF_SECS=60
+      - COMPOSE_AGENT_ENABLED=false
     # No subcommand = daemon mode with polling
     command: ["--config", "/app/config.json"]
+
+  # Compose Agent Sidecar (Docker Compose operations + MCP Gateway)
+  compose-agent:
+    image: trydirect/status:compose-agent-unstable
+    container_name: compose-agent
+    volumes:
+     # Compose agent has exclusive Docker socket access for operations
+     - /var/run/docker.sock:/var/run/docker.sock
+     - .:/app
+    env_file:
+      - .env
+    environment:
+      - DASHBOARD_URL=https://stacker.try.direct
+      - DEPLOYMENT_HASH=$DEPLOYMENT_HASH
+      - POLL_TIMEOUT_SECS=30
+      - POLL_BACKOFF_SECS=5
+      - POLL_MAX_BACKOFF_SECS=60
+      - CONTROL_PLANE=compose_agent
+      - VAULT_TOKEN_KEY=compose_agent_token
+    restart: on-failure
+    # Compose mode daemon with compose-specific config
+    command: ["--config", "/app/config.json", "--compose-mode"]

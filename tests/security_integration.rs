@@ -29,6 +29,8 @@ fn test_config() -> Arc<Config> {
             email: "test@example.com".to_string(),
         },
         ssl: Some("letsencrypt".to_string()),
+        compose_agent_enabled: false,
+        control_plane: None,
     })
 }
 

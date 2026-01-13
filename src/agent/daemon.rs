@@ -16,6 +16,26 @@ pub async fn run(config_path: String) -> Result<()> {
     let cfg = Config::from_file(&config_path)?;
     info!(domain=?cfg.domain, "Agent daemon starting");
 
+    // Check if compose agent is enabled
+    let compose_agent_enabled = std::env::var("COMPOSE_AGENT_ENABLED")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .or(Some(cfg.compose_agent_enabled))
+        .unwrap_or(false);
+
+    let control_plane = std::env::var("CONTROL_PLANE")
+        .ok()
+        .or(cfg.control_plane.clone())
+        .unwrap_or_else(|| "status_panel".to_string());
+
+    if !compose_agent_enabled && control_plane == "status_panel" {
+        warn!("compose_agent=false - running in legacy mode (Status Panel handles all operations)");
+    } else if compose_agent_enabled {
+        info!("compose_agent=true - compose-agent sidecar handling Docker operations");
+    }
+
+    info!(control_plane = %control_plane, "Control plane identified");
+
     let collector = Arc::new(MetricsCollector::new());
     let store: MetricsStore = Arc::new(RwLock::new(MetricsSnapshot::default()));
     let (tx, _) = broadcast::channel(32);

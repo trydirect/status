@@ -26,7 +26,7 @@ pub async fn spawn_token_refresh(
 
             sleep(interval).await;
 
-            match vault_client.fetch_agent_token(&deployment_hash).await {
+            match vault_client.fetch_agent_token(&deployment_hash, None).await {
                 Ok(new_token) => {
                     let current = token_cache.get().await;
                     if current != new_token {

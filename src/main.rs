@@ -16,6 +16,10 @@ struct AppCli {
     #[arg(short, long, default_value = "config.json", global = true)]
     config: String,
 
+    /// Enable compose-agent mode (handles Docker Compose operations)
+    #[arg(long)]
+    compose_mode: bool,
+
     /// Subcommands
     #[command(subcommand)]
     command: Option<Commands>,
@@ -93,6 +97,14 @@ async fn main() -> Result<()> {
         Some(Commands::Pause { name }) => agent::docker::pause(&name).await?,
         None => {
             // Default: run the agent daemon
+            if args.compose_mode {
+                info!("Starting compose-agent daemon mode");
+                // Set CONTROL_PLANE environment variable for identification
+                std::env::set_var("CONTROL_PLANE", "compose_agent");
+            } else {
+                info!("Starting status-panel daemon mode");
+                std::env::set_var("CONTROL_PLANE", "status_panel");
+            }
             agent::daemon::run(args.config).await?;
         }
     }

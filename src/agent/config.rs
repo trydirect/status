@@ -20,6 +20,10 @@ pub struct Config {
     pub apps_info: Option<Vec<AppInfo>>, // normalized
     pub reqdata: ReqData,
     pub ssl: Option<String>,
+    #[serde(default)]
+    pub compose_agent_enabled: bool,
+    #[serde(default)]
+    pub control_plane: Option<String>, // "status_panel" or "compose_agent"
 }
 
 impl Config {

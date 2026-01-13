@@ -257,7 +257,7 @@ async fn handle_health(
                 Some(e.to_string()),
             );
             let errors = vec![error.clone()];
-            let mut body = json!({
+            let body = json!({
                 "status": "unknown",
                 "container_state": "unknown",
                 "last_heartbeat_at": now_timestamp(),

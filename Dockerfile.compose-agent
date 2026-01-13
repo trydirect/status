@@ -1,0 +1,21 @@
+FROM clux/muslrust:stable AS builder
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock* ./
+COPY src src
+COPY templates templates
+COPY static static
+COPY config.json config.json
+
+# Build a statically linked binary to remove glibc runtime dependency.
+RUN rustup target add x86_64-unknown-linux-musl && \
+	cargo build --release --target x86_64-unknown-linux-musl
+
+FROM gcr.io/distroless/cc
+WORKDIR /app
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/status /status
+COPY config.json config.json
+ENV RUST_LOG=info
+# Compose agent runs in daemon mode with compose-specific config
+ENTRYPOINT ["/status"]
+CMD ["--config", "/app/config.json", "--compose-mode"]
