@@ -47,6 +47,30 @@ async fn test_health_endpoint() {
 }
 
 #[tokio::test]
+async fn test_capabilities_endpoint() {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    assert_eq!(value["compose_agent"], Value::Bool(false));
+    assert_eq!(value["control_plane"], Value::String("status_panel".to_string()));
+    assert!(value.get("features").is_some());
+}
+
+#[tokio::test]
 async fn test_login_page_get() {
     let app = test_router();
 

@@ -213,6 +213,14 @@ pub struct BackupPingResponse {
     pub hash: Option<String>,
 }
 
+#[derive(Serialize)]
+struct CapabilitiesResponse {
+    compose_agent: bool,
+    control_plane: String,
+    version: String,
+    features: Vec<String>,
+}
+
 // Health check with token rotation metrics
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -814,9 +822,43 @@ async fn metrics_ws_stream(state: SharedState, mut socket: WebSocket) {
     }
 }
 
+async fn capabilities_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let compose_agent_env = std::env::var("COMPOSE_AGENT_ENABLED")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok());
+    let compose_agent = compose_agent_env.unwrap_or(state.config.compose_agent_enabled);
+
+    let control_plane = std::env::var("CONTROL_PLANE")
+        .ok()
+        .or_else(|| state.config.control_plane.clone())
+        .unwrap_or_else(|| "status_panel".to_string());
+
+    // Basic capability set; extend if docker feature is enabled
+    let mut features = vec!["monitoring".to_string()];
+    if cfg!(feature = "docker") {
+        features.push("docker".to_string());
+        features.push("compose".to_string());
+        features.push("logs".to_string());
+        features.push("restart".to_string());
+    }
+    if compose_agent {
+        features.push("compose_agent".to_string());
+    }
+
+    let resp = CapabilitiesResponse {
+        compose_agent,
+        control_plane,
+        version: VERSION.to_string(),
+        features,
+    };
+
+    Json(resp)
+}
+
 pub fn create_router(state: SharedState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
+        .route("/capabilities", get(capabilities_handler))
         .route("/metrics", get(metrics_handler))
         .route("/metrics/stream", get(metrics_ws_handler))
         // Self-update endpoints
