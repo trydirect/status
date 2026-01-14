@@ -66,7 +66,10 @@ async fn test_capabilities_endpoint() {
     let value: Value = serde_json::from_slice(&body_bytes).unwrap();
 
     assert_eq!(value["compose_agent"], Value::Bool(false));
-    assert_eq!(value["control_plane"], Value::String("status_panel".to_string()));
+    assert_eq!(
+        value["control_plane"],
+        Value::String("status_panel".to_string())
+    );
     assert!(value.get("features").is_some());
 }
 

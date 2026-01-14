@@ -41,8 +41,8 @@ use crate::commands::{
     check_remote_version, get_update_status, start_update_job, UpdateJobs, UpdatePhase,
 };
 use crate::commands::{
-    CommandValidator, DockerOperation, TimeoutStrategy, execute_stacker_command,
-    parse_stacker_command,
+    execute_stacker_command, parse_stacker_command, CommandValidator, DockerOperation,
+    TimeoutStrategy,
 };
 use crate::monitoring::{
     spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx,

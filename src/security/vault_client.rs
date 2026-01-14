@@ -195,10 +195,7 @@ impl VaultClient {
             );
         }
 
-        info!(
-            "Token deleted from Vault for {} ({})",
-            deployment_hash, key
-        );
+        info!("Token deleted from Vault for {} ({})", deployment_hash, key);
         Ok(())
     }
 }

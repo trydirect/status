@@ -52,8 +52,7 @@ pub struct ComposeAgentWatchdog {
 impl ComposeAgentWatchdog {
     /// Create a new watchdog instance
     pub fn new(config: WatchdogConfig) -> Result<Self> {
-        let docker =
-            Docker::connect_with_defaults().context("connecting to Docker daemon")?;
+        let docker = Docker::connect_with_defaults().context("connecting to Docker daemon")?;
 
         Ok(Self {
             config,
@@ -66,10 +65,13 @@ impl ComposeAgentWatchdog {
     /// Check health of the compose-agent container
     pub async fn check_health(&self) -> Result<HealthStatus> {
         use bollard::query_parameters::InspectContainerOptions;
-        
+
         let inspect = match self
             .docker
-            .inspect_container(&self.config.target_container, None::<InspectContainerOptions>)
+            .inspect_container(
+                &self.config.target_container,
+                None::<InspectContainerOptions>,
+            )
             .await
         {
             Ok(data) => data,
@@ -104,7 +106,7 @@ impl ComposeAgentWatchdog {
     /// Restart the compose-agent container
     pub async fn restart_container(&mut self) -> Result<()> {
         use bollard::query_parameters::RestartContainerOptions;
-        
+
         info!(
             "Restarting {} (attempt {}/{})",
             self.config.target_container,
@@ -123,10 +125,7 @@ impl ComposeAgentWatchdog {
         self.restart_count += 1;
         self.last_restart = Some(std::time::Instant::now());
 
-        info!(
-            "Successfully restarted {}",
-            self.config.target_container
-        );
+        info!("Successfully restarted {}", self.config.target_container);
 
         Ok(())
     }
@@ -134,7 +133,10 @@ impl ComposeAgentWatchdog {
     /// Calculate backoff delay before next restart attempt
     fn calculate_backoff_delay(&self) -> Duration {
         let base_delay = Duration::from_secs(10);
-        let multiplier = self.config.restart_backoff_multiplier.powi(self.restart_count as i32);
+        let multiplier = self
+            .config
+            .restart_backoff_multiplier
+            .powi(self.restart_count as i32);
         Duration::from_secs((base_delay.as_secs() as f64 * multiplier) as u64)
     }
 
@@ -268,7 +270,7 @@ mod tests {
     fn test_backoff_calculation_no_docker() {
         // Test the backoff calculation logic without requiring Docker
         let config = WatchdogConfig::default();
-        
+
         // Mock backoff calculation based on formula
         let calculate_mock_backoff = |restart_count: u32| -> std::time::Duration {
             let base_delay = std::time::Duration::from_secs(10);
