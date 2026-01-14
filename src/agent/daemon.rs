@@ -142,9 +142,8 @@ async fn polling_loop(
                 info!(
                     command_id = %cmd.id,
                     command_name = %cmd.name,
-                    "command received from dashboard"
+                    "command received from dashboard queue"
                 );
-
                 // Execute the command with configured timeout
                 match execute_and_report(
                     &executor,
@@ -260,7 +259,16 @@ async fn execute_and_report(
 
     // Report the result back
     let payload = serde_json::to_value(&cmd_result)?;
+    info!(
+        command_id = %cmd_result.command_id,
+        status = %cmd_result.status,
+        "reporting command result to stacker"
+    );
     http_polling::report_result(dashboard_url, agent_id, agent_token, &payload).await?;
+    info!(
+        command_id = %cmd_result.command_id,
+        "stacker acknowledged command result"
+    );
 
     if let Some(app_status) = build_app_status_update(&cmd_result) {
         if let Err(e) =
@@ -270,6 +278,12 @@ async fn execute_and_report(
                 command_id = %cmd_result.command_id,
                 error = %e,
                 "failed to update app status"
+            );
+        } else {
+            info!(
+                command_id = %cmd_result.command_id,
+                status = %app_status.status,
+                "reported app status to stacker"
             );
         }
     }
