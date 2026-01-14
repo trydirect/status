@@ -43,3 +43,14 @@ pub struct CommandError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
 }
+
+/// Minimal report payload for Stacker API (matches /api/v1/agent/commands/report spec)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackerCommandReport {
+    pub command_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}

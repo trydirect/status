@@ -148,6 +148,7 @@ async fn polling_loop(
                 match execute_and_report(
                     &executor,
                     &dashboard_url,
+                    &deployment_hash,
                     &agent_id,
                     &agent_token,
                     cmd,
@@ -184,6 +185,7 @@ async fn polling_loop(
 async fn execute_and_report(
     executor: &CommandExecutor,
     dashboard_url: &str,
+    deployment_hash: &str,
     agent_id: &str,
     agent_token: &str,
     cmd: crate::transport::Command,
@@ -262,13 +264,22 @@ async fn execute_and_report(
     };
 
     // Report the result back
-    let payload = serde_json::to_value(&cmd_result)?;
     info!(
         command_id = %cmd_result.command_id,
         status = %cmd_result.status,
         "reporting command result to stacker"
     );
-    http_polling::report_result(dashboard_url, agent_id, agent_token, &payload).await?;
+    http_polling::report_result(
+        &dashboard_url,
+        &agent_id,
+        &agent_token,
+        &cmd_result.command_id,
+        deployment_hash,
+        &cmd_result.status,
+        &cmd_result.result,
+        &cmd_result.error,
+        &cmd_result.completed_at,
+    ).await?;
     info!(
         command_id = %cmd_result.command_id,
         "stacker acknowledged command result"

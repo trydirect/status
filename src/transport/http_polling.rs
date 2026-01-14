@@ -237,31 +237,38 @@ pub async fn report_result(
     base_url: &str,
     agent_id: &str,
     agent_token: &str,
-    payload: &Value,
+    command_id: &str,
+    deployment_hash: &str,
+    status: &str,
+    result: &Option<serde_json::Value>,
+    error: &Option<String>,
+    completed_at: &str,
 ) -> Result<()> {
     let url = format!("{}/api/v1/agent/commands/report", base_url);
-    
-    debug!(
-        url = %url,
-        payload = %payload,
-        "reporting command result to dashboard"
-    );
-    
+    let mut body = serde_json::Map::new();
+    body.insert("command_id".to_string(), serde_json::Value::String(command_id.to_string()));
+    body.insert("deployment_hash".to_string(), serde_json::Value::String(deployment_hash.to_string()));
+    body.insert("status".to_string(), serde_json::Value::String(status.to_string()));
+    body.insert("completed_at".to_string(), serde_json::Value::String(completed_at.to_string()));
+    if let Some(res) = result {
+        body.insert("result".to_string(), res.clone());
+    }
+    if let Some(err) = error {
+        body.insert("error".to_string(), serde_json::Value::String(err.clone()));
+    } else {
+        body.insert("error".to_string(), serde_json::Value::Null);
+    }
+    debug!(url = %url, body = ?body, "reporting command result to stacker");
     let client = Client::new();
-    let resp = signed_post_json(&client, &url, agent_id, agent_token, payload).await?;
-
-    let status = resp.status();
-    if status.is_success() {
-        debug!(status_code = %status.as_u16(), "command result reported successfully");
+    let resp = signed_post_json(&client, &url, agent_id, agent_token, &body).await?;
+    let status_code = resp.status();
+    if status_code.is_success() {
+        debug!(status_code = %status_code.as_u16(), "command result reported successfully");
         Ok(())
     } else {
         let error_body = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
-        debug!(
-            status_code = %status.as_u16(),
-            error_body = %error_body,
-            "command result report failed"
-        );
-        Err(anyhow!("report failed: {} | body: {}", status, error_body))
+        debug!(status_code = %status_code.as_u16(), error_body = %error_body, "command result report failed");
+        Err(anyhow!("report failed: {} | body: {}", status_code, error_body))
     }
 }
 
@@ -302,9 +309,20 @@ mod tests {
         let base_url = server.url();
         let agent_id = "agent-123";
         let agent_token = "token-abc";
+        let command_id = "cmd-1";
+        let deployment_hash = "dep-hash-123";
+        let status = "success";
+        let result = Some(json!({"output": "ok"}));
+        let error = None;
+        let completed_at = "2023-11-15T10:00:00Z";
+
         let payload = json!({
-            "command_id": "cmd-1",
-            "status": "success"
+            "command_id": command_id,
+            "deployment_hash": deployment_hash,
+            "status": status,
+            "result": result,
+            "error": serde_json::Value::Null,
+            "completed_at": completed_at
         });
 
         let body = serde_json::to_vec(&payload).unwrap();
@@ -326,7 +344,7 @@ mod tests {
             .create_async()
             .await;
 
-        report_result(&base_url, agent_id, agent_token, &payload)
+        report_result(&base_url, agent_id, agent_token, command_id, deployment_hash, status, &result, &error, completed_at)
             .await
             .expect("report_result should succeed");
         mock.assert();
