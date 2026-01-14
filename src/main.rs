@@ -19,12 +19,12 @@ fn print_banner() {
     eprintln!("╔══════════════════════════════════════════════════════════╗");
     eprintln!("║          Status Panel (TryDirect Agent)                  ║");
     eprintln!("╠══════════════════════════════════════════════════════════╣");
-    eprintln!("║  Version:      {:<43}║", VERSION);
-    eprintln!("║  Package:      {:<43}║", PKG_NAME);
-    eprintln!("║  Rust:         {:<43}║", rust_version);
-    eprintln!("║  Build:        {:<43}║", build_profile);
-    eprintln!("║  Docker:       {:<43}║", docker_feature);
-    eprintln!("║  PID:          {:<43}║", std::process::id());
+    eprintln!("║  Version:      {:<42}║", VERSION);
+    eprintln!("║  Package:      {:<42}║", PKG_NAME);
+    eprintln!("║  Rust:         {:<42}║", rust_version);
+    eprintln!("║  Build:        {:<42}║", build_profile);
+    eprintln!("║  Docker:       {:<42}║", docker_feature);
+    eprintln!("║  PID:          {:<42}║", std::process::id());
     eprintln!("╚══════════════════════════════════════════════════════════╝");
     eprintln!();
 }
