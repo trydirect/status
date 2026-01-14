@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{SecondsFormat, Utc};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -59,6 +60,7 @@ impl ExecutionResult {
             } else {
                 Some(self.stderr.clone())
             },
+            completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             ..CommandResult::default()
         }
     }

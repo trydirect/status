@@ -22,7 +22,9 @@ pub enum StackerCommand {
 
 #[derive(Debug, Clone, Deserialize)]
 struct HealthCommand {
+    #[serde(default)]
     deployment_hash: String,
+    #[serde(default)]
     app_code: String,
     #[serde(default = "default_true")]
     include_metrics: bool,
@@ -30,7 +32,9 @@ struct HealthCommand {
 
 #[derive(Debug, Clone, Deserialize)]
 struct LogsCommand {
+    #[serde(default)]
     deployment_hash: String,
+    #[serde(default)]
     app_code: String,
     cursor: Option<String>,
     #[serde(default = "default_logs_limit")]
@@ -43,7 +47,9 @@ struct LogsCommand {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RestartCommand {
+    #[serde(default)]
     deployment_hash: String,
+    #[serde(default)]
     app_code: String,
     #[serde(default)]
     force: bool,
@@ -235,6 +241,7 @@ fn base_result(
         status: "success".into(),
         result: None,
         error: None,
+        completed_at: now_timestamp(),
         deployment_hash: Some(deployment_hash.to_string()),
         app_code: Some(app_code.to_string()),
         command_type: Some(command_type.to_string()),

@@ -3,6 +3,8 @@ use crate::transport::CommandResult;
 use anyhow::Result;
 
 #[cfg(feature = "docker")]
+use chrono::{SecondsFormat, Utc};
+#[cfg(feature = "docker")]
 use std::time::Instant;
 #[cfg(feature = "docker")]
 use tracing::{error, info};
@@ -130,6 +132,7 @@ pub async fn execute_docker_operation(
             "stdout": stdout,
         })),
         error: if exit_code != 0 { Some(stderr) } else { None },
+        completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         ..CommandResult::default()
     })
 }

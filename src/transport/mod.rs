@@ -20,6 +20,8 @@ pub struct CommandResult {
     pub status: String, // "success" | "failed" | "timeout"
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+    /// ISO 8601 timestamp when command execution completed
+    pub completed_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

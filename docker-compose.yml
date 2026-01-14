@@ -23,9 +23,9 @@ services:
   # Daemon mode with long polling (uncomment to use)
   agent:
     image: trydirect/status:unstable
-    container_name: status-agent
+    container_name: statuspanel_agent
     volumes:
-     # Agent still needs Docker socket for monitoring
+     # Agent needs Docker socket for container monitoring and logs
      - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env
@@ -37,7 +37,7 @@ services:
       - POLL_MAX_BACKOFF_SECS=60
       - COMPOSE_AGENT_ENABLED=false
     # No subcommand = daemon mode with polling
-    command: ["--config", "/app/config.json"]
+    command: []
 
   # Compose Agent Sidecar (Docker Compose operations + MCP Gateway)
   compose-agent:

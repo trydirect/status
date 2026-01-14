@@ -208,6 +208,7 @@ async fn execute_and_report(
                         status: "failed".to_string(),
                         result: None,
                         error: Some(e.to_string()),
+                        completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
                         ..CommandResult::default()
                     }
                 }
@@ -233,6 +234,7 @@ async fn execute_and_report(
                         "exit_code": output.exit_code,
                     })),
                     error: None,
+                    completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
                     ..CommandResult::default()
                 },
                 Err(e) => CommandResult {
@@ -240,6 +242,7 @@ async fn execute_and_report(
                     status: "failed".to_string(),
                     result: None,
                     error: Some(e.to_string()),
+                    completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
                     ..CommandResult::default()
                 },
             }
@@ -252,6 +255,7 @@ async fn execute_and_report(
                 status: "failed".to_string(),
                 result: None,
                 error: Some(format!("Invalid command parameters: {}", e)),
+                completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
                 ..CommandResult::default()
             }
         }

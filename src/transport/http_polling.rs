@@ -240,13 +240,28 @@ pub async fn report_result(
     payload: &Value,
 ) -> Result<()> {
     let url = format!("{}/api/v1/agent/commands/report", base_url);
+    
+    debug!(
+        url = %url,
+        payload = %payload,
+        "reporting command result to dashboard"
+    );
+    
     let client = Client::new();
     let resp = signed_post_json(&client, &url, agent_id, agent_token, payload).await?;
 
-    if resp.status().is_success() {
+    let status = resp.status();
+    if status.is_success() {
+        debug!(status_code = %status.as_u16(), "command result reported successfully");
         Ok(())
     } else {
-        Err(anyhow!("report failed: {}", resp.status()))
+        let error_body = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
+        debug!(
+            status_code = %status.as_u16(),
+            error_body = %error_body,
+            "command result report failed"
+        );
+        Err(anyhow!("report failed: {} | body: {}", status, error_body))
     }
 }
 
