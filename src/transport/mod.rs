@@ -2,20 +2,12 @@ pub mod http_polling;
 pub mod websocket;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-fn empty_params() -> Value {
-    serde_json::json!({})
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
-    #[serde(alias = "command_id")]
     pub id: String,
-    #[serde(alias = "command_type", alias = "type")]
     pub name: String,
-    #[serde(default = "empty_params", alias = "parameters")]
-    pub params: Value,
+    pub params: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

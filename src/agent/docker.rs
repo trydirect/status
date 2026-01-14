@@ -319,7 +319,8 @@ pub async fn get_container_logs_window(
     use futures_util::StreamExt;
 
     let docker = docker_client()?;
-    let mut builder = LogsOptionsBuilder::default()
+    let mut builder = LogsOptionsBuilder::default();
+    builder = builder
         .stdout(true)
         .stderr(true)
         .follow(false)
@@ -327,10 +328,13 @@ pub async fn get_container_logs_window(
 
     if let Some(ts) = cursor.as_deref() {
         if let Some(epoch) = parse_cursor_to_epoch(ts) {
-            builder = builder.since(epoch as i32);
+            // bollard expects i32 seconds since epoch; clamp to avoid overflow
+            let since = i32::try_from(epoch).unwrap_or(i32::MAX);
+            builder = builder.since(since);
         }
     } else if let Some(max) = limit {
-        builder = builder.tail(&max.to_string());
+        let tail = max.to_string();
+        builder = builder.tail(&tail);
     }
 
     let opts = builder.build();
