@@ -5,6 +5,30 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
+/// Application version from Cargo.toml
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const PKG_NAME: &str = env!("CARGO_PKG_NAME");
+
+/// Print startup banner with version and system info
+fn print_banner() {
+    let rust_version = rustc_version_runtime::version();
+    let build_profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let docker_feature = if cfg!(feature = "docker") { "enabled" } else { "disabled" };
+    
+    eprintln!();
+    eprintln!("╔══════════════════════════════════════════════════════════╗");
+    eprintln!("║          Status Panel (TryDirect Agent)                  ║");
+    eprintln!("╠══════════════════════════════════════════════════════════╣");
+    eprintln!("║  Version:      {:<43}║", VERSION);
+    eprintln!("║  Package:      {:<43}║", PKG_NAME);
+    eprintln!("║  Rust:         {:<43}║", rust_version);
+    eprintln!("║  Build:        {:<43}║", build_profile);
+    eprintln!("║  Docker:       {:<43}║", docker_feature);
+    eprintln!("║  PID:          {:<43}║", std::process::id());
+    eprintln!("╚══════════════════════════════════════════════════════════╝");
+    eprintln!();
+}
+
 #[derive(Parser)]
 #[command(name = "status", version, about = "Status Panel (TryDirect Agent)")]
 struct AppCli {
@@ -68,6 +92,9 @@ async fn main() -> Result<()> {
     // Load environment variables from .env if present
     let _ = dotenv();
     utils::logging::init();
+    
+    // Show startup banner
+    print_banner();
 
     let args = AppCli::parse();
     if args.daemon {

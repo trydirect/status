@@ -41,6 +41,8 @@ bollard = { version = "0.19", optional = true, default-features = false, feature
 daemonize = "0.5"
 # Load environment variables from .env
 dotenvy = "0.15"
+# Runtime Rust version info
+rustc_version_runtime = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }
