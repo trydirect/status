@@ -108,3 +108,71 @@ pub async fn update_app_status<T: Serialize>(
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::{Matcher, Server};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn report_result_posts_payload() {
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+        let agent_id = "agent-123";
+        let agent_token = "token-abc";
+        let payload = json!({
+            "command_id": "cmd-1",
+            "status": "success"
+        });
+
+        let body = payload.to_string();
+        let mock = server
+            .mock("POST", "/api/v1/agent/commands/report")
+            .match_header("X-Agent-Id", Matcher::Exact(agent_id.into()))
+            .match_header(
+                "Authorization",
+                Matcher::Exact(format!("Bearer {}", agent_token)),
+            )
+            .match_body(Matcher::Exact(body.clone()))
+            .with_status(200)
+            .create_async()
+            .await;
+
+        report_result(&base_url, agent_id, agent_token, &payload)
+            .await
+            .expect("report_result should succeed");
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn update_app_status_posts_payload() {
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+        let agent_id = "agent-123";
+        let agent_token = "token-abc";
+        let payload = json!({
+            "deployment_hash": "dep-1",
+            "app_code": "web",
+            "status": "running"
+        });
+
+        let body = payload.to_string();
+        let mock = server
+            .mock("POST", "/api/v1/apps/status")
+            .match_header("X-Agent-Id", Matcher::Exact(agent_id.into()))
+            .match_header(
+                "Authorization",
+                Matcher::Exact(format!("Bearer {}", agent_token)),
+            )
+            .match_body(Matcher::Exact(body.clone()))
+            .with_status(200)
+            .create_async()
+            .await;
+
+        update_app_status(&base_url, agent_id, agent_token, &payload)
+            .await
+            .expect("update_app_status should succeed");
+        mock.assert();
+    }
+}
