@@ -1,8 +1,13 @@
 use anyhow::{bail, Context, Result};
+#[cfg(feature = "docker")]
 use chrono::{SecondsFormat, Utc};
+#[cfg(feature = "docker")]
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
+#[cfg(feature = "docker")]
+use serde_json::Value;
+#[cfg(feature = "docker")]
 use std::sync::OnceLock;
 
 use crate::transport::{Command as AgentCommand, CommandError, CommandResult};
@@ -20,8 +25,9 @@ pub enum StackerCommand {
     Restart(RestartCommand),
 }
 
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct HealthCommand {
+pub struct HealthCommand {
     #[serde(default)]
     deployment_hash: String,
     #[serde(default)]
@@ -30,8 +36,9 @@ pub(crate) struct HealthCommand {
     include_metrics: bool,
 }
 
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct LogsCommand {
+pub struct LogsCommand {
     #[serde(default)]
     deployment_hash: String,
     #[serde(default)]
@@ -45,8 +52,9 @@ pub(crate) struct LogsCommand {
     redact: bool,
 }
 
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct RestartCommand {
+pub struct RestartCommand {
     #[serde(default)]
     deployment_hash: String,
     #[serde(default)]
@@ -93,6 +101,7 @@ pub async fn execute_stacker_command(
     }
     #[cfg(not(feature = "docker"))]
     {
+        let _ = (agent_cmd, command);
         bail!("docker feature not enabled for stacker commands")
     }
 }
@@ -186,6 +195,7 @@ impl LogsCommand {
         Ok(())
     }
 
+    #[cfg(feature = "docker")]
     fn includes_stream(&self, stream: &str) -> bool {
         match &self.streams {
             Some(allowed) => allowed.iter().any(|s| s == stream),
@@ -230,6 +240,7 @@ fn trimmed(value: &str) -> String {
     value.trim().to_string()
 }
 
+#[cfg(feature = "docker")]
 fn base_result(
     agent_cmd: &AgentCommand,
     deployment_hash: &str,
@@ -249,14 +260,17 @@ fn base_result(
     }
 }
 
+#[cfg(feature = "docker")]
 fn now_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+#[cfg(feature = "docker")]
 fn errors_value(errors: &[CommandError]) -> Value {
     serde_json::to_value(errors).unwrap_or_else(|_| json!([]))
 }
 
+#[cfg(feature = "docker")]
 fn redact_message(message: &str, enabled: bool) -> (String, bool) {
     if !enabled || message.is_empty() {
         return (message.to_string(), false);
@@ -275,6 +289,7 @@ fn redact_message(message: &str, enabled: bool) -> (String, bool) {
     (replaced.into_owned(), redacted)
 }
 
+#[cfg(feature = "docker")]
 fn make_error(code: &str, message: impl Into<String>, details: Option<String>) -> CommandError {
     CommandError {
         code: code.to_string(),

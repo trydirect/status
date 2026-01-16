@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::time::Duration;
+#[cfg(feature = "docker")]
 use tokio::time::sleep;
+#[cfg(feature = "docker")]
 use tracing::{error, info, warn};
 
 #[cfg(feature = "docker")]
