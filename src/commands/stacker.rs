@@ -400,6 +400,9 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
             );
             let errors = vec![error.clone()];
             let body = json!({
+                "type": "logs",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
                 "cursor": data.cursor.clone(),
                 "truncated": false,
                 "lines": [],
