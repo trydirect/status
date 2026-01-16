@@ -1,4 +1,6 @@
+#[cfg(feature = "docker")]
 use anyhow::{Context, Result};
+#[cfg(feature = "docker")]
 use std::time::Duration;
 #[cfg(feature = "docker")]
 use tokio::time::sleep;

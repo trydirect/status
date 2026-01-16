@@ -4,13 +4,16 @@ use chrono::{SecondsFormat, Utc};
 #[cfg(feature = "docker")]
 use regex::Regex;
 use serde::Deserialize;
+#[cfg(any(feature = "docker", test))]
 use serde_json::json;
 #[cfg(feature = "docker")]
 use serde_json::Value;
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
 
-use crate::transport::{Command as AgentCommand, CommandError, CommandResult};
+use crate::transport::{Command as AgentCommand, CommandResult};
+#[cfg(feature = "docker")]
+use crate::transport::CommandError;
 
 #[cfg(feature = "docker")]
 use crate::agent::docker;
