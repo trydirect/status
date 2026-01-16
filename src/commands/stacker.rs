@@ -323,6 +323,9 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
             );
             let errors = vec![error.clone()];
             let body = json!({
+                "type": "health",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
                 "status": "unknown",
                 "container_state": "unknown",
                 "last_heartbeat_at": now_timestamp(),
@@ -353,6 +356,9 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     let status_field = derive_health_status(&container_state, !errors.is_empty());
     let mut body = json!({
+        "type": "health",
+        "deployment_hash": data.deployment_hash.clone(),
+        "app_code": data.app_code.clone(),
         "status": status_field,
         "container_state": container_state,
         "last_heartbeat_at": now_timestamp(),
@@ -472,6 +478,9 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
                 Some(e.to_string()),
             ));
             let body = json!({
+                "type": "restart",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
                 "status": "failed",
                 "container_state": "unknown",
                 "errors": errors_value(&errors),
@@ -500,6 +509,9 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
     let status_label = if errors.is_empty() { "ok" } else { "failed" };
 
     let mut body = json!({
+        "type": "restart",
+        "deployment_hash": data.deployment_hash.clone(),
+        "app_code": data.app_code.clone(),
         "status": status_label,
         "container_state": container_state,
     });
