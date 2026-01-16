@@ -463,7 +463,6 @@ mod tests {
             payload.insert("result".to_string(), value);
         }
         payload.insert("error".to_string(), serde_json::Value::Null);
-        let payload = serde_json::Value::Object(payload);
 
         let body = serde_json::to_vec(&payload).unwrap();
         let signature = compute_signature_base64(agent_token, &body);
