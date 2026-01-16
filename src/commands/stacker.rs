@@ -237,7 +237,7 @@ fn base_result(
     command_type: &str,
 ) -> CommandResult {
     CommandResult {
-        command_id: agent_cmd.id.clone(),
+        command_id: agent_cmd.command_id.clone(),
         status: "success".into(),
         result: None,
         error: None,
@@ -560,6 +560,7 @@ mod tests {
     fn parses_health_command() {
         let cmd = AgentCommand {
             id: "cmd-1".into(),
+            command_id: "cmd-1".into(),
             name: "health".into(),
             params: json!({
                 "deployment_hash": "dep",
@@ -577,6 +578,7 @@ mod tests {
     fn ignores_unknown_command() {
         let cmd = AgentCommand {
             id: "cmd-2".into(),
+            command_id: "cmd-2".into(),
             name: "shell".into(),
             params: json!({}),
             deployment_hash: None,

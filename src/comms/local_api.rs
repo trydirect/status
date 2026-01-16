@@ -1317,7 +1317,7 @@ async fn commands_execute(
             }
             Err(e) => {
                 error!(
-                    command_id = %cmd.id,
+                    command_id = %cmd.command_id,
                     err = %e,
                     "stacker command execution failed"
                 );
@@ -1349,7 +1349,7 @@ async fn commands_execute(
                         .into_response();
                 }
                 #[cfg(feature = "docker")]
-                match execute_docker_operation(&cmd.id, op).await {
+                match execute_docker_operation(&cmd.command_id, op).await {
                     Ok(result) => return Json(result).into_response(),
                     Err(e) => {
                         return (

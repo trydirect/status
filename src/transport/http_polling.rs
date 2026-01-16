@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
+// use clap::command;
+// use nix::libc::segment_command_64;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::Serialize;
@@ -13,6 +15,12 @@ use crate::transport::Command;
 
 const TS_OVERRIDE_ENV: &str = "HTTP_POLLING_TS_OVERRIDE";
 const REQUEST_ID_OVERRIDE_ENV: &str = "HTTP_POLLING_REQUEST_ID_OVERRIDE";
+
+#[derive(Debug, Clone)]
+pub struct PollResponse {
+    pub command: Option<Command>,
+    pub next_poll_secs: Option<u64>,
+}
 
 fn signing_meta() -> (i64, String) {
     let ts = std::env::var(TS_OVERRIDE_ENV)
@@ -103,14 +111,9 @@ pub async fn wait_for_command(
     agent_token: &str,
     timeout_secs: u64,
     priority: Option<&str>,
-) -> Result<Option<Command>> {
-    let url = format!(
-        "{}/api/v1/agent/commands/wait/{}?timeout={}&priority={}",
-        base_url,
-        deployment_hash,
-        timeout_secs,
-        priority.unwrap_or("normal")
-    );
+) -> Result<PollResponse> {
+
+    let url = build_wait_command_url(base_url, deployment_hash, timeout_secs, priority);
 
     debug!(
         url = %url,
@@ -120,20 +123,58 @@ pub async fn wait_for_command(
         "initiating long-poll request to dashboard"
     );
 
-    let client = Client::builder()
-        .build()
-        .context("building http client")?;
+    let client = create_http_client()?;
+    let response = send_long_poll_request(&client, &url, agent_id, agent_token, timeout_secs).await?;
+    
+    handle_poll_response(response, &url).await
+}
 
-    let resp = signed_get(
-        &client,
-        &url,
+// --- Private helper functions ---
+
+fn build_wait_command_url(
+    base_url: &str,
+    deployment_hash: &str,
+    timeout_secs: u64,
+    priority: Option<&str>,
+) -> String {
+    format!(
+        "{}/api/v1/agent/commands/wait/{}?timeout={}&priority={}",
+        base_url,
+        deployment_hash,
+        timeout_secs,
+        priority.unwrap_or("normal")
+    )
+}
+
+
+fn create_http_client() -> Result<Client> {
+    Client::builder()
+        .build()
+        .context("building http client")
+}
+
+async fn send_long_poll_request(
+    client: &Client,
+    url: &str,
+    agent_id: &str,
+    agent_token: &str,
+    timeout_secs: u64,
+) -> Result<reqwest::Response> {
+    signed_get(
+        client,
+        url,
         agent_id,
         agent_token,
         Duration::from_secs(timeout_secs + 5),
     )
-    .await?;
+    .await
+}
 
-    let status_code = resp.status().as_u16();
+async fn handle_poll_response(
+    response: reqwest::Response,
+    url: &str,
+) -> Result<PollResponse> {
+    let status_code = response.status().as_u16();
     debug!(
         status_code = %status_code,
         url = %url,
@@ -141,95 +182,154 @@ pub async fn wait_for_command(
     );
 
     match status_code {
-        200 => {
-            let body_text = resp.text().await.context("read response body")?;
-            debug!(
-                status_code = %status_code,
-                response_body = %body_text,
-                "poll response: HTTP 200 with body"
-            );
-
-            let val: Value = serde_json::from_str(&body_text).context("parse command json")?;
-
-            // Stacker API returns commands wrapped in an "item" field:
-            // {"message":"Command available","item":{"id":"...","type":"logs","parameters":{...}}}
-            // Or for empty queue: {"message":"No command available","item":null}
-            let item = val.get("item");
-            
-            // Check if item is null or missing
-            let command_obj = match item {
-                Some(Value::Object(obj)) if !obj.is_empty() => item.unwrap(),
-                _ => {
-                    debug!(
-                        response_body = %body_text,
-                        "poll response: 200 but 'item' is null/missing - no command available"
-                    );
-                    return Ok(None);
-                }
-            };
-
-            // Verify the command has an id
-            let maybe_id = command_obj.get("id").and_then(|v| v.as_str());
-            if maybe_id.is_none() {
-                debug!(
-                    response_body = %body_text,
-                    "poll response: 200 but item has no 'id' field - treating as no command"
-                );
-                return Ok(None);
-            }
-
-            // Map Stacker field names to Command struct:
-            // Stacker uses "type" -> Command uses "name"
-            // Stacker uses "parameters" -> Command uses "params"
-            let cmd_type = command_obj.get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let cmd_params = command_obj.get("parameters")
-                .cloned()
-                .unwrap_or(Value::Object(serde_json::Map::new()));
-            let deployment_hash = command_obj.get("deployment_hash")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            
-            // Extract app_code from parameters if present
-            let app_code = cmd_params.get("app_code")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
-            let cmd = Command {
-                id: maybe_id.unwrap().to_string(),
-                name: cmd_type.to_string(),
-                params: cmd_params,
-                deployment_hash,
-                app_code,
-            };
-
-            debug!(
-                command_id = %cmd.id,
-                command_name = %cmd.name,
-                "poll response: command received from queue"
-            );
-            Ok(Some(cmd))
-        }
-        204 => {
-            debug!(
-                status_code = %status_code,
-                "poll response: HTTP 204 No Content - queue empty, no commands pending"
-            );
-            Ok(None)
-        }
-        code => {
-            // Try to read error body for better debugging
-            let error_body = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
-            debug!(
-                status_code = %code,
-                error_body = %error_body,
-                url = %url,
-                "poll response: unexpected HTTP status"
-            );
-            Err(anyhow::anyhow!("unexpected status: {} | body: {}", code, error_body))
-        }
+        200 => parse_command_from_response(response).await,
+        204 => Ok(PollResponse {
+            command: None,
+            next_poll_secs: None,
+        }),
+        _ => handle_error_response(response, status_code, url).await.map(|_| PollResponse {
+            command: None,
+            next_poll_secs: None,
+        }),
     }
+}
+
+async fn parse_command_from_response(response: reqwest::Response) -> Result<PollResponse> {
+    let body_text = response.text().await.context("read response body")?;
+    debug!(
+        status_code = 200,
+        response_body = %body_text,
+        "poll response: HTTP 200 with body"
+    );
+
+    let json_value: Value = serde_json::from_str(&body_text)
+        .context("parse command json")?;
+
+    extract_command_from_json(json_value, &body_text)
+}
+
+fn extract_command_from_json(json_value: Value, body_text: &str) -> Result<PollResponse> {
+    let next_poll_secs = extract_next_poll_secs(&json_value);
+
+    // Stacker API returns commands wrapped in an "item" field
+    let item = json_value.get("item");
+    
+    // Handle empty/null item
+    let command_object = match item {
+        Some(Value::Object(obj)) if !obj.is_empty() => obj,
+        _ => {
+            debug!(
+                response_body = %body_text,
+                "poll response: 200 but 'item' is null/missing - no command available"
+            );
+            return Ok(PollResponse {
+                command: None,
+                next_poll_secs,
+            });
+        }
+    };
+
+    // Validate required fields
+    let command_id = validate_command_id(command_object, body_text)?;
+    
+    // Extract command fields
+    let command_type = extract_field_or_default(command_object, "type", "unknown");
+    let parameters = extract_parameters(command_object);
+    let deployment_hash = extract_optional_string(command_object, "deployment_hash");
+    let app_code = extract_app_code(&parameters);
+    
+    let command = Command {
+        id: command_id.clone(),
+        command_id,
+        name: command_type,
+        params: parameters,
+        deployment_hash,
+        app_code,
+    };
+
+    debug!(
+        command_id = %command.command_id,
+        command_name = %command.name,
+        "poll response: command received from queue"
+    );
+    
+    Ok(PollResponse {
+        command: Some(command),
+        next_poll_secs,
+    })
+}
+
+fn extract_next_poll_secs(json_value: &Value) -> Option<u64> {
+    json_value
+        .get("meta")
+        .and_then(|meta| meta.get("next_poll_secs"))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|s| s.parse::<u64>().ok()))
+        })
+}
+
+fn validate_command_id(command_object: &serde_json::Map<String, Value>, body_text: &str) -> Result<String> {
+    command_object
+        .get("command_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            debug!(
+                response_body = %body_text,
+                "poll response: 200 but item has no 'command_id' field - treating as no command"
+            );
+            anyhow!("missing command_id field")
+        })
+}
+
+fn extract_field_or_default(object: &serde_json::Map<String, Value>, field: &str, default: &str) -> String {
+    object
+        .get(field)
+        .and_then(|v| v.as_str())
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn extract_parameters(object: &serde_json::Map<String, Value>) -> Value {
+    object
+        .get("parameters")
+        .cloned()
+        .unwrap_or(Value::Object(serde_json::Map::new()))
+}
+
+fn extract_optional_string(object: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
+    object
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+fn extract_app_code(parameters: &Value) -> Option<String> {
+    parameters
+        .get("app_code")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+
+async fn handle_error_response(
+    response: reqwest::Response,
+    status_code: u16,
+    url: &str,
+) -> Result<Option<Command>> {
+    let error_body = response.text().await
+        .unwrap_or_else(|_| "<failed to read body>".to_string());
+    
+    debug!(
+        status_code = %status_code,
+        error_body = %error_body,
+        url = %url,
+        "poll response: unexpected HTTP status"
+    );
+    
+    Err(anyhow!("unexpected status: {} | body: {}", status_code, error_body))
 }
 
 /// Report command result back to dashboard.
@@ -244,24 +344,31 @@ pub async fn report_result(
     error: &Option<String>,
     completed_at: &str,
 ) -> Result<()> {
+
     let url = format!("{}/api/v1/agent/commands/report", base_url);
+
     let mut body = serde_json::Map::new();
     body.insert("command_id".to_string(), serde_json::Value::String(command_id.to_string()));
     body.insert("deployment_hash".to_string(), serde_json::Value::String(deployment_hash.to_string()));
     body.insert("status".to_string(), serde_json::Value::String(status.to_string()));
     body.insert("completed_at".to_string(), serde_json::Value::String(completed_at.to_string()));
+
     if let Some(res) = result {
         body.insert("result".to_string(), res.clone());
     }
+
     if let Some(err) = error {
         body.insert("error".to_string(), serde_json::Value::String(err.clone()));
     } else {
         body.insert("error".to_string(), serde_json::Value::Null);
     }
+
     debug!(url = %url, body = ?body, "reporting command result to stacker");
+
     let client = Client::new();
     let resp = signed_post_json(&client, &url, agent_id, agent_token, &body).await?;
     let status_code = resp.status();
+
     if status_code.is_success() {
         debug!(status_code = %status_code.as_u16(), "command result reported successfully");
         Ok(())
@@ -436,7 +543,7 @@ mod tests {
         .await
         .expect("wait should succeed");
 
-        assert!(result.is_none());
+        assert!(result.command.is_none());
         mock.assert();
     }
 }

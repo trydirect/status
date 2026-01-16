@@ -342,6 +342,7 @@ mod tests {
         let executor = CommandExecutor::new();
         let command = AgentCommand {
             id: "test-1".to_string(),
+            command_id: "test-1".to_string(),
             name: "echo hello".to_string(),
             params: serde_json::json!({}),
             deployment_hash: None,
@@ -360,6 +361,7 @@ mod tests {
         let executor = CommandExecutor::new();
         let command = AgentCommand {
             id: "test-2".to_string(),
+            command_id: "test-2".to_string(),
             name: "sleep 100".to_string(),
             params: serde_json::json!({}),
             deployment_hash: None,
@@ -388,6 +390,7 @@ mod tests {
         let executor = CommandExecutor::new();
         let command = AgentCommand {
             id: "test-3".to_string(),
+            command_id: "test-3".to_string(),
             name: "false".to_string(),
             params: serde_json::json!({}),
             deployment_hash: None,

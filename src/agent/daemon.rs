@@ -138,9 +138,10 @@ async fn polling_loop(
         )
         .await
         {
-            Ok(Some(cmd)) => {
+            Ok(response) => {
+                if let Some(cmd) = response.command {
                 info!(
-                    command_id = %cmd.id,
+                    command_id = %cmd.command_id,
                     command_name = %cmd.name,
                     "command received from dashboard queue"
                 );
@@ -163,10 +164,13 @@ async fn polling_loop(
                         error!("command execution error: {}", e);
                     }
                 }
-            }
-            Ok(None) => {
-                // Polling timeout with no command — loop immediately for next poll
-                trace_event("polling_timeout");
+                } else {
+                    // Polling timeout with no command — loop immediately for next poll
+                    trace_event("polling_timeout");
+                    if let Some(next_poll) = response.next_poll_secs {
+                        tokio::time::sleep(Duration::from_secs(next_poll)).await;
+                    }
+                }
             }
             Err(e) => {
                 // Network error — apply backoff before retrying
@@ -197,16 +201,16 @@ async fn execute_and_report(
     let cmd_result = match parse_stacker_command(&cmd) {
         Ok(Some(stacker_cmd)) => {
             info!(
-                command_id = %cmd.id,
+                command_id = %cmd.command_id,
                 command_type = %cmd.name,
                 "executing stacker command"
             );
             match execute_stacker_command(&cmd, &stacker_cmd).await {
                 Ok(result) => result,
                 Err(e) => {
-                    error!(command_id = %cmd.id, error = %e, "stacker command execution failed");
+                    error!(command_id = %cmd.command_id, error = %e, "stacker command execution failed");
                     CommandResult {
-                        command_id: cmd.id.clone(),
+                        command_id: cmd.command_id.clone(),
                         status: "failed".to_string(),
                         result: None,
                         error: Some(e.to_string()),
@@ -219,7 +223,7 @@ async fn execute_and_report(
         Ok(None) => {
             // Not a stacker command, fall back to shell execution
             info!(
-                command_id = %cmd.id,
+                command_id = %cmd.command_id,
                 command_name = %cmd.name,
                 "executing as shell command"
             );
@@ -228,7 +232,7 @@ async fn execute_and_report(
 
             match exec_result {
                 Ok(output) => CommandResult {
-                    command_id: cmd.id.clone(),
+                    command_id: cmd.command_id.clone(),
                     status: "success".to_string(),
                     result: Some(json!({
                         "stdout": output.stdout,
@@ -240,7 +244,7 @@ async fn execute_and_report(
                     ..CommandResult::default()
                 },
                 Err(e) => CommandResult {
-                    command_id: cmd.id.clone(),
+                    command_id: cmd.command_id.clone(),
                     status: "failed".to_string(),
                     result: None,
                     error: Some(e.to_string()),
@@ -251,9 +255,9 @@ async fn execute_and_report(
         }
         Err(e) => {
             // Failed to parse command parameters
-            error!(command_id = %cmd.id, error = %e, "failed to parse command");
+            error!(command_id = %cmd.command_id, error = %e, "failed to parse command");
             CommandResult {
-                command_id: cmd.id.clone(),
+                command_id: cmd.command_id.clone(),
                 status: "failed".to_string(),
                 result: None,
                 error: Some(format!("Invalid command parameters: {}", e)),
