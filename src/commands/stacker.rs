@@ -11,9 +11,9 @@ use serde_json::Value;
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
 
-use crate::transport::{Command as AgentCommand, CommandResult};
 #[cfg(feature = "docker")]
 use crate::transport::CommandError;
+use crate::transport::{Command as AgentCommand, CommandResult};
 
 #[cfg(feature = "docker")]
 use crate::agent::docker;
@@ -400,6 +400,9 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
             );
             let errors = vec![error.clone()];
             let body = json!({
+                "type": "logs",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
                 "cursor": data.cursor.clone(),
                 "truncated": false,
                 "lines": [],
@@ -547,6 +550,9 @@ fn container_matches(name: &str, app_code: &str) -> bool {
     normalized == app_code
         || normalized == format!("{}_1", app_code)
         || normalized.ends_with(&format!("-{}", app_code))
+        || normalized.ends_with(&format!("_{}", app_code))
+        || normalized.ends_with(&format!("_{}_1", app_code))
+        || normalized.ends_with(&format!("-{}-1", app_code))
 }
 
 #[cfg(feature = "docker")]

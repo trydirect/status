@@ -430,9 +430,16 @@ mod tests {
     use mockito::{Matcher, Server};
     use serde_json::json;
     use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[tokio::test]
     async fn report_result_posts_payload() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         env::set_var(TS_OVERRIDE_ENV, "1700000000");
         env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-123");
 
@@ -443,18 +450,31 @@ mod tests {
         let command_id = "cmd-1";
         let deployment_hash = "dep-hash-123";
         let status = "success";
-        let result = Some(json!({"output": "ok"}));
+        let result: Option<serde_json::Value> = None;
         let error = None;
         let completed_at = "2023-11-15T10:00:00Z";
 
-        let payload = json!({
-            "command_id": command_id,
-            "deployment_hash": deployment_hash,
-            "status": status,
-            "result": result,
-            "error": serde_json::Value::Null,
-            "completed_at": completed_at
-        });
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "command_id".to_string(),
+            serde_json::Value::String(command_id.to_string()),
+        );
+        payload.insert(
+            "deployment_hash".to_string(),
+            serde_json::Value::String(deployment_hash.to_string()),
+        );
+        payload.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+        payload.insert(
+            "completed_at".to_string(),
+            serde_json::Value::String(completed_at.to_string()),
+        );
+        if let Some(value) = result.clone() {
+            payload.insert("result".to_string(), value);
+        }
+        payload.insert("error".to_string(), serde_json::Value::Null);
 
         let body = serde_json::to_vec(&payload).unwrap();
         let signature = compute_signature_base64(agent_token, &body);
@@ -493,6 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_app_status_posts_payload() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         env::set_var(TS_OVERRIDE_ENV, "1700000001");
         env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-456");
 
@@ -533,6 +554,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_command_adds_hmac_headers() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         env::set_var(TS_OVERRIDE_ENV, "1700000002");
         env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-789");
 
