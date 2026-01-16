@@ -274,9 +274,9 @@ async fn execute_and_report(
         "reporting command result to stacker"
     );
     http_polling::report_result(
-        &dashboard_url,
-        &agent_id,
-        &agent_token,
+        dashboard_url,
+        agent_id,
+        agent_token,
         &cmd_result.command_id,
         deployment_hash,
         &cmd_result.status,

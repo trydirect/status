@@ -21,7 +21,7 @@ pub enum StackerCommand {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct HealthCommand {
+pub(crate) struct HealthCommand {
     #[serde(default)]
     deployment_hash: String,
     #[serde(default)]
@@ -31,7 +31,7 @@ struct HealthCommand {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct LogsCommand {
+pub(crate) struct LogsCommand {
     #[serde(default)]
     deployment_hash: String,
     #[serde(default)]
@@ -46,7 +46,7 @@ struct LogsCommand {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RestartCommand {
+pub(crate) struct RestartCommand {
     #[serde(default)]
     deployment_hash: String,
     #[serde(default)]

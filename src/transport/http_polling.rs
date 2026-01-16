@@ -338,6 +338,7 @@ async fn handle_error_response(
 }
 
 /// Report command result back to dashboard.
+#[allow(clippy::too_many_arguments)]
 pub async fn report_result(
     base_url: &str,
     agent_id: &str,
