@@ -1,3 +1,19 @@
+[![Docker CI/CD](https://github.com/trydirect/status/actions/workflows/ci.yml/badge.svg)](https://github.com/trydirect/status/actions/workflows/ci.yml)
+![Docker Stars](https://img.shields.io/docker/stars/trydirect/status.svg)
+![Docker Pulls](https://img.shields.io/docker/pulls/trydirect/status.svg)
+![Docker Automated](https://img.shields.io/docker/cloud/automated/trydirect/status.svg)
+![Docker Build](https://img.shields.io/docker/cloud/build/trydirect/status.svg)
+<a href="https://discord.gg/nsjje55wuu"><img alt="Discord" src="https://img.shields.io/discord/578119430391988232?label=discord"></a>
+[![Gitter chat](https://badges.gitter.im/trydirect/community.png)](https://gitter.im/try-direct/community)
+<br><br><br><br>
+<div align="center">
+<img width="300" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status.png"> 
+ </div>
+ <div align="center">
+</div>
+<br><br><br><br>
+
+<center><img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/screenshot.png"></center>
 # Status Panel (Beacon)
 
 Server stack health application with UI.
