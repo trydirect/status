@@ -10,13 +10,10 @@
 <img width="300" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status.png"> 
  </div>
  <div align="center">
-</div>
+Server stack health application with UI.</div>
 <br><br><br><br>
 
 <center><img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/screenshot.png"></center>
-# Status Panel (Beacon)
-
-Server stack health application with UI.
 
 
 ## Build
