@@ -438,7 +438,7 @@ mod tests {
         let command_id = "cmd-1";
         let deployment_hash = "dep-hash-123";
         let status = "success";
-        let result = Some(json!({"output": "ok"}));
+        let result: Option<serde_json::Value> = None;
         let error = None;
         let completed_at = "2023-11-15T10:00:00Z";
 

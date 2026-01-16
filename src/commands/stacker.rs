@@ -549,7 +549,10 @@ fn container_matches(name: &str, app_code: &str) -> bool {
     let normalized = name.trim_start_matches('/');
     normalized == app_code
         || normalized == format!("{}_1", app_code)
-        || normalized.ends_with(&format!("-{}", app_code))
+    || normalized.ends_with(&format!("-{}", app_code))
+    || normalized.ends_with(&format!("_{}", app_code))
+    || normalized.ends_with(&format!("_{}_1", app_code))
+    || normalized.ends_with(&format!("-{}-1", app_code))
 }
 
 #[cfg(feature = "docker")]

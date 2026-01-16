@@ -58,6 +58,38 @@ fn docker_client() -> Result<Docker> {
     Docker::connect_with_defaults().context("docker client connect")
 }
 
+fn name_matches(container_name: &str, app_code: &str) -> bool {
+    let normalized = container_name.trim_start_matches('/');
+    normalized == app_code
+        || normalized == format!("{}_1", app_code)
+        || normalized.ends_with(&format!("-{}", app_code))
+        || normalized.ends_with(&format!("_{}", app_code))
+        || normalized.ends_with(&format!("_{}_1", app_code))
+        || normalized.ends_with(&format!("-{}-1", app_code))
+}
+
+async fn resolve_container_name(name: &str) -> Result<String> {
+    let docker = docker_client()?;
+    let opts: Option<ListContainersOptions> =
+        Some(ListContainersOptionsBuilder::default().all(true).build());
+    let list = docker
+        .list_containers(opts)
+        .await
+        .context("list containers")?;
+
+    for container in list {
+        if let Some(names) = container.names {
+            for entry in names {
+                if name_matches(&entry, name) {
+                    return Ok(entry.trim_start_matches('/').to_string());
+                }
+            }
+        }
+    }
+
+    Ok(name.to_string())
+}
+
 pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
@@ -319,6 +351,7 @@ pub async fn get_container_logs_window(
     use futures_util::StreamExt;
 
     let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name).await.unwrap_or_else(|_| name.to_string());
     let mut builder = LogsOptionsBuilder::default();
     builder = builder
         .stdout(true)
@@ -338,7 +371,7 @@ pub async fn get_container_logs_window(
     }
 
     let opts = builder.build();
-    let mut logs = docker.logs(name, Some(opts));
+    let mut logs = docker.logs(&resolved_name, Some(opts));
     let mut frames: Vec<LogFrame> = Vec::new();
     let mut truncated = false;
     let mut last_cursor: Option<String> = None;
@@ -403,6 +436,7 @@ fn parse_cursor_to_epoch(cursor: &str) -> Option<i64> {
 
 pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
     let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name).await.unwrap_or_else(|_| name.to_string());
     use bollard::query_parameters::LogsOptionsBuilder;
     use futures_util::StreamExt;
     let opts = LogsOptionsBuilder::default()
@@ -411,7 +445,7 @@ pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
         .follow(false)
         .tail(tail)
         .build();
-    let mut logs = docker.logs(name, Some(opts));
+    let mut logs = docker.logs(&resolved_name, Some(opts));
     let mut log_text = String::new();
     while let Some(log_line) = logs.next().await {
         match log_line {
@@ -424,8 +458,9 @@ pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
 
 pub async fn restart(name: &str) -> Result<()> {
     let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name).await.unwrap_or_else(|_| name.to_string());
     docker
-        .restart_container(name, None::<RestartContainerOptions>)
+        .restart_container(&resolved_name, None::<RestartContainerOptions>)
         .await
         .context("restart container")?;
     debug!("restarted container: {}", name);
@@ -434,8 +469,9 @@ pub async fn restart(name: &str) -> Result<()> {
 
 pub async fn stop(name: &str) -> Result<()> {
     let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name).await.unwrap_or_else(|_| name.to_string());
     docker
-        .stop_container(name, None::<StopContainerOptions>)
+        .stop_container(&resolved_name, None::<StopContainerOptions>)
         .await
         .context("stop container")?;
     debug!("stopped container: {}", name);
@@ -444,8 +480,9 @@ pub async fn stop(name: &str) -> Result<()> {
 
 pub async fn pause(name: &str) -> Result<()> {
     let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name).await.unwrap_or_else(|_| name.to_string());
     docker
-        .pause_container(name)
+        .pause_container(&resolved_name)
         .await
         .context("pause container")?;
     debug!("paused container: {}", name);
@@ -459,10 +496,11 @@ pub async fn exec_in_container(name: &str, cmd: &str) -> Result<()> {
     use futures_util::StreamExt;
 
     let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name).await.unwrap_or_else(|_| name.to_string());
     // Create exec instance
     let exec = docker
         .create_exec(
-            name,
+            &resolved_name,
             CreateExecOptions {
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
