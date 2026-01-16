@@ -353,22 +353,10 @@ pub async fn report_result(
     let url = format!("{}/api/v1/agent/commands/report", base_url);
 
     let mut body = serde_json::Map::new();
-    body.insert(
-        "command_id".to_string(),
-        serde_json::Value::String(command_id.to_string()),
-    );
-    body.insert(
-        "deployment_hash".to_string(),
-        serde_json::Value::String(deployment_hash.to_string()),
-    );
-    body.insert(
-        "status".to_string(),
-        serde_json::Value::String(status.to_string()),
-    );
-    body.insert(
-        "completed_at".to_string(),
-        serde_json::Value::String(completed_at.to_string()),
-    );
+    body.insert("command_id".to_string(), serde_json::Value::String(command_id.to_string()));
+    body.insert("deployment_hash".to_string(), serde_json::Value::String(deployment_hash.to_string()));
+    body.insert("status".to_string(), serde_json::Value::String(status.to_string()));
+    body.insert("completed_at".to_string(), serde_json::Value::String(completed_at.to_string()));
 
     if let Some(res) = result {
         body.insert("result".to_string(), res.clone());
@@ -447,14 +435,28 @@ mod tests {
         let error = None;
         let completed_at = "2023-11-15T10:00:00Z";
 
-        let payload = json!({
-            "command_id": command_id,
-            "deployment_hash": deployment_hash,
-            "status": status,
-            "result": result,
-            "error": serde_json::Value::Null,
-            "completed_at": completed_at
-        });
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "command_id".to_string(),
+            serde_json::Value::String(command_id.to_string()),
+        );
+        payload.insert(
+            "deployment_hash".to_string(),
+            serde_json::Value::String(deployment_hash.to_string()),
+        );
+        payload.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+        payload.insert(
+            "completed_at".to_string(),
+            serde_json::Value::String(completed_at.to_string()),
+        );
+        if let Some(value) = result.clone() {
+            payload.insert("result".to_string(), value);
+        }
+        payload.insert("error".to_string(), serde_json::Value::Null);
+        let payload = serde_json::Value::Object(payload);
 
         let body = serde_json::to_vec(&payload).unwrap();
         let signature = compute_signature_base64(agent_token, &body);
