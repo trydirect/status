@@ -28,7 +28,8 @@ fn signing_meta() -> (i64, String) {
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or_else(|| Utc::now().timestamp());
 
-    let request_id = std::env::var(REQUEST_ID_OVERRIDE_ENV).unwrap_or_else(|_| Uuid::new_v4().to_string());
+    let request_id =
+        std::env::var(REQUEST_ID_OVERRIDE_ENV).unwrap_or_else(|_| Uuid::new_v4().to_string());
 
     (ts, request_id)
 }
@@ -65,14 +66,14 @@ async fn signed_get(
     timeout: Duration,
 ) -> Result<reqwest::Response> {
     let headers = build_signed_headers(agent_id, agent_token, b"")?;
-    
+
     trace!(
         url = %url,
         agent_id = %agent_id,
         timeout_secs = %timeout.as_secs(),
         "sending signed GET request"
     );
-    
+
     client
         .get(url)
         .timeout(timeout)
@@ -112,7 +113,6 @@ pub async fn wait_for_command(
     timeout_secs: u64,
     priority: Option<&str>,
 ) -> Result<PollResponse> {
-
     let url = build_wait_command_url(base_url, deployment_hash, timeout_secs, priority);
 
     debug!(
@@ -124,8 +124,9 @@ pub async fn wait_for_command(
     );
 
     let client = create_http_client()?;
-    let response = send_long_poll_request(&client, &url, agent_id, agent_token, timeout_secs).await?;
-    
+    let response =
+        send_long_poll_request(&client, &url, agent_id, agent_token, timeout_secs).await?;
+
     handle_poll_response(response, &url).await
 }
 
@@ -146,11 +147,8 @@ fn build_wait_command_url(
     )
 }
 
-
 fn create_http_client() -> Result<Client> {
-    Client::builder()
-        .build()
-        .context("building http client")
+    Client::builder().build().context("building http client")
 }
 
 async fn send_long_poll_request(
@@ -170,10 +168,7 @@ async fn send_long_poll_request(
     .await
 }
 
-async fn handle_poll_response(
-    response: reqwest::Response,
-    url: &str,
-) -> Result<PollResponse> {
+async fn handle_poll_response(response: reqwest::Response, url: &str) -> Result<PollResponse> {
     let status_code = response.status().as_u16();
     debug!(
         status_code = %status_code,
@@ -187,10 +182,12 @@ async fn handle_poll_response(
             command: None,
             next_poll_secs: None,
         }),
-        _ => handle_error_response(response, status_code, url).await.map(|_| PollResponse {
-            command: None,
-            next_poll_secs: None,
-        }),
+        _ => handle_error_response(response, status_code, url)
+            .await
+            .map(|_| PollResponse {
+                command: None,
+                next_poll_secs: None,
+            }),
     }
 }
 
@@ -202,8 +199,7 @@ async fn parse_command_from_response(response: reqwest::Response) -> Result<Poll
         "poll response: HTTP 200 with body"
     );
 
-    let json_value: Value = serde_json::from_str(&body_text)
-        .context("parse command json")?;
+    let json_value: Value = serde_json::from_str(&body_text).context("parse command json")?;
 
     extract_command_from_json(json_value, &body_text)
 }
@@ -213,7 +209,7 @@ fn extract_command_from_json(json_value: Value, body_text: &str) -> Result<PollR
 
     // Stacker API returns commands wrapped in an "item" field
     let item = json_value.get("item");
-    
+
     // Handle empty/null item
     let command_object = match item {
         Some(Value::Object(obj)) if !obj.is_empty() => obj,
@@ -231,13 +227,13 @@ fn extract_command_from_json(json_value: Value, body_text: &str) -> Result<PollR
 
     // Validate required fields
     let command_id = validate_command_id(command_object, body_text)?;
-    
+
     // Extract command fields
     let command_type = extract_field_or_default(command_object, "type", "unknown");
     let parameters = extract_parameters(command_object);
     let deployment_hash = extract_optional_string(command_object, "deployment_hash");
     let app_code = extract_app_code(&parameters);
-    
+
     let command = Command {
         id: command_id.clone(),
         command_id,
@@ -252,7 +248,7 @@ fn extract_command_from_json(json_value: Value, body_text: &str) -> Result<PollR
         command_name = %command.name,
         "poll response: command received from queue"
     );
-    
+
     Ok(PollResponse {
         command: Some(command),
         next_poll_secs,
@@ -270,7 +266,10 @@ fn extract_next_poll_secs(json_value: &Value) -> Option<u64> {
         })
 }
 
-fn validate_command_id(command_object: &serde_json::Map<String, Value>, body_text: &str) -> Result<String> {
+fn validate_command_id(
+    command_object: &serde_json::Map<String, Value>,
+    body_text: &str,
+) -> Result<String> {
     command_object
         .get("command_id")
         .and_then(|v| v.as_str())
@@ -284,7 +283,11 @@ fn validate_command_id(command_object: &serde_json::Map<String, Value>, body_tex
         })
 }
 
-fn extract_field_or_default(object: &serde_json::Map<String, Value>, field: &str, default: &str) -> String {
+fn extract_field_or_default(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    default: &str,
+) -> String {
     object
         .get(field)
         .and_then(|v| v.as_str())
@@ -300,10 +303,7 @@ fn extract_parameters(object: &serde_json::Map<String, Value>) -> Value {
 }
 
 fn extract_optional_string(object: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
-    object
-        .get(field)
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    object.get(field).and_then(|v| v.as_str()).map(String::from)
 }
 
 fn extract_app_code(parameters: &Value) -> Option<String> {
@@ -313,23 +313,28 @@ fn extract_app_code(parameters: &Value) -> Option<String> {
         .map(String::from)
 }
 
-
 async fn handle_error_response(
     response: reqwest::Response,
     status_code: u16,
     url: &str,
 ) -> Result<Option<Command>> {
-    let error_body = response.text().await
+    let error_body = response
+        .text()
+        .await
         .unwrap_or_else(|_| "<failed to read body>".to_string());
-    
+
     debug!(
         status_code = %status_code,
         error_body = %error_body,
         url = %url,
         "poll response: unexpected HTTP status"
     );
-    
-    Err(anyhow!("unexpected status: {} | body: {}", status_code, error_body))
+
+    Err(anyhow!(
+        "unexpected status: {} | body: {}",
+        status_code,
+        error_body
+    ))
 }
 
 /// Report command result back to dashboard.
@@ -344,14 +349,25 @@ pub async fn report_result(
     error: &Option<String>,
     completed_at: &str,
 ) -> Result<()> {
-
     let url = format!("{}/api/v1/agent/commands/report", base_url);
 
     let mut body = serde_json::Map::new();
-    body.insert("command_id".to_string(), serde_json::Value::String(command_id.to_string()));
-    body.insert("deployment_hash".to_string(), serde_json::Value::String(deployment_hash.to_string()));
-    body.insert("status".to_string(), serde_json::Value::String(status.to_string()));
-    body.insert("completed_at".to_string(), serde_json::Value::String(completed_at.to_string()));
+    body.insert(
+        "command_id".to_string(),
+        serde_json::Value::String(command_id.to_string()),
+    );
+    body.insert(
+        "deployment_hash".to_string(),
+        serde_json::Value::String(deployment_hash.to_string()),
+    );
+    body.insert(
+        "status".to_string(),
+        serde_json::Value::String(status.to_string()),
+    );
+    body.insert(
+        "completed_at".to_string(),
+        serde_json::Value::String(completed_at.to_string()),
+    );
 
     if let Some(res) = result {
         body.insert("result".to_string(), res.clone());
@@ -373,9 +389,16 @@ pub async fn report_result(
         debug!(status_code = %status_code.as_u16(), "command result reported successfully");
         Ok(())
     } else {
-        let error_body = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
+        let error_body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read body>".to_string());
         debug!(status_code = %status_code.as_u16(), error_body = %error_body, "command result report failed");
-        Err(anyhow!("report failed: {} | body: {}", status_code, error_body))
+        Err(anyhow!(
+            "report failed: {} | body: {}",
+            status_code,
+            error_body
+        ))
     }
 }
 
@@ -451,9 +474,19 @@ mod tests {
             .create_async()
             .await;
 
-        report_result(&base_url, agent_id, agent_token, command_id, deployment_hash, status, &result, &error, completed_at)
-            .await
-            .expect("report_result should succeed");
+        report_result(
+            &base_url,
+            agent_id,
+            agent_token,
+            command_id,
+            deployment_hash,
+            status,
+            &result,
+            &error,
+            completed_at,
+        )
+        .await
+        .expect("report_result should succeed");
         mock.assert();
     }
 

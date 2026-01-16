@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
     pub id: String,
-    pub command_id: String,  // Actual command ID (used for reporting)
+    pub command_id: String, // Actual command ID (used for reporting)
     pub name: String,
     pub params: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]

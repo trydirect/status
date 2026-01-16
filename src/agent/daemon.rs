@@ -140,30 +140,30 @@ async fn polling_loop(
         {
             Ok(response) => {
                 if let Some(cmd) = response.command {
-                info!(
-                    command_id = %cmd.command_id,
-                    command_name = %cmd.name,
-                    "command received from dashboard queue"
-                );
-                // Execute the command with configured timeout
-                match execute_and_report(
-                    &executor,
-                    &dashboard_url,
-                    &deployment_hash,
-                    &agent_id,
-                    &agent_token,
-                    cmd,
-                    command_timeout,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        info!("command execution and reporting completed");
+                    info!(
+                        command_id = %cmd.command_id,
+                        command_name = %cmd.name,
+                        "command received from dashboard queue"
+                    );
+                    // Execute the command with configured timeout
+                    match execute_and_report(
+                        &executor,
+                        &dashboard_url,
+                        &deployment_hash,
+                        &agent_id,
+                        &agent_token,
+                        cmd,
+                        command_timeout,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            info!("command execution and reporting completed");
+                        }
+                        Err(e) => {
+                            error!("command execution error: {}", e);
+                        }
                     }
-                    Err(e) => {
-                        error!("command execution error: {}", e);
-                    }
-                }
                 } else {
                     // Polling timeout with no command — loop immediately for next poll
                     trace_event("polling_timeout");
@@ -283,7 +283,8 @@ async fn execute_and_report(
         &cmd_result.result,
         &cmd_result.error,
         &cmd_result.completed_at,
-    ).await?;
+    )
+    .await?;
     info!(
         command_id = %cmd_result.command_id,
         "stacker acknowledged command result"

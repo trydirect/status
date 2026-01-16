@@ -12,9 +12,17 @@ const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 /// Print startup banner with version and system info
 fn print_banner() {
     let rust_version = rustc_version_runtime::version();
-    let build_profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-    let docker_feature = if cfg!(feature = "docker") { "enabled" } else { "disabled" };
-    
+    let build_profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let docker_feature = if cfg!(feature = "docker") {
+        "enabled"
+    } else {
+        "disabled"
+    };
+
     eprintln!();
     eprintln!("╔══════════════════════════════════════════════════════════╗");
     eprintln!("║          Status Panel (TryDirect Agent)                  ║");
@@ -92,7 +100,7 @@ async fn main() -> Result<()> {
     // Load environment variables from .env if present
     let _ = dotenv();
     utils::logging::init();
-    
+
     // Show startup banner
     print_banner();
 
