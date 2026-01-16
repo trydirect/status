@@ -418,9 +418,16 @@ mod tests {
     use mockito::{Matcher, Server};
     use serde_json::json;
     use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[tokio::test]
     async fn report_result_posts_payload() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         env::set_var(TS_OVERRIDE_ENV, "1700000000");
         env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-123");
 
@@ -495,6 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_app_status_posts_payload() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         env::set_var(TS_OVERRIDE_ENV, "1700000001");
         env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-456");
 
@@ -535,6 +543,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_command_adds_hmac_headers() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         env::set_var(TS_OVERRIDE_ENV, "1700000002");
         env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-789");
 
