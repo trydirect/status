@@ -9,6 +9,7 @@ use bollard::query_parameters::{
 };
 use bollard::Docker;
 use serde::Serialize;
+use std::collections::HashMap;
 use tracing::{debug, error};
 
 #[derive(Serialize, Clone, Debug)]
@@ -23,6 +24,8 @@ pub struct ContainerInfo {
 pub struct ContainerHealth {
     pub name: String,
     pub status: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub image: String,
     pub cpu_pct: f32,
     pub mem_usage_bytes: u64,
     pub mem_limit_bytes: u64,
@@ -30,6 +33,8 @@ pub struct ContainerHealth {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub restart_count: Option<i64>,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -251,6 +256,8 @@ async fn fetch_stats_for(docker: &Docker, name: &str) -> Result<ContainerHealth>
     let mut health = ContainerHealth {
         name: name.to_string(),
         status: "unknown".to_string(),
+        image: String::new(),
+        labels: HashMap::new(),
         ..Default::default()
     };
 
@@ -308,6 +315,8 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
         let mut item = ContainerHealth {
             name: name.clone(),
             status,
+            image: c.image.unwrap_or_default(),
+            labels: c.labels.unwrap_or_default(),
             ..Default::default()
         };
 

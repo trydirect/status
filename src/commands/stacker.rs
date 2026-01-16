@@ -9,6 +9,8 @@ use serde_json::json;
 #[cfg(feature = "docker")]
 use serde_json::Value;
 #[cfg(feature = "docker")]
+use std::collections::HashMap;
+#[cfg(feature = "docker")]
 use std::sync::OnceLock;
 
 #[cfg(feature = "docker")]
@@ -343,7 +345,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code));
+        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
 
     let mut errors: Vec<CommandError> = Vec::new();
     let container_state = if let Some(entry) = container {
@@ -499,7 +501,7 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
     };
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code));
+        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
     let container_state = container
         .map(|c| map_container_state(&c.status).to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -545,14 +547,42 @@ fn build_metrics(container: &docker::ContainerHealth) -> Value {
 }
 
 #[cfg(feature = "docker")]
-fn container_matches(name: &str, app_code: &str) -> bool {
+fn container_matches(
+    name: &str,
+    app_code: &str,
+    labels: &HashMap<String, String>,
+    image: &str,
+) -> bool {
+    if let Some(service) = labels.get("com.docker.compose.service") {
+        if service == app_code {
+            return true;
+        }
+    }
+
+    let normalized_app = normalize_app_code(app_code);
+    let normalized_image = image.to_lowercase();
+    if !normalized_image.is_empty() && normalized_image.contains(&normalized_app) {
+        return true;
+    }
+
     let normalized = name.trim_start_matches('/');
+    let normalized_name = normalize_app_code(normalized);
     normalized == app_code
         || normalized == format!("{}_1", app_code)
         || normalized.ends_with(&format!("-{}", app_code))
         || normalized.ends_with(&format!("_{}", app_code))
         || normalized.ends_with(&format!("_{}_1", app_code))
         || normalized.ends_with(&format!("-{}-1", app_code))
+        || normalized_name == normalized_app
+}
+
+#[cfg(feature = "docker")]
+fn normalize_app_code(value: &str) -> String {
+    value
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect()
 }
 
 #[cfg(feature = "docker")]
