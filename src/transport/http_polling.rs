@@ -353,10 +353,22 @@ pub async fn report_result(
     let url = format!("{}/api/v1/agent/commands/report", base_url);
 
     let mut body = serde_json::Map::new();
-    body.insert("command_id".to_string(), serde_json::Value::String(command_id.to_string()));
-    body.insert("deployment_hash".to_string(), serde_json::Value::String(deployment_hash.to_string()));
-    body.insert("status".to_string(), serde_json::Value::String(status.to_string()));
-    body.insert("completed_at".to_string(), serde_json::Value::String(completed_at.to_string()));
+    body.insert(
+        "command_id".to_string(),
+        serde_json::Value::String(command_id.to_string()),
+    );
+    body.insert(
+        "deployment_hash".to_string(),
+        serde_json::Value::String(deployment_hash.to_string()),
+    );
+    body.insert(
+        "status".to_string(),
+        serde_json::Value::String(status.to_string()),
+    );
+    body.insert(
+        "completed_at".to_string(),
+        serde_json::Value::String(completed_at.to_string()),
+    );
 
     if let Some(res) = result {
         body.insert("result".to_string(), res.clone());
