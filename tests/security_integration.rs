@@ -29,6 +29,8 @@ fn test_config() -> Arc<Config> {
             email: "test@example.com".to_string(),
         },
         ssl: Some("letsencrypt".to_string()),
+        compose_agent_enabled: false,
+        control_plane: None,
     })
 }
 
@@ -100,6 +102,7 @@ async fn execute_requires_signature_and_scope() {
                 .body(Body::from(
                     json!({
                         "id": "cmd-1",
+                        "command_id": "cmd-exec-1",
                         "name": "echo hello",
                         "params": {"timeout_secs": 2}
                     })
@@ -117,7 +120,7 @@ async fn execute_requires_signature_and_scope() {
         "/api/v1/commands/execute",
         "agent-1",
         "secret-token",
-        json!({"id": "cmd-2", "name": "echo hi", "params": {"timeout_secs": 2}}),
+        json!({"id": "cmd-2", "command_id": "cmd-exec-2", "name": "echo hi", "params": {"timeout_secs": 2}}),
         None,
     )
     .await;
@@ -130,7 +133,7 @@ async fn replay_detection_returns_409() {
     let app = router_with_env("agent-1", "secret-token", "commands:execute");
     let rid = Uuid::new_v4().to_string();
     let path = "/api/v1/commands/execute";
-    let body = json!({"id": "cmd-3", "name": "echo hi", "params": {}});
+    let body = json!({"id": "cmd-3", "command_id": "cmd-exec-3", "name": "echo hi", "params": {}});
 
     let (s1, _) = post_with_sig(
         &app,
@@ -166,7 +169,7 @@ async fn rate_limit_returns_429() {
         path,
         "agent-1",
         "secret-token",
-        json!({"id":"r1","name":"echo a","params":{}}),
+        json!({"id":"r1","command_id":"cmd-rate-1","name":"echo a","params":{}}),
         None,
     )
     .await;
@@ -177,7 +180,7 @@ async fn rate_limit_returns_429() {
         path,
         "agent-1",
         "secret-token",
-        json!({"id":"r2","name":"echo b","params":{}}),
+        json!({"id":"r2","command_id":"cmd-rate-2","name":"echo b","params":{}}),
         None,
     )
     .await;
@@ -194,7 +197,7 @@ async fn scope_denied_returns_403() {
         "/api/v1/commands/execute",
         "agent-1",
         "secret-token",
-        json!({"id": "cmd-4", "name": "echo hi", "params": {}}),
+        json!({"id": "cmd-4", "command_id": "cmd-exec-4", "name": "echo hi", "params": {}}),
         None,
     )
     .await;

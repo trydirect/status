@@ -174,8 +174,11 @@ mod tests {
     fn cmd(id: &str, name: &str) -> AgentCommand {
         AgentCommand {
             id: id.to_string(),
+            command_id: id.to_string(),
             name: name.to_string(),
             params: serde_json::json!({}),
+            deployment_hash: None,
+            app_code: None,
         }
     }
 

@@ -18,8 +18,11 @@ async fn main() -> anyhow::Result<()> {
     // Create a command to execute
     let command = Command {
         id: "example-1".to_string(),
+        command_id: "example-1".to_string(),
         name: "echo Hello from CommandExecutor!".to_string(),
         params: serde_json::json!({}),
+        deployment_hash: None,
+        app_code: None,
     };
 
     // Create executor with progress callback

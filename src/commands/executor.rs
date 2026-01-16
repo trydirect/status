@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{SecondsFormat, Utc};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -59,6 +60,8 @@ impl ExecutionResult {
             } else {
                 Some(self.stderr.clone())
             },
+            completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            ..CommandResult::default()
         }
     }
 }
@@ -339,8 +342,11 @@ mod tests {
         let executor = CommandExecutor::new();
         let command = AgentCommand {
             id: "test-1".to_string(),
+            command_id: "test-1".to_string(),
             name: "echo hello".to_string(),
             params: serde_json::json!({}),
+            deployment_hash: None,
+            app_code: None,
         };
 
         let strategy = TimeoutStrategy::quick_strategy(10);
@@ -355,8 +361,11 @@ mod tests {
         let executor = CommandExecutor::new();
         let command = AgentCommand {
             id: "test-2".to_string(),
+            command_id: "test-2".to_string(),
             name: "sleep 100".to_string(),
             params: serde_json::json!({}),
+            deployment_hash: None,
+            app_code: None,
         };
 
         let strategy = TimeoutStrategy {
@@ -381,8 +390,11 @@ mod tests {
         let executor = CommandExecutor::new();
         let command = AgentCommand {
             id: "test-3".to_string(),
+            command_id: "test-3".to_string(),
             name: "false".to_string(),
             params: serde_json::json!({}),
+            deployment_hash: None,
+            app_code: None,
         };
 
         let strategy = TimeoutStrategy::quick_strategy(10);

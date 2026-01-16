@@ -5,6 +5,38 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
+/// Application version from Cargo.toml
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const PKG_NAME: &str = env!("CARGO_PKG_NAME");
+
+/// Print startup banner with version and system info
+fn print_banner() {
+    let rust_version = rustc_version_runtime::version();
+    let build_profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let docker_feature = if cfg!(feature = "docker") {
+        "enabled"
+    } else {
+        "disabled"
+    };
+
+    eprintln!();
+    eprintln!("╔══════════════════════════════════════════════════════════╗");
+    eprintln!("║          Status Panel (TryDirect Agent)                  ║");
+    eprintln!("╠══════════════════════════════════════════════════════════╣");
+    eprintln!("║  Version:      {:<42}║", VERSION);
+    eprintln!("║  Package:      {:<42}║", PKG_NAME);
+    eprintln!("║  Rust:         {:<42}║", rust_version);
+    eprintln!("║  Build:        {:<42}║", build_profile);
+    eprintln!("║  Docker:       {:<42}║", docker_feature);
+    eprintln!("║  PID:          {:<42}║", std::process::id());
+    eprintln!("╚══════════════════════════════════════════════════════════╝");
+    eprintln!();
+}
+
 #[derive(Parser)]
 #[command(name = "status", version, about = "Status Panel (TryDirect Agent)")]
 struct AppCli {
@@ -15,6 +47,10 @@ struct AppCli {
     /// Config file path
     #[arg(short, long, default_value = "config.json", global = true)]
     config: String,
+
+    /// Enable compose-agent mode (handles Docker Compose operations)
+    #[arg(long)]
+    compose_mode: bool,
 
     /// Subcommands
     #[command(subcommand)]
@@ -65,6 +101,9 @@ async fn main() -> Result<()> {
     let _ = dotenv();
     utils::logging::init();
 
+    // Show startup banner
+    print_banner();
+
     let args = AppCli::parse();
     if args.daemon {
         run_daemon()?;
@@ -93,6 +132,14 @@ async fn main() -> Result<()> {
         Some(Commands::Pause { name }) => agent::docker::pause(&name).await?,
         None => {
             // Default: run the agent daemon
+            if args.compose_mode {
+                info!("Starting compose-agent daemon mode");
+                // Set CONTROL_PLANE environment variable for identification
+                std::env::set_var("CONTROL_PLANE", "compose_agent");
+            } else {
+                info!("Starting status-panel daemon mode");
+                std::env::set_var("CONTROL_PLANE", "status_panel");
+            }
             agent::daemon::run(args.config).await?;
         }
     }

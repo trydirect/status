@@ -40,7 +40,10 @@ use crate::commands::{
 use crate::commands::{
     check_remote_version, get_update_status, start_update_job, UpdateJobs, UpdatePhase,
 };
-use crate::commands::{CommandValidator, DockerOperation, TimeoutStrategy};
+use crate::commands::{
+    execute_stacker_command, parse_stacker_command, CommandValidator, DockerOperation,
+    TimeoutStrategy,
+};
 use crate::monitoring::{
     spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx,
 };
@@ -208,6 +211,14 @@ pub struct BackupPingResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CapabilitiesResponse {
+    compose_agent: bool,
+    control_plane: String,
+    version: String,
+    features: Vec<String>,
 }
 
 // Health check with token rotation metrics
@@ -811,9 +822,43 @@ async fn metrics_ws_stream(state: SharedState, mut socket: WebSocket) {
     }
 }
 
+async fn capabilities_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let compose_agent_env = std::env::var("COMPOSE_AGENT_ENABLED")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok());
+    let compose_agent = compose_agent_env.unwrap_or(state.config.compose_agent_enabled);
+
+    let control_plane = std::env::var("CONTROL_PLANE")
+        .ok()
+        .or_else(|| state.config.control_plane.clone())
+        .unwrap_or_else(|| "status_panel".to_string());
+
+    // Basic capability set; extend if docker feature is enabled
+    let mut features = vec!["monitoring".to_string()];
+    if cfg!(feature = "docker") {
+        features.push("docker".to_string());
+        features.push("compose".to_string());
+        features.push("logs".to_string());
+        features.push("restart".to_string());
+    }
+    if compose_agent {
+        features.push("compose_agent".to_string());
+    }
+
+    let resp = CapabilitiesResponse {
+        compose_agent,
+        control_plane,
+        version: VERSION.to_string(),
+        features,
+    };
+
+    Json(resp)
+}
+
 pub fn create_router(state: SharedState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
+        .route("/capabilities", get(capabilities_handler))
         .route("/metrics", get(metrics_handler))
         .route("/metrics/stream", get(metrics_ws_handler))
         // Self-update endpoints
@@ -1255,6 +1300,35 @@ async fn commands_execute(
                 .into_response()
         }
     };
+    let parsed_stacker_cmd = match parse_stacker_command(&cmd) {
+        Ok(value) => value,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid stacker command payload: {}", e)})),
+            )
+                .into_response()
+        }
+    };
+    if let Some(stacker_cmd) = parsed_stacker_cmd {
+        match execute_stacker_command(&cmd, &stacker_cmd).await {
+            Ok(result) => {
+                return Json(result).into_response();
+            }
+            Err(e) => {
+                error!(
+                    command_id = %cmd.command_id,
+                    err = %e,
+                    "stacker command execution failed"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    }
     // Check if this is a Docker operation
     if cmd.name.starts_with("docker:") {
         match DockerOperation::parse(&cmd.name) {
@@ -1275,7 +1349,7 @@ async fn commands_execute(
                         .into_response();
                 }
                 #[cfg(feature = "docker")]
-                match execute_docker_operation(&cmd.id, op).await {
+                match execute_docker_operation(&cmd.command_id, op).await {
                     Ok(result) => return Json(result).into_response(),
                     Err(e) => {
                         return (
@@ -1350,6 +1424,13 @@ async fn commands_enqueue(
                 .into_response()
         }
     };
+    if let Err(e) = parse_stacker_command(&cmd) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid stacker command payload: {}", e)})),
+        )
+            .into_response();
+    }
     {
         let mut q = state.commands_queue.lock().await;
         q.push_back(cmd);

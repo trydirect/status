@@ -18,6 +18,8 @@ fn test_config() -> Arc<Config> {
             email: "test@example.com".to_string(),
         },
         ssl: Some("letsencrypt".to_string()),
+        compose_agent_enabled: false,
+        control_plane: None,
     })
 }
 
@@ -42,6 +44,33 @@ async fn test_health_endpoint() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_capabilities_endpoint() {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    assert_eq!(value["compose_agent"], Value::Bool(false));
+    assert_eq!(
+        value["control_plane"],
+        Value::String("status_panel".to_string())
+    );
+    assert!(value.get("features").is_some());
 }
 
 #[tokio::test]
@@ -215,7 +244,7 @@ async fn test_stack_health_endpoint() {
 #[tokio::test]
 async fn test_index_template_renders() {
     use status_panel::agent::docker::{ContainerInfo, PortInfo};
-    let mut tera = tera::Tera::new("templates/**/*.html").unwrap();
+    let tera = tera::Tera::new("templates/**/*.html").unwrap();
 
     let containers = vec![ContainerInfo {
         name: "demo".to_string(),

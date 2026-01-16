@@ -1,0 +1,9 @@
+version: '2.2'
+
+services:
+  compose-agent-build:
+    build:
+      context: .
+      dockerfile: Dockerfile.compose-agent
+    image: trydirect/status:compose-agent-unstable
+    container_name: compose-agent-build

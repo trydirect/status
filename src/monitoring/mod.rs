@@ -20,6 +20,52 @@ pub struct MetricsSnapshot {
     pub disk_used_pct: f32,
 }
 
+/// Control plane that executed a command
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlane {
+    StatusPanel,
+    ComposeAgent,
+}
+
+impl std::fmt::Display for ControlPlane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlPlane::StatusPanel => write!(f, "status_panel"),
+            ControlPlane::ComposeAgent => write!(f, "compose_agent"),
+        }
+    }
+}
+
+/// Metrics for command execution tracking by control plane
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct CommandExecutionMetrics {
+    pub status_panel_count: u64,
+    pub compose_agent_count: u64,
+    pub total_count: u64,
+    pub last_control_plane: Option<String>,
+    pub last_command_timestamp_ms: u128,
+}
+
+/// Store for command execution metrics
+pub type CommandMetricsStore = Arc<RwLock<CommandExecutionMetrics>>;
+
+impl CommandExecutionMetrics {
+    /// Record a command execution from a specific control plane
+    pub fn record_execution(&mut self, control_plane: ControlPlane) {
+        match control_plane {
+            ControlPlane::StatusPanel => self.status_panel_count += 1,
+            ControlPlane::ComposeAgent => self.compose_agent_count += 1,
+        }
+        self.total_count += 1;
+        self.last_control_plane = Some(control_plane.to_string());
+        self.last_command_timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
+    }
+}
+
 pub type MetricsStore = Arc<RwLock<MetricsSnapshot>>;
 pub type MetricsTx = broadcast::Sender<MetricsSnapshot>;
 

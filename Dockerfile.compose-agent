@@ -14,11 +14,8 @@ RUN rustup target add x86_64-unknown-linux-musl && \
 FROM gcr.io/distroless/cc
 WORKDIR /app
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/status /status
-COPY templates templates
-COPY static static
 COPY config.json config.json
 ENV RUST_LOG=info
-EXPOSE 5000
-USER 0
+# Compose agent runs in daemon mode with compose-specific config
 ENTRYPOINT ["/status"]
-CMD ["serve", "--port", "5000", "--with-ui"]
+CMD ["--config", "/app/config.json", "--compose-mode"]

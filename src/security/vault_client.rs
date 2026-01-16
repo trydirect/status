@@ -67,12 +67,18 @@ impl VaultClient {
 
     /// Fetch agent token from Vault KV store.
     ///
-    /// Constructs path: GET {base_url}/v1/{prefix}/{deployment_hash}/token
+    /// Constructs path: GET {base_url}/v1/{prefix}/{deployment_hash}/{token_key}
+    /// where token_key is "status_panel_token" or "compose_agent_token"
     /// Expects response: {"data":{"data":{"token":"..."}}}
-    pub async fn fetch_agent_token(&self, deployment_hash: &str) -> Result<String> {
+    pub async fn fetch_agent_token(
+        &self,
+        deployment_hash: &str,
+        token_key: Option<&str>,
+    ) -> Result<String> {
+        let key = token_key.unwrap_or("status_panel_token");
         let url = format!(
-            "{}/v1/{}/{}/token",
-            self.base_url, self.prefix, deployment_hash
+            "{}/v1/{}/{}/{}",
+            self.base_url, self.prefix, deployment_hash, key
         );
 
         debug!("Fetching token from Vault: {}", url);
@@ -107,11 +113,18 @@ impl VaultClient {
 
     /// Store agent token in Vault KV store (for registration or update).
     ///
-    /// Constructs path: POST {base_url}/v1/{prefix}/{deployment_hash}/token
-    pub async fn store_agent_token(&self, deployment_hash: &str, token: &str) -> Result<()> {
+    /// Constructs path: POST {base_url}/v1/{prefix}/{deployment_hash}/{token_key}
+    /// where token_key is "status_panel_token" or "compose_agent_token"
+    pub async fn store_agent_token(
+        &self,
+        deployment_hash: &str,
+        token: &str,
+        token_key: Option<&str>,
+    ) -> Result<()> {
+        let key = token_key.unwrap_or("status_panel_token");
         let url = format!(
-            "{}/v1/{}/{}/token",
-            self.base_url, self.prefix, deployment_hash
+            "{}/v1/{}/{}/{}",
+            self.base_url, self.prefix, deployment_hash, key
         );
 
         debug!("Storing token in Vault: {}", url);
@@ -141,15 +154,26 @@ impl VaultClient {
             ));
         }
 
-        info!("Token successfully stored in Vault for {}", deployment_hash);
+        info!(
+            "Token successfully stored in Vault for {} ({})",
+            deployment_hash, key
+        );
         Ok(())
     }
 
     /// Delete agent token from Vault KV store (for revocation).
-    pub async fn delete_agent_token(&self, deployment_hash: &str) -> Result<()> {
+    ///
+    /// Constructs path: DELETE {base_url}/v1/{prefix}/{deployment_hash}/{token_key}
+    /// where token_key is "status_panel_token" or "compose_agent_token"
+    pub async fn delete_agent_token(
+        &self,
+        deployment_hash: &str,
+        token_key: Option<&str>,
+    ) -> Result<()> {
+        let key = token_key.unwrap_or("status_panel_token");
         let url = format!(
-            "{}/v1/{}/{}/token",
-            self.base_url, self.prefix, deployment_hash
+            "{}/v1/{}/{}/{}",
+            self.base_url, self.prefix, deployment_hash, key
         );
 
         debug!("Deleting token from Vault: {}", url);
@@ -171,7 +195,7 @@ impl VaultClient {
             );
         }
 
-        info!("Token deleted from Vault for {}", deployment_hash);
+        info!("Token deleted from Vault for {} ({})", deployment_hash, key);
         Ok(())
     }
 }
