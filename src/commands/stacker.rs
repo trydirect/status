@@ -28,6 +28,11 @@ pub enum StackerCommand {
     Health(HealthCommand),
     Logs(LogsCommand),
     Restart(RestartCommand),
+    Stop(StopCommand),
+    Start(StartCommand),
+    ErrorSummary(ErrorSummaryCommand),
+    FetchConfig(FetchConfigCommand),
+    ApplyConfig(ApplyConfigCommand),
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -68,6 +73,71 @@ pub struct RestartCommand {
     force: bool,
 }
 
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct StopCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+    #[serde(default = "default_stop_timeout")]
+    timeout: u32,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct StartCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErrorSummaryCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+    #[serde(default = "default_hours")]
+    hours: u32,
+    #[serde(default = "default_true")]
+    redact: bool,
+}
+
+/// Command to fetch app configuration from Vault
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct FetchConfigCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+    /// If true, also write the config to the destination path
+    #[serde(default)]
+    apply: bool,
+}
+
+/// Command to apply configuration from Vault to the filesystem and restart container
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplyConfigCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+    /// Optional: override the config content (instead of fetching from Vault)
+    #[serde(default)]
+    config_content: Option<String>,
+    /// Optional: override the destination path
+    #[serde(default)]
+    destination_path: Option<String>,
+    /// Whether to restart the container after applying config
+    #[serde(default = "default_true")]
+    restart_after: bool,
+}
+
 pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand>> {
     let normalized = cmd.name.trim().to_lowercase();
     match normalized.as_str() {
@@ -91,6 +161,41 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Restart(payload)))
+        }
+        "stop" | "stacker.stop" => {
+            let payload: StopCommand =
+                serde_json::from_value(cmd.params.clone()).context("invalid stop payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::Stop(payload)))
+        }
+        "start" | "stacker.start" => {
+            let payload: StartCommand =
+                serde_json::from_value(cmd.params.clone()).context("invalid start payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::Start(payload)))
+        }
+        "error_summary" | "stacker.error_summary" => {
+            let payload: ErrorSummaryCommand =
+                serde_json::from_value(cmd.params.clone()).context("invalid error_summary payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::ErrorSummary(payload)))
+        }
+        "fetch_config" | "stacker.fetch_config" => {
+            let payload: FetchConfigCommand =
+                serde_json::from_value(cmd.params.clone()).context("invalid fetch_config payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::FetchConfig(payload)))
+        }
+        "apply_config" | "stacker.apply_config" => {
+            let payload: ApplyConfigCommand =
+                serde_json::from_value(cmd.params.clone()).context("invalid apply_config payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::ApplyConfig(payload)))
         }
         _ => Ok(None),
     }
@@ -117,6 +222,14 @@ fn default_true() -> bool {
 
 fn default_logs_limit() -> usize {
     LOGS_DEFAULT_LIMIT
+}
+
+fn default_stop_timeout() -> u32 {
+    30 // 30 seconds default graceful shutdown
+}
+
+fn default_hours() -> u32 {
+    24 // Default to last 24 hours for error summary
 }
 
 impl HealthCommand {
@@ -241,6 +354,171 @@ impl RestartCommand {
     }
 }
 
+impl StopCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        self.timeout = self.timeout.clamp(1, 300); // Max 5 minutes
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.app_code.is_empty() {
+            bail!("app_code is required");
+        }
+        Ok(())
+    }
+}
+
+impl StartCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.app_code.is_empty() {
+            bail!("app_code is required");
+        }
+        Ok(())
+    }
+}
+
+impl ErrorSummaryCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        self.hours = self.hours.clamp(1, 168); // Max 7 days
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        // app_code is optional for error_summary - if empty, analyze all containers
+        Ok(())
+    }
+}
+
+impl FetchConfigCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.app_code.is_empty() {
+            bail!("app_code is required");
+        }
+        Ok(())
+    }
+}
+
+impl ApplyConfigCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        if let Some(path) = &self.destination_path {
+            self.destination_path = Some(trimmed(path));
+        }
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.app_code.is_empty() {
+            bail!("app_code is required");
+        }
+        // Either config_content must be provided OR we fetch from Vault
+        // destination_path is optional if we're fetching from Vault (it has the path)
+        Ok(())
+    }
+}
+
 fn trimmed(value: &str) -> String {
     value.trim().to_string()
 }
@@ -312,6 +590,11 @@ async fn execute_with_docker(
         StackerCommand::Health(data) => handle_health(agent_cmd, data).await,
         StackerCommand::Logs(data) => handle_logs(agent_cmd, data).await,
         StackerCommand::Restart(data) => handle_restart(agent_cmd, data).await,
+        StackerCommand::Stop(data) => handle_stop(agent_cmd, data).await,
+        StackerCommand::Start(data) => handle_start(agent_cmd, data).await,
+        StackerCommand::ErrorSummary(data) => handle_error_summary(agent_cmd, data).await,
+        StackerCommand::FetchConfig(data) => handle_fetch_config(agent_cmd, data).await,
+        StackerCommand::ApplyConfig(data) => handle_apply_config(agent_cmd, data).await,
     }
 }
 
@@ -532,6 +815,658 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
 
     result.result = Some(body);
     Ok(result)
+}
+
+#[cfg(feature = "docker")]
+async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<CommandResult> {
+    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "stop");
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    if let Err(e) = docker::stop_with_timeout(&data.app_code, data.timeout).await {
+        errors.push(make_error(
+            "stop_failed",
+            format!("Stop failed for `{}`", data.app_code),
+            Some(e.to_string()),
+        ));
+    }
+
+    // Check final container state
+    let containers = match docker::list_container_health().await {
+        Ok(list) => list,
+        Err(e) => {
+            errors.push(make_error(
+                "health_unavailable",
+                "Failed to query container status after stop",
+                Some(e.to_string()),
+            ));
+            let body = json!({
+                "type": "stop",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
+                "status": "failed",
+                "container_state": "unknown",
+                "errors": errors_value(&errors),
+            });
+            result.status = "failed".into();
+            result.result = Some(body);
+            result.errors = Some(errors);
+            return Ok(result);
+        }
+    };
+
+    let container = containers
+        .iter()
+        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+    let container_state = container
+        .map(|c| map_container_state(&c.status).to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let status_label = if errors.is_empty() { "ok" } else { "failed" };
+
+    let mut body = json!({
+        "type": "stop",
+        "deployment_hash": data.deployment_hash.clone(),
+        "app_code": data.app_code.clone(),
+        "status": status_label,
+        "container_state": container_state,
+    });
+
+    if !errors.is_empty() {
+        body["errors"] = errors_value(&errors);
+        result.status = "failed".into();
+        result.errors = Some(errors.clone());
+    }
+
+    result.result = Some(body);
+    Ok(result)
+}
+
+#[cfg(feature = "docker")]
+async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<CommandResult> {
+    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "start");
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    if let Err(e) = docker::start(&data.app_code).await {
+        errors.push(make_error(
+            "start_failed",
+            format!("Start failed for `{}`", data.app_code),
+            Some(e.to_string()),
+        ));
+    }
+
+    // Check final container state
+    let containers = match docker::list_container_health().await {
+        Ok(list) => list,
+        Err(e) => {
+            errors.push(make_error(
+                "health_unavailable",
+                "Failed to query container status after start",
+                Some(e.to_string()),
+            ));
+            let body = json!({
+                "type": "start",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
+                "status": "failed",
+                "container_state": "unknown",
+                "errors": errors_value(&errors),
+            });
+            result.status = "failed".into();
+            result.result = Some(body);
+            result.errors = Some(errors);
+            return Ok(result);
+        }
+    };
+
+    let container = containers
+        .iter()
+        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+    let container_state = container
+        .map(|c| map_container_state(&c.status).to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if container.is_none() && errors.is_empty() {
+        errors.push(make_error(
+            "container_not_found",
+            format!("Container `{}` not found", data.app_code),
+            None,
+        ));
+    }
+
+    let status_label = if errors.is_empty() { "ok" } else { "failed" };
+
+    let mut body = json!({
+        "type": "start",
+        "deployment_hash": data.deployment_hash.clone(),
+        "app_code": data.app_code.clone(),
+        "status": status_label,
+        "container_state": container_state,
+    });
+
+    if !errors.is_empty() {
+        body["errors"] = errors_value(&errors);
+        result.status = "failed".into();
+        result.errors = Some(errors.clone());
+    }
+
+    result.result = Some(body);
+    Ok(result)
+}
+
+#[cfg(feature = "docker")]
+async fn handle_error_summary(agent_cmd: &AgentCommand, data: &ErrorSummaryCommand) -> Result<CommandResult> {
+    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "error_summary");
+    
+    // Get list of containers to analyze
+    let containers = match docker::list_container_health().await {
+        Ok(list) => list,
+        Err(e) => {
+            let error = make_error(
+                "health_unavailable",
+                "Failed to list containers for error analysis",
+                Some(e.to_string()),
+            );
+            let errors = vec![error.clone()];
+            let body = json!({
+                "type": "error_summary",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
+                "status": "failed",
+                "errors": errors_value(&errors),
+            });
+            result.status = "failed".into();
+            result.result = Some(body);
+            result.errors = Some(errors);
+            return Ok(result);
+        }
+    };
+
+    // Filter containers if app_code specified
+    let target_containers: Vec<_> = if data.app_code.is_empty() {
+        containers.iter().collect()
+    } else {
+        containers
+            .iter()
+            .filter(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image))
+            .collect()
+    };
+
+    // Error patterns to search for
+    static ERROR_PATTERNS: &[&str] = &[
+        "error", "Error", "ERROR",
+        "exception", "Exception", "EXCEPTION",
+        "failed", "Failed", "FAILED",
+        "fatal", "Fatal", "FATAL",
+        "panic", "PANIC",
+        "crash", "crashed",
+        "denied", "refused",
+        "timeout", "timed out",
+        "connection refused",
+        "no such file",
+        "permission denied",
+        "out of memory", "OOM",
+    ];
+
+    let mut summary = json!({
+        "type": "error_summary",
+        "deployment_hash": data.deployment_hash.clone(),
+        "app_code": data.app_code.clone(),
+        "hours_analyzed": data.hours,
+        "containers_analyzed": target_containers.len(),
+        "apps": [],
+        "total_errors": 0,
+        "total_warnings": 0,
+    });
+
+    let mut apps_summary: Vec<Value> = Vec::new();
+    let mut total_errors = 0u64;
+    let mut total_warnings = 0u64;
+
+    for container in target_containers {
+        // Get logs for this container
+        let logs_result = docker::get_container_logs_window(
+            &container.name,
+            None,
+            Some(LOGS_MAX_LIMIT),
+        ).await;
+
+        let mut error_count = 0u64;
+        let mut warning_count = 0u64;
+        let mut sample_errors: Vec<Value> = Vec::new();
+        let mut error_categories: HashMap<String, u64> = HashMap::new();
+
+        if let Ok(window) = logs_result {
+            for frame in &window.frames {
+                let msg_lower = frame.message.to_lowercase();
+                
+                // Check for errors
+                let is_error = ERROR_PATTERNS.iter().any(|p| frame.message.contains(p));
+                let is_warning = msg_lower.contains("warn") || msg_lower.contains("warning");
+
+                if is_error {
+                    error_count += 1;
+                    
+                    // Categorize error
+                    let category = categorize_error(&frame.message);
+                    *error_categories.entry(category).or_insert(0) += 1;
+
+                    // Collect samples (max 5)
+                    if sample_errors.len() < 5 {
+                        let (redacted_msg, _) = redact_message(&frame.message, data.redact);
+                        sample_errors.push(json!({
+                            "timestamp": frame.timestamp.clone(),
+                            "stream": frame.stream.clone(),
+                            "message": redacted_msg,
+                        }));
+                    }
+                } else if is_warning {
+                    warning_count += 1;
+                }
+            }
+        }
+
+        total_errors += error_count;
+        total_warnings += warning_count;
+
+        let app_code = extract_app_code(&container.name, &container.labels);
+        apps_summary.push(json!({
+            "app_code": app_code,
+            "container_name": container.name,
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "error_categories": error_categories,
+            "sample_errors": sample_errors,
+            "status": container.status,
+        }));
+    }
+
+    summary["apps"] = json!(apps_summary);
+    summary["total_errors"] = json!(total_errors);
+    summary["total_warnings"] = json!(total_warnings);
+    
+    // Generate recommendations based on findings
+    let recommendations = generate_recommendations(total_errors, &apps_summary);
+    summary["recommendations"] = json!(recommendations);
+    
+    summary["status"] = json!(if total_errors > 0 { "issues_found" } else { "ok" });
+
+    result.result = Some(summary);
+    Ok(result)
+}
+
+#[cfg(feature = "docker")]
+fn categorize_error(message: &str) -> String {
+    let msg_lower = message.to_lowercase();
+    
+    if msg_lower.contains("connection refused") || msg_lower.contains("connection reset") {
+        "connection".to_string()
+    } else if msg_lower.contains("timeout") || msg_lower.contains("timed out") {
+        "timeout".to_string()
+    } else if msg_lower.contains("out of memory") || msg_lower.contains("oom") {
+        "memory".to_string()
+    } else if msg_lower.contains("permission denied") || msg_lower.contains("access denied") {
+        "permission".to_string()
+    } else if msg_lower.contains("no such file") || msg_lower.contains("not found") {
+        "not_found".to_string()
+    } else if msg_lower.contains("database") || msg_lower.contains("sql") {
+        "database".to_string()
+    } else if msg_lower.contains("network") || msg_lower.contains("dns") {
+        "network".to_string()
+    } else if msg_lower.contains("authentication") || msg_lower.contains("unauthorized") {
+        "auth".to_string()
+    } else {
+        "general".to_string()
+    }
+}
+
+#[cfg(feature = "docker")]
+fn extract_app_code(name: &str, labels: &HashMap<String, String>) -> String {
+    if let Some(service) = labels.get("com.docker.compose.service") {
+        return service.clone();
+    }
+    // Fall back to extracting from container name
+    name.trim_start_matches('/').to_string()
+}
+
+#[cfg(feature = "docker")]
+fn generate_recommendations(total_errors: u64, apps: &[Value]) -> Vec<String> {
+    let mut recs = Vec::new();
+
+    if total_errors == 0 {
+        recs.push("No errors detected. System appears healthy.".to_string());
+        return recs;
+    }
+
+    // Analyze error patterns across apps
+    for app in apps {
+        let app_code = app["app_code"].as_str().unwrap_or("unknown");
+        let error_count = app["error_count"].as_u64().unwrap_or(0);
+        
+        if error_count == 0 {
+            continue;
+        }
+
+        if let Some(categories) = app["error_categories"].as_object() {
+            if categories.contains_key("connection") {
+                recs.push(format!(
+                    "{}: Check if dependent services are running and network connectivity is working.",
+                    app_code
+                ));
+            }
+            if categories.contains_key("timeout") {
+                recs.push(format!(
+                    "{}: Consider increasing timeout settings or optimizing slow operations.",
+                    app_code
+                ));
+            }
+            if categories.contains_key("memory") {
+                recs.push(format!(
+                    "{}: Container may need more memory. Consider increasing memory limits.",
+                    app_code
+                ));
+            }
+            if categories.contains_key("database") {
+                recs.push(format!(
+                    "{}: Check database connection settings and database server health.",
+                    app_code
+                ));
+            }
+            if categories.contains_key("permission") {
+                recs.push(format!(
+                    "{}: File permission issues detected. Check volume mounts and user permissions.",
+                    app_code
+                ));
+            }
+        }
+
+        if error_count > 50 {
+            recs.push(format!(
+                "{}: High error rate ({}). Consider restarting the container.",
+                app_code, error_count
+            ));
+        }
+    }
+
+    if recs.is_empty() {
+        recs.push("Review the sample errors above to diagnose the issues.".to_string());
+    }
+
+    recs
+}
+
+// =========================================================================
+// Config Management Handlers
+// =========================================================================
+
+#[cfg(feature = "docker")]
+async fn handle_fetch_config(
+    agent_cmd: &AgentCommand,
+    data: &FetchConfigCommand,
+) -> Result<CommandResult> {
+    use crate::security::vault_client::VaultClient;
+
+    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "fetch_config");
+
+    // Initialize Vault client
+    let vault_client = match VaultClient::from_env() {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            let error = make_error(
+                "vault_not_configured",
+                "Vault client not configured. Set VAULT_ADDRESS, VAULT_TOKEN, and VAULT_AGENT_PATH_PREFIX.",
+                None,
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+        Err(e) => {
+            let error = make_error(
+                "vault_init_failed",
+                "Failed to initialize Vault client",
+                Some(e.to_string()),
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
+    // Fetch config from Vault
+    match vault_client.fetch_app_config(&data.deployment_hash, &data.app_code).await {
+        Ok(config) => {
+            let mut body = json!({
+                "type": "fetch_config",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
+                "config": {
+                    "content_type": config.content_type,
+                    "destination_path": config.destination_path,
+                    "file_mode": config.file_mode,
+                    "content_length": config.content.len(),
+                },
+                "fetched_at": now_timestamp(),
+            });
+
+            // If apply=true, write config to disk
+            if data.apply {
+                match write_config_to_disk(&config).await {
+                    Ok(()) => {
+                        body["applied"] = json!(true);
+                        body["applied_at"] = json!(now_timestamp());
+                        tracing::info!(
+                            deployment_hash = %data.deployment_hash,
+                            app_code = %data.app_code,
+                            destination = %config.destination_path,
+                            "Config fetched and applied to disk"
+                        );
+                    }
+                    Err(e) => {
+                        let error = make_error(
+                            "config_write_failed",
+                            "Failed to write config to disk",
+                            Some(e.to_string()),
+                        );
+                        body["applied"] = json!(false);
+                        body["apply_error"] = json!(error.message);
+                        result.errors = Some(vec![error]);
+                    }
+                }
+            } else {
+                // Include content in response (for preview)
+                body["config"]["content"] = json!(config.content);
+            }
+
+            result.result = Some(body);
+            Ok(result)
+        }
+        Err(e) => {
+            let error = make_error(
+                "vault_fetch_failed",
+                format!("Failed to fetch config from Vault for {}/{}", data.deployment_hash, data.app_code),
+                Some(e.to_string()),
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            Ok(result)
+        }
+    }
+}
+
+#[cfg(feature = "docker")]
+async fn handle_apply_config(
+    agent_cmd: &AgentCommand,
+    data: &ApplyConfigCommand,
+) -> Result<CommandResult> {
+    use crate::security::vault_client::{AppConfig, VaultClient};
+
+    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "apply_config");
+
+    // Get config - either from payload or Vault
+    let config = if let Some(content) = &data.config_content {
+        // Config provided directly in command
+        let destination = data.destination_path.clone()
+            .ok_or_else(|| anyhow::anyhow!("destination_path required when providing config_content"))?;
+        
+        AppConfig {
+            content: content.clone(),
+            content_type: "text".to_string(),
+            destination_path: destination,
+            file_mode: "0644".to_string(),
+            owner: None,
+            group: None,
+        }
+    } else {
+        // Fetch from Vault
+        let vault_client = match VaultClient::from_env() {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                let error = make_error(
+                    "vault_not_configured",
+                    "Vault client not configured and no config_content provided.",
+                    None,
+                );
+                result.status = "failed".into();
+                result.error = Some(error.message.clone());
+                result.errors = Some(vec![error]);
+                return Ok(result);
+            }
+            Err(e) => {
+                let error = make_error(
+                    "vault_init_failed",
+                    "Failed to initialize Vault client",
+                    Some(e.to_string()),
+                );
+                result.status = "failed".into();
+                result.error = Some(error.message.clone());
+                result.errors = Some(vec![error]);
+                return Ok(result);
+            }
+        };
+
+        match vault_client.fetch_app_config(&data.deployment_hash, &data.app_code).await {
+            Ok(mut cfg) => {
+                // Override destination if provided
+                if let Some(dest) = &data.destination_path {
+                    cfg.destination_path = dest.clone();
+                }
+                cfg
+            }
+            Err(e) => {
+                let error = make_error(
+                    "vault_fetch_failed",
+                    format!("Failed to fetch config from Vault for {}/{}", data.deployment_hash, data.app_code),
+                    Some(e.to_string()),
+                );
+                result.status = "failed".into();
+                result.error = Some(error.message.clone());
+                result.errors = Some(vec![error]);
+                return Ok(result);
+            }
+        }
+    };
+
+    let destination = config.destination_path.clone();
+
+    // Write config to disk
+    if let Err(e) = write_config_to_disk(&config).await {
+        let error = make_error(
+            "config_write_failed",
+            "Failed to write config to disk",
+            Some(e.to_string()),
+        );
+        result.status = "failed".into();
+        result.error = Some(error.message.clone());
+        result.errors = Some(vec![error]);
+        return Ok(result);
+    }
+
+    let mut body = json!({
+        "type": "apply_config",
+        "deployment_hash": data.deployment_hash.clone(),
+        "app_code": data.app_code.clone(),
+        "destination_path": destination,
+        "applied_at": now_timestamp(),
+        "config_applied": true,
+    });
+
+    // Restart container if requested
+    if data.restart_after {
+        let containers = docker::list_container_health().await.unwrap_or_default();
+        let container = containers
+            .iter()
+            .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+
+        if let Some(c) = container {
+            match docker::restart(&c.name).await {
+                Ok(()) => {
+                    body["container_restarted"] = json!(true);
+                    body["restarted_at"] = json!(now_timestamp());
+                    tracing::info!(
+                        deployment_hash = %data.deployment_hash,
+                        app_code = %data.app_code,
+                        container = %c.name,
+                        "Config applied and container restarted"
+                    );
+                }
+                Err(e) => {
+                    body["container_restarted"] = json!(false);
+                    body["restart_error"] = json!(e.to_string());
+                    let error = make_error(
+                        "restart_failed",
+                        format!("Config applied but failed to restart container: {}", e),
+                        None,
+                    );
+                    result.errors = Some(vec![error]);
+                }
+            }
+        } else {
+            body["container_restarted"] = json!(false);
+            body["restart_error"] = json!("Container not found");
+        }
+    }
+
+    result.result = Some(body);
+    Ok(result)
+}
+
+/// Write config file to disk with proper permissions
+#[cfg(feature = "docker")]
+async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig) -> Result<()> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    let path = Path::new(&config.destination_path);
+
+    // Create parent directories if needed
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .context(format!("Failed to create directory: {:?}", parent))?;
+    }
+
+    // Write the content
+    fs::write(path, &config.content)
+        .context(format!("Failed to write file: {}", config.destination_path))?;
+
+    // Set file permissions
+    if let Ok(mode) = u32::from_str_radix(config.file_mode.trim_start_matches('0'), 8) {
+        let permissions = fs::Permissions::from_mode(mode);
+        fs::set_permissions(path, permissions)
+            .context(format!("Failed to set permissions on: {}", config.destination_path))?;
+    }
+
+    tracing::info!(
+        path = %config.destination_path,
+        content_type = %config.content_type,
+        size = config.content.len(),
+        "Config file written to disk"
+    );
+
+    Ok(())
 }
 
 #[cfg(feature = "docker")]

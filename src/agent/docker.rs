@@ -495,6 +495,33 @@ pub async fn stop(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn stop_with_timeout(name: &str, timeout_secs: u32) -> Result<()> {
+    let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+    let opts = StopContainerOptions { t: timeout_secs as i64 };
+    docker
+        .stop_container(&resolved_name, Some(opts))
+        .await
+        .context("stop container with timeout")?;
+    debug!("stopped container: {} (timeout: {}s)", name, timeout_secs);
+    Ok(())
+}
+
+pub async fn start(name: &str) -> Result<()> {
+    let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+    docker
+        .start_container::<String>(&resolved_name, None)
+        .await
+        .context("start container")?;
+    debug!("started container: {}", name);
+    Ok(())
+}
+
 pub async fn pause(name: &str) -> Result<()> {
     let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)

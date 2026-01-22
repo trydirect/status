@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 /// Vault KV response envelope for token fetch.
@@ -19,6 +20,49 @@ struct VaultKvData {
 #[derive(Debug, Deserialize, Default)]
 struct VaultTokenData {
     token: Option<String>,
+}
+
+/// Vault KV response envelope for config fetch.
+#[derive(Debug, Deserialize)]
+struct VaultConfigResponse {
+    #[serde(default)]
+    data: VaultConfigData,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct VaultConfigData {
+    #[serde(default)]
+    data: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    metadata: Option<VaultConfigMetadata>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct VaultConfigMetadata {
+    pub created_time: Option<String>,
+    pub version: Option<u64>,
+}
+
+/// App configuration stored in Vault
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    /// Configuration file content (JSON, YAML, or raw text)
+    pub content: String,
+    /// Content type: "json", "yaml", "env", "text"
+    pub content_type: String,
+    /// Target file path on the deployment server
+    pub destination_path: String,
+    /// File permissions (e.g., "0644")
+    #[serde(default = "default_file_mode")]
+    pub file_mode: String,
+    /// Optional: owner user
+    pub owner: Option<String>,
+    /// Optional: owner group
+    pub group: Option<String>,
+}
+
+fn default_file_mode() -> String {
+    "0644".to_string()
 }
 
 /// Vault client for fetching and managing agent tokens.
@@ -197,6 +241,283 @@ impl VaultClient {
 
         info!("Token deleted from Vault for {} ({})", deployment_hash, key);
         Ok(())
+    }
+
+    // =========================================================================
+    // App Configuration Methods
+    // =========================================================================
+
+    /// Build the Vault path for app configuration.
+    /// 
+    /// Path template: {prefix}/{deployment_hash}/apps/{app_name}/config
+    fn config_path(&self, deployment_hash: &str, app_name: &str) -> String {
+        format!(
+            "{}/v1/{}/{}/apps/{}/config",
+            self.base_url, self.prefix, deployment_hash, app_name
+        )
+    }
+
+    /// Fetch app configuration from Vault.
+    ///
+    /// Returns the AppConfig struct with content, type, and destination path.
+    /// Path: GET {base_url}/v1/{prefix}/{deployment_hash}/apps/{app_name}/config
+    pub async fn fetch_app_config(
+        &self,
+        deployment_hash: &str,
+        app_name: &str,
+    ) -> Result<AppConfig> {
+        let url = self.config_path(deployment_hash, app_name);
+
+        debug!("Fetching app config from Vault: {}", url);
+
+        let response = self
+            .http_client
+            .get(&url)
+            .header("X-Vault-Token", &self.token)
+            .send()
+            .await
+            .context("sending Vault config request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Vault config fetch failed with status {}: {}",
+                status,
+                body
+            ));
+        }
+
+        let vault_resp: VaultConfigResponse =
+            response.json().await.context("parsing Vault config response")?;
+
+        // Extract AppConfig from the data map
+        let data = &vault_resp.data.data;
+        
+        let content = data
+            .get("content")
+            .and_then(|v| v.as_str())
+            .context("config content not found in Vault response")?
+            .to_string();
+
+        let content_type = data
+            .get("content_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text")
+            .to_string();
+
+        let destination_path = data
+            .get("destination_path")
+            .and_then(|v| v.as_str())
+            .context("destination_path not found in Vault response")?
+            .to_string();
+
+        let file_mode = data
+            .get("file_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0644")
+            .to_string();
+
+        let owner = data
+            .get("owner")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let group = data
+            .get("group")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        info!(
+            "Fetched config for {}/{} from Vault (type: {}, dest: {})",
+            deployment_hash, app_name, content_type, destination_path
+        );
+
+        Ok(AppConfig {
+            content,
+            content_type,
+            destination_path,
+            file_mode,
+            owner,
+            group,
+        })
+    }
+
+    /// Store app configuration in Vault.
+    ///
+    /// Path: POST {base_url}/v1/{prefix}/{deployment_hash}/apps/{app_name}/config
+    pub async fn store_app_config(
+        &self,
+        deployment_hash: &str,
+        app_name: &str,
+        config: &AppConfig,
+    ) -> Result<()> {
+        let url = self.config_path(deployment_hash, app_name);
+
+        debug!("Storing app config in Vault: {}", url);
+
+        let payload = serde_json::json!({
+            "data": {
+                "content": config.content,
+                "content_type": config.content_type,
+                "destination_path": config.destination_path,
+                "file_mode": config.file_mode,
+                "owner": config.owner,
+                "group": config.group,
+            }
+        });
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("X-Vault-Token", &self.token)
+            .json(&payload)
+            .send()
+            .await
+            .context("sending Vault config store request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Vault config store failed with status {}: {}",
+                status,
+                body
+            ));
+        }
+
+        info!(
+            "Config stored in Vault for {}/{} (dest: {})",
+            deployment_hash, app_name, config.destination_path
+        );
+        Ok(())
+    }
+
+    /// List all app configs for a deployment.
+    ///
+    /// Path: LIST {base_url}/v1/{prefix}/{deployment_hash}/apps
+    /// Returns list of app names that have configurations stored.
+    pub async fn list_app_configs(&self, deployment_hash: &str) -> Result<Vec<String>> {
+        let url = format!(
+            "{}/v1/{}/{}/apps",
+            self.base_url, self.prefix, deployment_hash
+        );
+
+        debug!("Listing app configs from Vault: {}", url);
+
+        let response = self
+            .http_client
+            .request(reqwest::Method::from_bytes(b"LIST").unwrap_or(reqwest::Method::GET), &url)
+            .header("X-Vault-Token", &self.token)
+            .send()
+            .await
+            .context("sending Vault list request")?;
+
+        if response.status() == 404 {
+            // No configs exist yet
+            return Ok(vec![]);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Vault list failed with status {}: {}",
+                status,
+                body
+            ));
+        }
+
+        #[derive(Deserialize)]
+        struct ListResponse {
+            data: ListData,
+        }
+
+        #[derive(Deserialize)]
+        struct ListData {
+            keys: Vec<String>,
+        }
+
+        let list_resp: ListResponse = response
+            .json()
+            .await
+            .context("parsing Vault list response")?;
+
+        // Filter to only include app names (not subdirectories)
+        let apps: Vec<String> = list_resp
+            .data
+            .keys
+            .into_iter()
+            .filter(|k| !k.ends_with('/'))
+            .collect();
+
+        info!(
+            "Found {} app configs for deployment {}",
+            apps.len(),
+            deployment_hash
+        );
+        Ok(apps)
+    }
+
+    /// Delete app configuration from Vault.
+    ///
+    /// Path: DELETE {base_url}/v1/{prefix}/{deployment_hash}/apps/{app_name}/config
+    pub async fn delete_app_config(
+        &self,
+        deployment_hash: &str,
+        app_name: &str,
+    ) -> Result<()> {
+        let url = self.config_path(deployment_hash, app_name);
+
+        debug!("Deleting app config from Vault: {}", url);
+
+        let response = self
+            .http_client
+            .delete(&url)
+            .header("X-Vault-Token", &self.token)
+            .send()
+            .await
+            .context("sending Vault config delete request")?;
+
+        if !response.status().is_success() && response.status() != 204 {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            warn!(
+                "Vault config delete returned status {}: {} (may still be deleted)",
+                status, body
+            );
+        }
+
+        info!("Config deleted from Vault for {}/{}", deployment_hash, app_name);
+        Ok(())
+    }
+
+    /// Fetch multiple app configs at once (for deployment).
+    ///
+    /// Returns a map of app_name -> AppConfig for all specified apps.
+    pub async fn fetch_all_app_configs(
+        &self,
+        deployment_hash: &str,
+        app_names: &[String],
+    ) -> Result<HashMap<String, AppConfig>> {
+        let mut configs = HashMap::new();
+        
+        for app_name in app_names {
+            match self.fetch_app_config(deployment_hash, app_name).await {
+                Ok(config) => {
+                    configs.insert(app_name.clone(), config);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to fetch config for {}/{}: {}",
+                        deployment_hash, app_name, e
+                    );
+                    // Continue fetching other configs, don't fail the entire operation
+                }
+            }
+        }
+
+        Ok(configs)
     }
 }
 
