@@ -33,6 +33,7 @@ pub enum StackerCommand {
     ErrorSummary(ErrorSummaryCommand),
     FetchConfig(FetchConfigCommand),
     ApplyConfig(ApplyConfigCommand),
+    DeployApp(DeployAppCommand),
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -138,6 +139,28 @@ pub struct ApplyConfigCommand {
     restart_after: bool,
 }
 
+/// Command to deploy a new app container via docker compose
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeployAppCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+    /// Optional: specific image to use (overrides compose file)
+    #[serde(default)]
+    image: Option<String>,
+    /// Optional: environment variables to set
+    #[serde(default)]
+    env_vars: Option<std::collections::HashMap<String, String>>,
+    /// Whether to pull the image before starting (default: true)
+    #[serde(default = "default_true")]
+    pull: bool,
+    /// Whether to remove existing container before deploying
+    #[serde(default)]
+    force_recreate: bool,
+}
+
 pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand>> {
     let normalized = cmd.name.trim().to_lowercase();
     match normalized.as_str() {
@@ -196,6 +219,13 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::ApplyConfig(payload)))
+        }
+        "deploy_app" | "stacker.deploy_app" => {
+            let payload: DeployAppCommand =
+                serde_json::from_value(cmd.params.clone()).context("invalid deploy_app payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::DeployApp(payload)))
         }
         _ => Ok(None),
     }
@@ -519,6 +549,41 @@ impl ApplyConfigCommand {
     }
 }
 
+impl DeployAppCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        if let Some(img) = &self.image {
+            self.image = Some(trimmed(img));
+        }
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.app_code.is_empty() {
+            bail!("app_code is required");
+        }
+        Ok(())
+    }
+}
+
 fn trimmed(value: &str) -> String {
     value.trim().to_string()
 }
@@ -595,6 +660,7 @@ async fn execute_with_docker(
         StackerCommand::ErrorSummary(data) => handle_error_summary(agent_cmd, data).await,
         StackerCommand::FetchConfig(data) => handle_fetch_config(agent_cmd, data).await,
         StackerCommand::ApplyConfig(data) => handle_apply_config(agent_cmd, data).await,
+        StackerCommand::DeployApp(data) => handle_deploy_app(agent_cmd, data).await,
     }
 }
 
@@ -1467,6 +1533,226 @@ async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig)
     );
 
     Ok(())
+}
+
+/// Handle deploy_app command - uses docker compose to deploy a new app/service
+#[cfg(feature = "docker")]
+async fn handle_deploy_app(
+    agent_cmd: &AgentCommand,
+    data: &DeployAppCommand,
+) -> Result<CommandResult> {
+    use tokio::process::Command;
+
+    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "deploy_app");
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    // Determine the compose working directory
+    // Standard TryDirect deployments use /home/deploy/<deployment_hash>
+    let compose_dir = std::env::var("COMPOSE_PROJECT_DIR")
+        .unwrap_or_else(|_| format!("/home/deploy/{}", data.deployment_hash));
+
+    // Check if compose file exists
+    let compose_file = format!("{}/docker-compose.yml", compose_dir);
+    if !std::path::Path::new(&compose_file).exists() {
+        let error = make_error(
+            "compose_not_found",
+            format!("docker-compose.yml not found at {}", compose_file),
+            None,
+        );
+        result.status = "failed".into();
+        result.error = Some(error.message.clone());
+        result.errors = Some(vec![error]);
+        return Ok(result);
+    }
+
+    // Step 1: Pull the image if requested
+    if data.pull {
+        tracing::info!(
+            deployment_hash = %data.deployment_hash,
+            app_code = %data.app_code,
+            "Pulling docker image for service"
+        );
+
+        let pull_result = Command::new("docker")
+            .arg("compose")
+            .arg("-f")
+            .arg(&compose_file)
+            .arg("pull")
+            .arg(&data.app_code)
+            .current_dir(&compose_dir)
+            .output()
+            .await;
+
+        match pull_result {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                errors.push(make_error(
+                    "pull_warning",
+                    format!("Image pull had issues (continuing): {}", stderr.trim()),
+                    None,
+                ));
+                // Don't fail here - the image might already exist locally
+            }
+            Err(e) => {
+                errors.push(make_error(
+                    "pull_warning",
+                    format!("Failed to pull image (continuing): {}", e),
+                    None,
+                ));
+            }
+            _ => {
+                tracing::info!(app_code = %data.app_code, "Image pulled successfully");
+            }
+        }
+    }
+
+    // Step 2: If force_recreate, stop and remove existing container first
+    if data.force_recreate {
+        tracing::info!(
+            app_code = %data.app_code,
+            "Force recreating: stopping existing container"
+        );
+
+        let _ = Command::new("docker")
+            .arg("compose")
+            .arg("-f")
+            .arg(&compose_file)
+            .arg("stop")
+            .arg(&data.app_code)
+            .current_dir(&compose_dir)
+            .output()
+            .await;
+
+        let _ = Command::new("docker")
+            .arg("compose")
+            .arg("-f")
+            .arg(&compose_file)
+            .arg("rm")
+            .arg("-f")
+            .arg(&data.app_code)
+            .current_dir(&compose_dir)
+            .output()
+            .await;
+    }
+
+    // Step 3: Deploy using docker compose up
+    tracing::info!(
+        deployment_hash = %data.deployment_hash,
+        app_code = %data.app_code,
+        compose_dir = %compose_dir,
+        "Deploying service with docker compose"
+    );
+
+    let mut compose_cmd = Command::new("docker");
+    compose_cmd
+        .arg("compose")
+        .arg("-f")
+        .arg(&compose_file)
+        .arg("up")
+        .arg("-d")
+        .arg("--no-deps")  // Don't start linked services
+        .arg(&data.app_code)
+        .current_dir(&compose_dir);
+
+    // Add environment variables if provided
+    if let Some(env_vars) = &data.env_vars {
+        for (key, value) in env_vars {
+            compose_cmd.env(key, value);
+        }
+    }
+
+    let deploy_result = compose_cmd.output().await;
+
+    match deploy_result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if output.status.success() {
+                tracing::info!(
+                    deployment_hash = %data.deployment_hash,
+                    app_code = %data.app_code,
+                    "Service deployed successfully"
+                );
+
+                // Wait briefly for container to start
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+                // Check container health
+                let containers = docker::list_container_health().await.unwrap_or_default();
+                let container = containers
+                    .iter()
+                    .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+
+                let container_state = if let Some(c) = container {
+                    map_container_state(&c.status).to_string()
+                } else {
+                    "starting".to_string()
+                };
+
+                let body = json!({
+                    "type": "deploy_app",
+                    "deployment_hash": data.deployment_hash.clone(),
+                    "app_code": data.app_code.clone(),
+                    "status": "deployed",
+                    "container_state": container_state,
+                    "deployed_at": now_timestamp(),
+                    "output": stdout.trim(),
+                    "warnings": if errors.is_empty() { json!(null) } else { errors_value(&errors) },
+                });
+
+                result.result = Some(body);
+                if !errors.is_empty() {
+                    result.errors = Some(errors);
+                }
+            } else {
+                let error = make_error(
+                    "deploy_failed",
+                    format!("Docker compose up failed: {}", stderr.trim()),
+                    Some(format!("stdout: {}, stderr: {}", stdout.trim(), stderr.trim())),
+                );
+                errors.push(error.clone());
+
+                let body = json!({
+                    "type": "deploy_app",
+                    "deployment_hash": data.deployment_hash.clone(),
+                    "app_code": data.app_code.clone(),
+                    "status": "failed",
+                    "container_state": "failed",
+                    "errors": errors_value(&errors),
+                });
+
+                result.status = "failed".into();
+                result.error = Some(error.message);
+                result.result = Some(body);
+                result.errors = Some(errors);
+            }
+        }
+        Err(e) => {
+            let error = make_error(
+                "deploy_exec_failed",
+                format!("Failed to execute docker compose: {}", e),
+                None,
+            );
+            errors.push(error.clone());
+
+            let body = json!({
+                "type": "deploy_app",
+                "deployment_hash": data.deployment_hash.clone(),
+                "app_code": data.app_code.clone(),
+                "status": "failed",
+                "container_state": "unknown",
+                "errors": errors_value(&errors),
+            });
+
+            result.status = "failed".into();
+            result.error = Some(error.message);
+            result.result = Some(body);
+            result.errors = Some(errors);
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(feature = "docker")]
