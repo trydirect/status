@@ -500,7 +500,10 @@ pub async fn stop_with_timeout(name: &str, timeout_secs: u32) -> Result<()> {
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
-    let opts = StopContainerOptions { t: timeout_secs as i64 };
+    let opts = StopContainerOptions {
+        t: Some(timeout_secs as i32),
+        signal: None,
+    };
     docker
         .stop_container(&resolved_name, Some(opts))
         .await
@@ -515,7 +518,7 @@ pub async fn start(name: &str) -> Result<()> {
         .await
         .unwrap_or_else(|_| name.to_string());
     docker
-        .start_container::<String>(&resolved_name, None)
+        .start_container(&resolved_name, None::<bollard::query_parameters::StartContainerOptions>)
         .await
         .context("start container")?;
     debug!("started container: {}", name);

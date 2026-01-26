@@ -43,5 +43,5 @@ ENV MODE="serve-ui"
 #   docker run ... status (daemon mode with polling)
 # CMD ["/usr/local/bin/status", "serve", "--port", "5000", "--with-ui"]
 
-ENTRYPOINT ["/status"]
+ENTRYPOINT ["/usr/local/bin/status"]
 CMD ["serve", "--port", "5000", "--with-ui"]
