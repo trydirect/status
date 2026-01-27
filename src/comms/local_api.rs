@@ -281,10 +281,19 @@ async fn login_handler(
     let creds = Credentials::from_env();
     if req.username == creds.username && req.password == creds.password {
         let user = SessionUser::new(req.username.clone());
-        let _session_id = state.session_store.create_session(user).await;
+        let session_id = state.session_store.create_session(user).await;
         debug!("user logged in: {}", req.username);
-        // Redirect to home page on successful login
-        Ok(Redirect::to("/").into_response())
+        use axum::http::header::SET_COOKIE;
+        use axum::response::Response;
+        if state.with_ui {
+            // Set session cookie (HttpOnly, Secure if HTTPS)
+            let cookie = format!("session_id={}; Path=/; HttpOnly", session_id);
+            let mut resp = Redirect::to("/").into_response();
+            resp.headers_mut().append(SET_COOKIE, cookie.parse().unwrap());
+            Ok(resp)
+        } else {
+            Ok(Json(LoginResponse { session_id }).into_response())
+        }
     } else {
         error!("login failed for user: {}", req.username);
         // Re-render login page with error if UI is enabled, otherwise return error JSON
@@ -336,6 +345,40 @@ async fn logout_handler(State(state): State<SharedState>) -> impl IntoResponse {
 #[cfg(feature = "docker")]
 async fn home(State(state): State<SharedState>) -> impl IntoResponse {
     use crate::agent::docker;
+    use axum::http::header::COOKIE;
+    use axum::http::Request;
+    use axum::response::Redirect;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::body::Body;
+    // use axum::RequestPartsExt;
+    // Extract session_id from Cookie header manually
+    let session_id = {
+        let mut sid: Option<String> = None;
+        // Build a dummy request to get headers (Axum 0.5 compatible workaround)
+        let req = Request::builder().body(Body::empty()).unwrap();
+        let headers = req.headers();
+        if let Some(cookie_header) = headers.get(COOKIE) {
+            if let Ok(cookie_str) = cookie_header.to_str() {
+                for cookie in cookie_str.split(';') {
+                    let cookie = cookie.trim();
+                    if let Some(rest) = cookie.strip_prefix("session_id=") {
+                        sid = Some(rest.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        sid
+    };
+    let valid_session = if let Some(ref sid) = session_id {
+        state.session_store.get_session(sid).await.is_some()
+    } else {
+        false
+    };
+    if state.with_ui && !valid_session {
+        return Redirect::to("/login").into_response();
+    }
     let list_result = if state.with_ui {
         docker::list_containers_with_logs("200").await
     } else {
