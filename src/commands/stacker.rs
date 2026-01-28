@@ -200,22 +200,22 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             Ok(Some(StackerCommand::Start(payload)))
         }
         "error_summary" | "stacker.error_summary" => {
-            let payload: ErrorSummaryCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid error_summary payload")?;
+            let payload: ErrorSummaryCommand = serde_json::from_value(cmd.params.clone())
+                .context("invalid error_summary payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::ErrorSummary(payload)))
         }
         "fetch_config" | "stacker.fetch_config" => {
-            let payload: FetchConfigCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid fetch_config payload")?;
+            let payload: FetchConfigCommand = serde_json::from_value(cmd.params.clone())
+                .context("invalid fetch_config payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::FetchConfig(payload)))
         }
         "apply_config" | "stacker.apply_config" => {
-            let payload: ApplyConfigCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid apply_config payload")?;
+            let payload: ApplyConfigCommand = serde_json::from_value(cmd.params.clone())
+                .context("invalid apply_config payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::ApplyConfig(payload)))
@@ -1020,9 +1020,17 @@ async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<C
 }
 
 #[cfg(feature = "docker")]
-async fn handle_error_summary(agent_cmd: &AgentCommand, data: &ErrorSummaryCommand) -> Result<CommandResult> {
-    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "error_summary");
-    
+async fn handle_error_summary(
+    agent_cmd: &AgentCommand,
+    data: &ErrorSummaryCommand,
+) -> Result<CommandResult> {
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "error_summary",
+    );
+
     // Get list of containers to analyze
     let containers = match docker::list_container_health().await {
         Ok(list) => list,
@@ -1059,18 +1067,31 @@ async fn handle_error_summary(agent_cmd: &AgentCommand, data: &ErrorSummaryComma
 
     // Error patterns to search for
     static ERROR_PATTERNS: &[&str] = &[
-        "error", "Error", "ERROR",
-        "exception", "Exception", "EXCEPTION",
-        "failed", "Failed", "FAILED",
-        "fatal", "Fatal", "FATAL",
-        "panic", "PANIC",
-        "crash", "crashed",
-        "denied", "refused",
-        "timeout", "timed out",
+        "error",
+        "Error",
+        "ERROR",
+        "exception",
+        "Exception",
+        "EXCEPTION",
+        "failed",
+        "Failed",
+        "FAILED",
+        "fatal",
+        "Fatal",
+        "FATAL",
+        "panic",
+        "PANIC",
+        "crash",
+        "crashed",
+        "denied",
+        "refused",
+        "timeout",
+        "timed out",
         "connection refused",
         "no such file",
         "permission denied",
-        "out of memory", "OOM",
+        "out of memory",
+        "OOM",
     ];
 
     let mut summary = json!({
@@ -1090,11 +1111,8 @@ async fn handle_error_summary(agent_cmd: &AgentCommand, data: &ErrorSummaryComma
 
     for container in target_containers {
         // Get logs for this container
-        let logs_result = docker::get_container_logs_window(
-            &container.name,
-            None,
-            Some(LOGS_MAX_LIMIT),
-        ).await;
+        let logs_result =
+            docker::get_container_logs_window(&container.name, None, Some(LOGS_MAX_LIMIT)).await;
 
         let mut error_count = 0u64;
         let mut warning_count = 0u64;
@@ -1104,14 +1122,14 @@ async fn handle_error_summary(agent_cmd: &AgentCommand, data: &ErrorSummaryComma
         if let Ok(window) = logs_result {
             for frame in &window.frames {
                 let msg_lower = frame.message.to_lowercase();
-                
+
                 // Check for errors
                 let is_error = ERROR_PATTERNS.iter().any(|p| frame.message.contains(p));
                 let is_warning = msg_lower.contains("warn") || msg_lower.contains("warning");
 
                 if is_error {
                     error_count += 1;
-                    
+
                     // Categorize error
                     let category = categorize_error(&frame.message);
                     *error_categories.entry(category).or_insert(0) += 1;
@@ -1149,12 +1167,16 @@ async fn handle_error_summary(agent_cmd: &AgentCommand, data: &ErrorSummaryComma
     summary["apps"] = json!(apps_summary);
     summary["total_errors"] = json!(total_errors);
     summary["total_warnings"] = json!(total_warnings);
-    
+
     // Generate recommendations based on findings
     let recommendations = generate_recommendations(total_errors, &apps_summary);
     summary["recommendations"] = json!(recommendations);
-    
-    summary["status"] = json!(if total_errors > 0 { "issues_found" } else { "ok" });
+
+    summary["status"] = json!(if total_errors > 0 {
+        "issues_found"
+    } else {
+        "ok"
+    });
 
     result.result = Some(summary);
     Ok(result)
@@ -1163,7 +1185,7 @@ async fn handle_error_summary(agent_cmd: &AgentCommand, data: &ErrorSummaryComma
 #[cfg(feature = "docker")]
 fn categorize_error(message: &str) -> String {
     let msg_lower = message.to_lowercase();
-    
+
     if msg_lower.contains("connection refused") || msg_lower.contains("connection reset") {
         "connection".to_string()
     } else if msg_lower.contains("timeout") || msg_lower.contains("timed out") {
@@ -1207,7 +1229,7 @@ fn generate_recommendations(total_errors: u64, apps: &[Value]) -> Vec<String> {
     for app in apps {
         let app_code = app["app_code"].as_str().unwrap_or("unknown");
         let error_count = app["error_count"].as_u64().unwrap_or(0);
-        
+
         if error_count == 0 {
             continue;
         }
@@ -1271,7 +1293,12 @@ async fn handle_fetch_config(
 ) -> Result<CommandResult> {
     use crate::security::vault_client::VaultClient;
 
-    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "fetch_config");
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "fetch_config",
+    );
 
     // Initialize Vault client
     let vault_client = match VaultClient::from_env() {
@@ -1301,7 +1328,10 @@ async fn handle_fetch_config(
     };
 
     // Fetch config from Vault
-    match vault_client.fetch_app_config(&data.deployment_hash, &data.app_code).await {
+    match vault_client
+        .fetch_app_config(&data.deployment_hash, &data.app_code)
+        .await
+    {
         Ok(config) => {
             let mut body = json!({
                 "type": "fetch_config",
@@ -1351,7 +1381,10 @@ async fn handle_fetch_config(
         Err(e) => {
             let error = make_error(
                 "vault_fetch_failed",
-                format!("Failed to fetch config from Vault for {}/{}", data.deployment_hash, data.app_code),
+                format!(
+                    "Failed to fetch config from Vault for {}/{}",
+                    data.deployment_hash, data.app_code
+                ),
                 Some(e.to_string()),
             );
             result.status = "failed".into();
@@ -1369,14 +1402,20 @@ async fn handle_apply_config(
 ) -> Result<CommandResult> {
     use crate::security::vault_client::{AppConfig, VaultClient};
 
-    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "apply_config");
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "apply_config",
+    );
 
     // Get config - either from payload or Vault
     let config = if let Some(content) = &data.config_content {
         // Config provided directly in command
-        let destination = data.destination_path.clone()
-            .ok_or_else(|| anyhow::anyhow!("destination_path required when providing config_content"))?;
-        
+        let destination = data.destination_path.clone().ok_or_else(|| {
+            anyhow::anyhow!("destination_path required when providing config_content")
+        })?;
+
         AppConfig {
             content: content.clone(),
             content_type: "text".to_string(),
@@ -1413,7 +1452,10 @@ async fn handle_apply_config(
             }
         };
 
-        match vault_client.fetch_app_config(&data.deployment_hash, &data.app_code).await {
+        match vault_client
+            .fetch_app_config(&data.deployment_hash, &data.app_code)
+            .await
+        {
             Ok(mut cfg) => {
                 // Override destination if provided
                 if let Some(dest) = &data.destination_path {
@@ -1424,7 +1466,10 @@ async fn handle_apply_config(
             Err(e) => {
                 let error = make_error(
                     "vault_fetch_failed",
-                    format!("Failed to fetch config from Vault for {}/{}", data.deployment_hash, data.app_code),
+                    format!(
+                        "Failed to fetch config from Vault for {}/{}",
+                        data.deployment_hash, data.app_code
+                    ),
                     Some(e.to_string()),
                 );
                 result.status = "failed".into();
@@ -1510,8 +1555,7 @@ pub async fn write_config_to_disk(config: &crate::security::vault_client::AppCon
 
     // Create parent directories if needed
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .context(format!("Failed to create directory: {:?}", parent))?;
+        fs::create_dir_all(parent).context(format!("Failed to create directory: {:?}", parent))?;
     }
 
     // Write the content
@@ -1521,8 +1565,10 @@ pub async fn write_config_to_disk(config: &crate::security::vault_client::AppCon
     // Set file permissions
     if let Ok(mode) = u32::from_str_radix(config.file_mode.trim_start_matches('0'), 8) {
         let permissions = fs::Permissions::from_mode(mode);
-        fs::set_permissions(path, permissions)
-            .context(format!("Failed to set permissions on: {}", config.destination_path))?;
+        fs::set_permissions(path, permissions).context(format!(
+            "Failed to set permissions on: {}",
+            config.destination_path
+        ))?;
     }
 
     tracing::info!(
@@ -1543,7 +1589,12 @@ async fn handle_deploy_app(
 ) -> Result<CommandResult> {
     use tokio::process::Command;
 
-    let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "deploy_app");
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "deploy_app",
+    );
     let mut errors: Vec<CommandError> = Vec::new();
 
     // Determine the compose working directory
@@ -1650,7 +1701,7 @@ async fn handle_deploy_app(
         .arg(&compose_file)
         .arg("up")
         .arg("-d")
-        .arg("--no-deps")  // Don't start linked services
+        .arg("--no-deps") // Don't start linked services
         .arg(&data.app_code)
         .current_dir(&compose_dir);
 
@@ -1709,7 +1760,11 @@ async fn handle_deploy_app(
                 let error = make_error(
                     "deploy_failed",
                     format!("Docker compose up failed: {}", stderr.trim()),
-                    Some(format!("stdout: {}, stderr: {}", stdout.trim(), stderr.trim())),
+                    Some(format!(
+                        "stdout: {}, stderr: {}",
+                        stdout.trim(),
+                        stderr.trim()
+                    )),
                 );
                 errors.push(error.clone());
 
@@ -1843,8 +1898,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-
-
     macro_rules! stacker_test {
         ($name:ident, $cmd_name:expr, $payload:expr, $variant:path) => {
             #[test]
@@ -1859,28 +1912,73 @@ mod tests {
                 };
                 let parsed = parse_stacker_command(&cmd).unwrap();
                 match parsed {
-                    Some($variant(_)) => {},
+                    Some($variant(_)) => {}
                     _ => panic!("Did not parse {} command correctly", $cmd_name),
                 }
             }
         };
     }
 
-    stacker_test!(parses_health_command, "health", json!({}), StackerCommand::Health);
-    stacker_test!(parses_logs_command, "logs", json!({"container": "test"}), StackerCommand::Logs);
-    stacker_test!(parses_restart_command, "restart", json!({"container": "test"}), StackerCommand::Restart);
-    stacker_test!(parses_stop_command, "stop", json!({"container": "test"}), StackerCommand::Stop);
-    stacker_test!(parses_start_command, "start", json!({"container": "test"}), StackerCommand::Start);
-    stacker_test!(parses_error_summary_command, "error_summary", json!({}), StackerCommand::ErrorSummary);
-    stacker_test!(parses_fetch_config_command, "fetch_config", json!({}), StackerCommand::FetchConfig);
-    stacker_test!(parses_apply_config_command, "apply_config", json!({}), StackerCommand::ApplyConfig);
-    stacker_test!(parses_deploy_app_command, "deploy_app", json!({
-        "deployment_hash": "testhash",
-        "app_code": "testapp",
-        "image": "testimage:latest",
-        "pull": true,
-        "force_recreate": false
-    }), StackerCommand::DeployApp);
+    stacker_test!(
+        parses_health_command,
+        "health",
+        json!({}),
+        StackerCommand::Health
+    );
+    stacker_test!(
+        parses_logs_command,
+        "logs",
+        json!({"container": "test"}),
+        StackerCommand::Logs
+    );
+    stacker_test!(
+        parses_restart_command,
+        "restart",
+        json!({"container": "test"}),
+        StackerCommand::Restart
+    );
+    stacker_test!(
+        parses_stop_command,
+        "stop",
+        json!({"container": "test"}),
+        StackerCommand::Stop
+    );
+    stacker_test!(
+        parses_start_command,
+        "start",
+        json!({"container": "test"}),
+        StackerCommand::Start
+    );
+    stacker_test!(
+        parses_error_summary_command,
+        "error_summary",
+        json!({}),
+        StackerCommand::ErrorSummary
+    );
+    stacker_test!(
+        parses_fetch_config_command,
+        "fetch_config",
+        json!({}),
+        StackerCommand::FetchConfig
+    );
+    stacker_test!(
+        parses_apply_config_command,
+        "apply_config",
+        json!({}),
+        StackerCommand::ApplyConfig
+    );
+    stacker_test!(
+        parses_deploy_app_command,
+        "deploy_app",
+        json!({
+            "deployment_hash": "testhash",
+            "app_code": "testapp",
+            "image": "testimage:latest",
+            "pull": true,
+            "force_recreate": false
+        }),
+        StackerCommand::DeployApp
+    );
 
     #[test]
     fn ignores_unknown_command() {
@@ -1901,10 +1999,10 @@ mod tests {
 #[cfg(test)]
 mod write_config_tests {
     use super::write_config_to_disk;
-    use tempfile::tempdir;
+    use crate::security::vault_client::AppConfig;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use crate::security::vault_client::AppConfig;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_write_config_to_disk_creates_file_and_sets_permissions() {
@@ -1920,7 +2018,9 @@ mod write_config_tests {
             group: None,
         };
 
-        write_config_to_disk(&config).await.expect("write should succeed");
+        write_config_to_disk(&config)
+            .await
+            .expect("write should succeed");
 
         println!("Test config written to: {}", file_path_str);
         // Pause for 10 seconds to allow manual inspection

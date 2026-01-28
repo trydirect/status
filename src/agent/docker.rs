@@ -518,7 +518,10 @@ pub async fn start(name: &str) -> Result<()> {
         .await
         .unwrap_or_else(|_| name.to_string());
     docker
-        .start_container(&resolved_name, None::<bollard::query_parameters::StartContainerOptions>)
+        .start_container(
+            &resolved_name,
+            None::<bollard::query_parameters::StartContainerOptions>,
+        )
         .await
         .context("start container")?;
     debug!("started container: {}", name);

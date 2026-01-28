@@ -34,6 +34,7 @@ struct VaultConfigData {
     #[serde(default)]
     data: HashMap<String, serde_json::Value>,
     #[serde(default)]
+    #[allow(dead_code)]
     metadata: Option<VaultConfigMetadata>,
 }
 
@@ -248,7 +249,7 @@ impl VaultClient {
     // =========================================================================
 
     /// Build the Vault path for app configuration.
-    /// 
+    ///
     /// Path template: {prefix}/{deployment_hash}/apps/{app_name}/config
     fn config_path(&self, deployment_hash: &str, app_name: &str) -> String {
         format!(
@@ -288,12 +289,14 @@ impl VaultClient {
             ));
         }
 
-        let vault_resp: VaultConfigResponse =
-            response.json().await.context("parsing Vault config response")?;
+        let vault_resp: VaultConfigResponse = response
+            .json()
+            .await
+            .context("parsing Vault config response")?;
 
         // Extract AppConfig from the data map
         let data = &vault_resp.data.data;
-        
+
         let content = data
             .get("content")
             .and_then(|v| v.as_str())
@@ -407,7 +410,10 @@ impl VaultClient {
 
         let response = self
             .http_client
-            .request(reqwest::Method::from_bytes(b"LIST").unwrap_or(reqwest::Method::GET), &url)
+            .request(
+                reqwest::Method::from_bytes(b"LIST").unwrap_or(reqwest::Method::GET),
+                &url,
+            )
             .header("X-Vault-Token", &self.token)
             .send()
             .await
@@ -462,11 +468,7 @@ impl VaultClient {
     /// Delete app configuration from Vault.
     ///
     /// Path: DELETE {base_url}/v1/{prefix}/{deployment_hash}/apps/{app_name}/config
-    pub async fn delete_app_config(
-        &self,
-        deployment_hash: &str,
-        app_name: &str,
-    ) -> Result<()> {
+    pub async fn delete_app_config(&self, deployment_hash: &str, app_name: &str) -> Result<()> {
         let url = self.config_path(deployment_hash, app_name);
 
         debug!("Deleting app config from Vault: {}", url);
@@ -488,7 +490,10 @@ impl VaultClient {
             );
         }
 
-        info!("Config deleted from Vault for {}/{}", deployment_hash, app_name);
+        info!(
+            "Config deleted from Vault for {}/{}",
+            deployment_hash, app_name
+        );
         Ok(())
     }
 
@@ -501,7 +506,7 @@ impl VaultClient {
         app_names: &[String],
     ) -> Result<HashMap<String, AppConfig>> {
         let mut configs = HashMap::new();
-        
+
         for app_name in app_names {
             match self.fetch_app_config(deployment_hash, app_name).await {
                 Ok(config) => {

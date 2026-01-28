@@ -284,12 +284,12 @@ async fn login_handler(
         let session_id = state.session_store.create_session(user).await;
         debug!("user logged in: {}", req.username);
         use axum::http::header::SET_COOKIE;
-        use axum::response::Response;
         if state.with_ui {
             // Set session cookie (HttpOnly, Secure if HTTPS)
             let cookie = format!("session_id={}; Path=/; HttpOnly", session_id);
             let mut resp = Redirect::to("/").into_response();
-            resp.headers_mut().append(SET_COOKIE, cookie.parse().unwrap());
+            resp.headers_mut()
+                .append(SET_COOKIE, cookie.parse().unwrap());
             Ok(resp)
         } else {
             Ok(Json(LoginResponse { session_id }).into_response())
@@ -350,14 +350,16 @@ async fn home(
     use crate::agent::docker;
     use axum::response::Redirect;
     // Extract session_id from real request cookies
-    let session_id = headers.get(axum::http::header::COOKIE).and_then(|cookie_header| {
-        cookie_header.to_str().ok().and_then(|cookie_str| {
-            cookie_str.split(';').find_map(|cookie| {
-                let cookie = cookie.trim();
-                cookie.strip_prefix("session_id=").map(|v| v.to_string())
+    let session_id = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|cookie_header| {
+            cookie_header.to_str().ok().and_then(|cookie_str| {
+                cookie_str.split(';').find_map(|cookie| {
+                    let cookie = cookie.trim();
+                    cookie.strip_prefix("session_id=").map(|v| v.to_string())
+                })
             })
-        })
-    });
+        });
     let valid_session = if let Some(ref sid) = session_id {
         state.session_store.get_session(sid).await.is_some()
     } else {
