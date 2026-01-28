@@ -343,34 +343,21 @@ async fn logout_handler(State(state): State<SharedState>) -> impl IntoResponse {
 
 // Get home (list containers, config)
 #[cfg(feature = "docker")]
-async fn home(State(state): State<SharedState>) -> impl IntoResponse {
+async fn home(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
     use crate::agent::docker;
-    use axum::http::header::COOKIE;
-    use axum::http::Request;
     use axum::response::Redirect;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    use axum::body::Body;
-    // use axum::RequestPartsExt;
-    // Extract session_id from Cookie header manually
-    let session_id = {
-        let mut sid: Option<String> = None;
-        // Build a dummy request to get headers (Axum 0.5 compatible workaround)
-        let req = Request::builder().body(Body::empty()).unwrap();
-        let headers = req.headers();
-        if let Some(cookie_header) = headers.get(COOKIE) {
-            if let Ok(cookie_str) = cookie_header.to_str() {
-                for cookie in cookie_str.split(';') {
-                    let cookie = cookie.trim();
-                    if let Some(rest) = cookie.strip_prefix("session_id=") {
-                        sid = Some(rest.to_string());
-                        break;
-                    }
-                }
-            }
-        }
-        sid
-    };
+    // Extract session_id from real request cookies
+    let session_id = headers.get(axum::http::header::COOKIE).and_then(|cookie_header| {
+        cookie_header.to_str().ok().and_then(|cookie_str| {
+            cookie_str.split(';').find_map(|cookie| {
+                let cookie = cookie.trim();
+                cookie.strip_prefix("session_id=").map(|v| v.to_string())
+            })
+        })
+    });
     let valid_session = if let Some(ref sid) = session_id {
         state.session_store.get_session(sid).await.is_some()
     } else {
