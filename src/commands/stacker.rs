@@ -1,39 +1,3 @@
-#[cfg(test)]
-mod write_config_tests {
-    use super::*;
-    use tempfile::tempdir;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use crate::security::vault_client::AppConfig;
-
-    #[tokio::test]
-    async fn test_write_config_to_disk_creates_file_and_sets_permissions() {
-        let dir = tempdir().unwrap();
-        let file_path = dir.path().join("test.conf");
-        let file_path_str = file_path.to_str().unwrap().to_string();
-        let config = AppConfig {
-            content: "key=value".to_string(),
-            content_type: "env".to_string(),
-            destination_path: file_path_str.clone(),
-            file_mode: "0600".to_string(),
-            owner: None,
-            group: None,
-        };
-
-        write_config_to_disk(&config).await.expect("write should succeed");
-
-        println!("Test config written to: {}", file_path_str);
-        // Pause for 10 seconds to allow manual inspection
-        std::thread::sleep(std::time::Duration::from_secs(10));
-
-        let written = fs::read_to_string(&file_path).expect("file should exist");
-        assert_eq!(written, "key=value");
-
-        let metadata = fs::metadata(&file_path).unwrap();
-        let mode = metadata.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-    }
-}
 use anyhow::{bail, Context, Result};
 #[cfg(feature = "docker")]
 use chrono::{SecondsFormat, Utc};
@@ -1931,5 +1895,42 @@ mod tests {
 
         let parsed = parse_stacker_command(&cmd).unwrap();
         assert!(parsed.is_none());
+    }
+}
+
+#[cfg(test)]
+mod write_config_tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use crate::security::vault_client::AppConfig;
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_creates_file_and_sets_permissions() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.conf");
+        let file_path_str = file_path.to_str().unwrap().to_string();
+        let config = AppConfig {
+            content: "key=value".to_string(),
+            content_type: "env".to_string(),
+            destination_path: file_path_str.clone(),
+            file_mode: "0600".to_string(),
+            owner: None,
+            group: None,
+        };
+
+        write_config_to_disk(&config).await.expect("write should succeed");
+
+        println!("Test config written to: {}", file_path_str);
+        // Pause for 10 seconds to allow manual inspection
+        std::thread::sleep(std::time::Duration::from_secs(10));
+
+        let written = fs::read_to_string(&file_path).expect("file should exist");
+        assert_eq!(written, "key=value");
+
+        let metadata = fs::metadata(&file_path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
