@@ -1996,7 +1996,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "docker"))]
 mod write_config_tests {
     use super::write_config_to_disk;
     use crate::security::vault_client::AppConfig;
