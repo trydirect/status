@@ -1843,23 +1843,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn parses_health_command() {
-        let cmd = AgentCommand {
-            id: "cmd-1".into(),
-            command_id: "cmd-1".into(),
-            name: "health".into(),
-            params: json!({
-                "deployment_hash": "dep",
-                "app_code": "web",
-            }),
-            deployment_hash: None,
-            app_code: None,
-        };
 
-        let parsed = parse_stacker_command(&cmd).unwrap();
-        assert!(matches!(parsed, Some(StackerCommand::Health(_))));
+
+    macro_rules! stacker_test {
+        ($name:ident, $cmd_name:expr, $payload:expr, $variant:path) => {
+            #[test]
+            fn $name() {
+                let cmd = AgentCommand {
+                    id: "cmd-test".into(),
+                    command_id: "cmd-test".into(),
+                    name: $cmd_name.into(),
+                    params: $payload,
+                    deployment_hash: Some("testhash".into()),
+                    app_code: Some("testapp".into()),
+                };
+                let parsed = parse_stacker_command(&cmd).unwrap();
+                match parsed {
+                    Some($variant(_)) => {},
+                    _ => panic!("Did not parse {} command correctly", $cmd_name),
+                }
+            }
+        };
     }
+
+    stacker_test!(parses_health_command, "health", json!({}), StackerCommand::Health);
+    stacker_test!(parses_logs_command, "logs", json!({"container": "test"}), StackerCommand::Logs);
+    stacker_test!(parses_restart_command, "restart", json!({"container": "test"}), StackerCommand::Restart);
+    stacker_test!(parses_stop_command, "stop", json!({"container": "test"}), StackerCommand::Stop);
+    stacker_test!(parses_start_command, "start", json!({"container": "test"}), StackerCommand::Start);
+    stacker_test!(parses_error_summary_command, "error_summary", json!({}), StackerCommand::ErrorSummary);
+    stacker_test!(parses_fetch_config_command, "fetch_config", json!({}), StackerCommand::FetchConfig);
+    stacker_test!(parses_apply_config_command, "apply_config", json!({}), StackerCommand::ApplyConfig);
+    stacker_test!(parses_deploy_app_command, "deploy_app", json!({
+        "deployment_hash": "testhash",
+        "app_code": "testapp",
+        "image": "testimage:latest",
+        "pull": true,
+        "force_recreate": false
+    }), StackerCommand::DeployApp);
 
     #[test]
     fn ignores_unknown_command() {
