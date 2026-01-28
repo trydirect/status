@@ -1501,7 +1501,7 @@ async fn handle_apply_config(
 
 /// Write config file to disk with proper permissions
 #[cfg(feature = "docker")]
-async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig) -> Result<()> {
+pub async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig) -> Result<()> {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -1900,7 +1900,7 @@ mod tests {
 
 #[cfg(test)]
 mod write_config_tests {
-    use super::*;
+    use super::write_config_to_disk;
     use tempfile::tempdir;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
