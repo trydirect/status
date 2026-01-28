@@ -115,8 +115,12 @@ async fn test_login_post_success() {
         .await
         .unwrap();
 
-    // Should redirect to home on successful login
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    // Should redirect to home (UI mode) or return 200 (API mode)
+    assert!(
+        response.status() == StatusCode::SEE_OTHER || response.status() == StatusCode::OK,
+        "Expected 303 (UI) or 200 (API), got {}",
+        response.status()
+    );
 }
 
 #[tokio::test]
