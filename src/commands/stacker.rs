@@ -34,6 +34,9 @@ pub enum StackerCommand {
     FetchConfig(FetchConfigCommand),
     ApplyConfig(ApplyConfigCommand),
     DeployApp(DeployAppCommand),
+    FetchAllConfigs(FetchAllConfigsCommand),
+    DeployWithConfigs(DeployWithConfigsCommand),
+    ConfigDiff(ConfigDiffCommand),
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -161,6 +164,56 @@ pub struct DeployAppCommand {
     force_recreate: bool,
 }
 
+/// Command to fetch all app configurations from Vault for a deployment
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct FetchAllConfigsCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    /// Optional: specific app codes to fetch (if empty, fetches all)
+    #[serde(default)]
+    app_codes: Vec<String>,
+    /// Whether to apply configs to disk after fetching
+    #[serde(default)]
+    apply: bool,
+    /// Whether to create a ZIP archive of all configs
+    #[serde(default)]
+    archive: bool,
+}
+
+/// Command to fetch configs and deploy an app in one operation
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeployWithConfigsCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+    /// Whether to pull the image before starting
+    #[serde(default = "default_true")]
+    pull: bool,
+    /// Whether to force recreate the container
+    #[serde(default)]
+    force_recreate: bool,
+    /// Whether to apply all project configs before deploying
+    #[serde(default = "default_true")]
+    apply_configs: bool,
+}
+
+/// Command to detect configuration drift between Vault and deployed files
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigDiffCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    /// Optional: specific app codes to check (if empty, checks all)
+    #[serde(default)]
+    app_codes: Vec<String>,
+    /// Whether to include full diff content in response
+    #[serde(default)]
+    include_diff: bool,
+}
+
 pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand>> {
     let normalized = cmd.name.trim().to_lowercase();
     match normalized.as_str() {
@@ -226,6 +279,27 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::DeployApp(payload)))
+        }
+        "fetch_all_configs" | "stacker.fetch_all_configs" => {
+            let payload: FetchAllConfigsCommand = serde_json::from_value(cmd.params.clone())
+                .context("invalid fetch_all_configs payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::FetchAllConfigs(payload)))
+        }
+        "deploy_with_configs" | "stacker.deploy_with_configs" => {
+            let payload: DeployWithConfigsCommand = serde_json::from_value(cmd.params.clone())
+                .context("invalid deploy_with_configs payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::DeployWithConfigs(payload)))
+        }
+        "config_diff" | "stacker.config_diff" => {
+            let payload: ConfigDiffCommand = serde_json::from_value(cmd.params.clone())
+                .context("invalid config_diff payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::ConfigDiff(payload)))
         }
         _ => Ok(None),
     }
@@ -584,6 +658,96 @@ impl DeployAppCommand {
     }
 }
 
+impl FetchAllConfigsCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_codes = self
+            .app_codes
+            .into_iter()
+            .map(|s| trimmed(&s))
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        Ok(())
+    }
+}
+
+impl DeployWithConfigsCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.app_code.is_empty() {
+            bail!("app_code is required");
+        }
+        Ok(())
+    }
+}
+
+impl ConfigDiffCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_codes = self
+            .app_codes
+            .into_iter()
+            .map(|s| trimmed(&s))
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        Ok(())
+    }
+}
+
 fn trimmed(value: &str) -> String {
     value.trim().to_string()
 }
@@ -661,6 +825,11 @@ async fn execute_with_docker(
         StackerCommand::FetchConfig(data) => handle_fetch_config(agent_cmd, data).await,
         StackerCommand::ApplyConfig(data) => handle_apply_config(agent_cmd, data).await,
         StackerCommand::DeployApp(data) => handle_deploy_app(agent_cmd, data).await,
+        StackerCommand::FetchAllConfigs(data) => handle_fetch_all_configs(agent_cmd, data).await,
+        StackerCommand::DeployWithConfigs(data) => {
+            handle_deploy_with_configs(agent_cmd, data).await
+        }
+        StackerCommand::ConfigDiff(data) => handle_config_diff(agent_cmd, data).await,
     }
 }
 
@@ -1598,9 +1767,9 @@ async fn handle_deploy_app(
     let mut errors: Vec<CommandError> = Vec::new();
 
     // Determine the compose working directory
-    // Standard TryDirect deployments use /home/deploy/<deployment_hash>
+    // Standard TryDirect deployments use /home/trydirect/<deployment_hash>
     let compose_dir = std::env::var("COMPOSE_PROJECT_DIR")
-        .unwrap_or_else(|_| format!("/home/deploy/{}", data.deployment_hash));
+        .unwrap_or_else(|_| format!("/home/trydirect/{}", data.app_code));
 
     // Check if compose file exists
     let compose_file = format!("{}/docker-compose.yml", compose_dir);
@@ -1810,6 +1979,477 @@ async fn handle_deploy_app(
     Ok(result)
 }
 
+/// Handle fetch_all_configs command - fetches all app configurations from Vault
+#[cfg(feature = "docker")]
+async fn handle_fetch_all_configs(
+    agent_cmd: &AgentCommand,
+    data: &FetchAllConfigsCommand,
+) -> Result<CommandResult> {
+    use crate::security::vault_client::VaultClient;
+
+    let mut result = base_result(agent_cmd, &data.deployment_hash, "", "fetch_all_configs");
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    // Initialize Vault client
+    let vault_client = match VaultClient::from_env() {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            let error = make_error(
+                "vault_not_configured",
+                "Vault client not configured. Set VAULT_ADDRESS, VAULT_TOKEN, and VAULT_AGENT_PATH_PREFIX.",
+                None,
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+        Err(e) => {
+            let error = make_error(
+                "vault_init_failed",
+                "Failed to initialize Vault client",
+                Some(e.to_string()),
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
+    // Get list of apps to fetch - either from command or from Vault
+    let app_codes: Vec<String> = if data.app_codes.is_empty() {
+        // List all apps from Vault
+        match vault_client.list_app_configs(&data.deployment_hash).await {
+            Ok(apps) => apps,
+            Err(e) => {
+                let error = make_error(
+                    "list_configs_failed",
+                    "Failed to list app configs from Vault",
+                    Some(e.to_string()),
+                );
+                result.status = "failed".into();
+                result.error = Some(error.message.clone());
+                result.errors = Some(vec![error]);
+                return Ok(result);
+            }
+        }
+    } else {
+        data.app_codes.clone()
+    };
+
+    tracing::info!(
+        deployment_hash = %data.deployment_hash,
+        app_count = app_codes.len(),
+        "Fetching all app configs from Vault"
+    );
+
+    // Fetch all configs
+    let configs = vault_client
+        .fetch_all_app_configs(&data.deployment_hash, &app_codes)
+        .await
+        .unwrap_or_default();
+
+    let fetched_count = configs.len();
+    let mut applied_count = 0;
+    let mut config_summaries: Vec<serde_json::Value> = Vec::new();
+
+    // Apply configs to disk if requested
+    for (app_code, config) in &configs {
+        let summary = json!({
+            "app_code": app_code,
+            "content_type": config.content_type,
+            "destination_path": config.destination_path,
+            "content_length": config.content.len(),
+        });
+        config_summaries.push(summary);
+
+        if data.apply {
+            match write_config_to_disk(config).await {
+                Ok(()) => {
+                    applied_count += 1;
+                    tracing::info!(
+                        app_code = %app_code,
+                        destination = %config.destination_path,
+                        "Config applied to disk"
+                    );
+                }
+                Err(e) => {
+                    errors.push(make_error(
+                        "config_write_failed",
+                        format!("Failed to write config for {}", app_code),
+                        Some(e.to_string()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Create archive if requested
+    let archive_path = if data.archive && !configs.is_empty() {
+        let archive_dir = format!("/tmp/configs_{}", data.deployment_hash);
+        let archive_file = format!("{}.tar.gz", archive_dir);
+
+        // Create temp directory
+        std::fs::create_dir_all(&archive_dir).ok();
+
+        // Write configs to temp directory
+        for (app_code, config) in &configs {
+            let file_path = format!("{}/{}", archive_dir, app_code);
+            if let Err(e) = std::fs::write(&file_path, &config.content) {
+                tracing::warn!(
+                    app_code = %app_code,
+                    error = %e,
+                    "Failed to write config to archive temp dir"
+                );
+            }
+        }
+
+        // Create tar.gz archive
+        let tar_result = std::process::Command::new("tar")
+            .args([
+                "-czf",
+                &archive_file,
+                "-C",
+                "/tmp",
+                &format!("configs_{}", data.deployment_hash),
+            ])
+            .output();
+
+        match tar_result {
+            Ok(output) if output.status.success() => {
+                // Clean up temp directory
+                std::fs::remove_dir_all(&archive_dir).ok();
+                Some(archive_file)
+            }
+            _ => {
+                errors.push(make_error(
+                    "archive_failed",
+                    "Failed to create config archive",
+                    None,
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let body = json!({
+        "type": "fetch_all_configs",
+        "deployment_hash": data.deployment_hash.clone(),
+        "fetched_count": fetched_count,
+        "applied_count": applied_count,
+        "requested_count": app_codes.len(),
+        "configs": config_summaries,
+        "archive_path": archive_path,
+        "fetched_at": now_timestamp(),
+    });
+
+    result.result = Some(body);
+    if !errors.is_empty() {
+        result.errors = Some(errors);
+    }
+
+    Ok(result)
+}
+
+/// Handle deploy_with_configs command - fetch configs then deploy the app
+#[cfg(feature = "docker")]
+async fn handle_deploy_with_configs(
+    agent_cmd: &AgentCommand,
+    data: &DeployWithConfigsCommand,
+) -> Result<CommandResult> {
+    use crate::security::vault_client::VaultClient;
+
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "deploy_with_configs",
+    );
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    // Step 1: Fetch and apply configs if requested
+    if data.apply_configs {
+        tracing::info!(
+            deployment_hash = %data.deployment_hash,
+            app_code = %data.app_code,
+            "Fetching and applying configs before deployment"
+        );
+
+        let vault_client = match VaultClient::from_env() {
+            Ok(Some(client)) => Some(client),
+            _ => {
+                errors.push(make_error(
+                    "vault_warning",
+                    "Vault not configured, skipping config fetch",
+                    None,
+                ));
+                None
+            }
+        };
+
+        if let Some(vault) = vault_client {
+            // Fetch compose config first (_compose special key)
+            match vault
+                .fetch_app_config(&data.deployment_hash, "_compose")
+                .await
+            {
+                Ok(compose_config) => {
+                    if let Err(e) = write_config_to_disk(&compose_config).await {
+                        errors.push(make_error(
+                            "compose_write_warning",
+                            "Failed to write docker-compose.yml",
+                            Some(e.to_string()),
+                        ));
+                    } else {
+                        tracing::info!("docker-compose.yml updated from Vault");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        "No compose config found in Vault (using existing)"
+                    );
+                }
+            }
+
+            // Fetch app-specific config
+            match vault
+                .fetch_app_config(&data.deployment_hash, &data.app_code)
+                .await
+            {
+                Ok(app_config) => {
+                    if let Err(e) = write_config_to_disk(&app_config).await {
+                        errors.push(make_error(
+                            "config_write_warning",
+                            format!("Failed to write config for {}", data.app_code),
+                            Some(e.to_string()),
+                        ));
+                    } else {
+                        tracing::info!(
+                            app_code = %data.app_code,
+                            "App config updated from Vault"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        app_code = %data.app_code,
+                        error = %e,
+                        "No app config found in Vault (continuing with deployment)"
+                    );
+                }
+            }
+        }
+    }
+
+    // Step 2: Deploy the app using the existing deploy_app handler
+    let deploy_cmd = DeployAppCommand {
+        deployment_hash: data.deployment_hash.clone(),
+        app_code: data.app_code.clone(),
+        image: None,
+        env_vars: None,
+        pull: data.pull,
+        force_recreate: data.force_recreate,
+    };
+
+    let deploy_result = handle_deploy_app(agent_cmd, &deploy_cmd).await?;
+
+    // Merge results
+    result.status = deploy_result.status;
+    result.error = deploy_result.error;
+
+    // Combine our config errors with deploy errors
+    if let Some(deploy_errors) = deploy_result.errors {
+        errors.extend(deploy_errors);
+    }
+
+    // Build combined result body
+    let mut body = deploy_result.result.unwrap_or_else(|| json!({}));
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("type".into(), json!("deploy_with_configs"));
+        obj.insert("configs_applied".into(), json!(data.apply_configs));
+    }
+
+    result.result = Some(body);
+    if !errors.is_empty() {
+        result.errors = Some(errors);
+    }
+
+    Ok(result)
+}
+
+/// Handle config_diff command - detect configuration drift between Vault and deployed files
+#[cfg(feature = "docker")]
+async fn handle_config_diff(
+    agent_cmd: &AgentCommand,
+    data: &ConfigDiffCommand,
+) -> Result<CommandResult> {
+    use crate::security::vault_client::VaultClient;
+    use sha2::{Digest, Sha256};
+
+    let mut result = base_result(agent_cmd, &data.deployment_hash, "", "config_diff");
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    // Initialize Vault client
+    let vault_client = match VaultClient::from_env() {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            let error = make_error(
+                "vault_not_configured",
+                "Vault client not configured. Set VAULT_ADDRESS, VAULT_TOKEN, and VAULT_AGENT_PATH_PREFIX.",
+                None,
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+        Err(e) => {
+            let error = make_error(
+                "vault_init_failed",
+                "Failed to initialize Vault client",
+                Some(e.to_string()),
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
+    // Get list of apps to check
+    let app_codes: Vec<String> = if data.app_codes.is_empty() {
+        match vault_client.list_app_configs(&data.deployment_hash).await {
+            Ok(apps) => apps,
+            Err(e) => {
+                let error = make_error(
+                    "list_configs_failed",
+                    "Failed to list app configs from Vault",
+                    Some(e.to_string()),
+                );
+                result.status = "failed".into();
+                result.error = Some(error.message.clone());
+                result.errors = Some(vec![error]);
+                return Ok(result);
+            }
+        }
+    } else {
+        data.app_codes.clone()
+    };
+
+    tracing::info!(
+        deployment_hash = %data.deployment_hash,
+        app_count = app_codes.len(),
+        "Checking config drift for apps"
+    );
+
+    let mut diffs: Vec<serde_json::Value> = Vec::new();
+    let mut synced_count = 0;
+    let mut drifted_count = 0;
+    let mut missing_count = 0;
+
+    for app_code in &app_codes {
+        // Fetch expected config from Vault
+        let vault_config = match vault_client
+            .fetch_app_config(&data.deployment_hash, app_code)
+            .await
+        {
+            Ok(config) => config,
+            Err(e) => {
+                errors.push(make_error(
+                    "vault_fetch_failed",
+                    format!("Failed to fetch config for {} from Vault", app_code),
+                    Some(e.to_string()),
+                ));
+                continue;
+            }
+        };
+
+        // Read deployed config from disk
+        let deployed_content = std::fs::read_to_string(&vault_config.destination_path).ok();
+
+        // Compute hashes for comparison
+        let vault_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(vault_config.content.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+
+        let (deployed_hash, status, diff_content) = match &deployed_content {
+            Some(content) => {
+                let mut hasher = Sha256::new();
+                hasher.update(content.as_bytes());
+                let hash = format!("{:x}", hasher.finalize());
+
+                if hash == vault_hash {
+                    synced_count += 1;
+                    (Some(hash), "synced", None)
+                } else {
+                    drifted_count += 1;
+                    let diff = if data.include_diff {
+                        // Simple line-by-line diff
+                        let vault_lines: Vec<&str> = vault_config.content.lines().collect();
+                        let deployed_lines: Vec<&str> = content.lines().collect();
+                        Some(json!({
+                            "vault_lines": vault_lines.len(),
+                            "deployed_lines": deployed_lines.len(),
+                            "vault_preview": vault_config.content.chars().take(500).collect::<String>(),
+                            "deployed_preview": content.chars().take(500).collect::<String>(),
+                        }))
+                    } else {
+                        None
+                    };
+                    (Some(hash), "drifted", diff)
+                }
+            }
+            None => {
+                missing_count += 1;
+                (None, "missing", None)
+            }
+        };
+
+        let mut diff_entry = json!({
+            "app_code": app_code,
+            "status": status,
+            "destination_path": vault_config.destination_path,
+            "vault_hash": vault_hash,
+            "deployed_hash": deployed_hash,
+        });
+
+        if let Some(diff) = diff_content {
+            diff_entry["diff"] = diff;
+        }
+
+        diffs.push(diff_entry);
+    }
+
+    let has_drift = drifted_count > 0 || missing_count > 0;
+
+    let body = json!({
+        "type": "config_diff",
+        "deployment_hash": data.deployment_hash.clone(),
+        "has_drift": has_drift,
+        "summary": {
+            "total": app_codes.len(),
+            "synced": synced_count,
+            "drifted": drifted_count,
+            "missing": missing_count,
+        },
+        "configs": diffs,
+        "checked_at": now_timestamp(),
+    });
+
+    result.result = Some(body);
+    if !errors.is_empty() {
+        result.errors = Some(errors);
+    }
+
+    Ok(result)
+}
+
 #[cfg(feature = "docker")]
 fn build_metrics(container: &docker::ContainerHealth) -> Value {
     json!({
@@ -1978,6 +2618,36 @@ mod tests {
             "force_recreate": false
         }),
         StackerCommand::DeployApp
+    );
+    stacker_test!(
+        parses_fetch_all_configs_command,
+        "fetch_all_configs",
+        json!({
+            "deployment_hash": "testhash",
+            "apply": true,
+            "archive": false
+        }),
+        StackerCommand::FetchAllConfigs
+    );
+    stacker_test!(
+        parses_deploy_with_configs_command,
+        "deploy_with_configs",
+        json!({
+            "deployment_hash": "testhash",
+            "app_code": "testapp",
+            "pull": true,
+            "apply_configs": true
+        }),
+        StackerCommand::DeployWithConfigs
+    );
+    stacker_test!(
+        parses_config_diff_command,
+        "config_diff",
+        json!({
+            "deployment_hash": "testhash",
+            "include_diff": true
+        }),
+        StackerCommand::ConfigDiff
     );
 
     #[test]

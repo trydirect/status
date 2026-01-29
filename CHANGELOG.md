@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-01-29
+### Added - Unified Configuration Management Commands
+
+#### New Stacker Commands (`commands/stacker.rs`)
+- `FetchAllConfigs` / `stacker.fetch_all_configs`: Bulk fetch all app configs from Vault
+  - Parameters: deployment_hash, app_codes (optional - fetch all if empty), apply, archive
+  - Lists all available configs via Vault LIST operation
+  - Optionally writes all configs to disk
+  - Optionally creates tar.gz archive of all configs
+  - Returns detailed summary with fetched/applied counts
+
+- `DeployWithConfigs` / `stacker.deploy_with_configs`: Unified config+deploy operation
+  - Parameters: deployment_hash, app_code, pull, force_recreate, apply_configs
+  - Fetches docker-compose.yml from Vault (_compose key) and app-specific .env
+  - Writes configs to disk before deployment
+  - Delegates to existing deploy_app handler for container orchestration
+  - Combines config and deploy results in single response
+
+- `ConfigDiff` / `stacker.config_diff`: Detect configuration drift
+  - Parameters: deployment_hash, app_codes (optional), include_diff
+  - Compares SHA256 hashes of Vault configs vs deployed files
+  - Reports status: synced, drifted, or missing for each app
+  - Optionally includes line counts and content previews for drifted configs
+  - Summary with total/synced/drifted/missing counts
+
+#### Command Infrastructure
+- Added normalize/validate/with_command_context for all new commands
+- Integrated all new commands into execute_with_docker dispatch
+- Added test cases for command parsing
+
 ## 2026-01-23
 ### Added - Vault Configuration Management
 

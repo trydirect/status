@@ -23,17 +23,83 @@ fn print_banner() {
         "disabled"
     };
 
+    // Gather runtime/config info
+    let dashboard_url =
+        std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "http://localhost:5000".to_string());
+    let vault_url =
+        std::env::var("VAULT_ADDRESS").unwrap_or_else(|_| "(not configured)".to_string());
+    let agent_token = std::env::var("AGENT_TOKEN").unwrap_or_default();
+    let vault_enabled = std::env::var("VAULT_ADDRESS").is_ok();
+    let agent_id = std::env::var("AGENT_ID").unwrap_or_else(|_| "(not set)".to_string());
+    let control_plane =
+        std::env::var("CONTROL_PLANE").unwrap_or_else(|_| "status_panel".to_string());
+    let compose_mode =
+        std::env::var("COMPOSE_AGENT_ENABLED").unwrap_or_else(|_| "false".to_string());
+    let debug_mode = if cfg!(debug_assertions) {
+        "ENABLED"
+    } else {
+        "disabled"
+    };
+
+    // Try to get base_url from domain in config.json, fallback to dashboard_url
+    let base_url = match std::fs::read_to_string("config.json") {
+        Ok(cfg) => {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&cfg) {
+                json.get("domain")
+                    .and_then(|d| d.as_str())
+                    .map(|s| format!("https://{}", s))
+                    .unwrap_or_else(|| dashboard_url.clone())
+            } else {
+                dashboard_url.clone()
+            }
+        }
+        Err(_) => dashboard_url.clone(),
+    };
+
+    let stacker_status = if !agent_token.is_empty() {
+        if vault_enabled {
+            "Vault+Token: OK"
+        } else {
+            "Token: OK (Vault: not configured)"
+        }
+    } else if vault_enabled {
+        "Vault: configured, but AGENT_TOKEN missing"
+    } else {
+        "No agent token (auth will fail)"
+    };
+
+    let mode = if std::env::args().any(|a| a == "serve") {
+        if std::env::args().any(|a| a == "--with-ui") {
+            "API+UI Server"
+        } else {
+            "API Server"
+        }
+    } else if std::env::args().any(|a| a == "--daemon") {
+        "Daemon (background)"
+    } else if control_plane == "compose_agent" || compose_mode == "true" {
+        "Compose Agent Daemon"
+    } else {
+        "Status Panel Daemon"
+    };
+
     eprintln!();
-    eprintln!("╔══════════════════════════════════════════════════════════╗");
-    eprintln!("║          Status Panel (TryDirect Agent)                  ║");
-    eprintln!("╠══════════════════════════════════════════════════════════╣");
-    eprintln!("║  Version:      {:<42}║", VERSION);
-    eprintln!("║  Package:      {:<42}║", PKG_NAME);
-    eprintln!("║  Rust:         {:<42}║", rust_version);
-    eprintln!("║  Build:        {:<42}║", build_profile);
-    eprintln!("║  Docker:       {:<42}║", docker_feature);
-    eprintln!("║  PID:          {:<42}║", std::process::id());
-    eprintln!("╚══════════════════════════════════════════════════════════╝");
+    eprintln!("╔════════════════════════════════════════════════════════════════════════════════════════════╗");
+    eprintln!("║  Status Panel (TryDirect Agent)                                                         ║");
+    eprintln!("╠════════════════════════════════════════════════════════════════════════════════════════════╣");
+    eprintln!("║  Version:         {:<66}║", VERSION);
+    eprintln!("║  Package:         {:<66}║", PKG_NAME);
+    eprintln!("║  Rust:            {:<66}║", rust_version);
+    eprintln!("║  Build:           {:<66}║", build_profile);
+    eprintln!("║  Docker:          {:<66}║", docker_feature);
+    eprintln!("║  PID:             {:<66}║", std::process::id());
+    eprintln!("║  Mode:            {:<66}║", mode);
+    eprintln!("║  Dashboard URL:   {:<66}║", dashboard_url);
+    eprintln!("║  Base URL:        {:<66}║", base_url);
+    eprintln!("║  Vault URL:       {:<66}║", vault_url);
+    eprintln!("║  Agent ID:        {:<66}║", agent_id);
+    eprintln!("║  Stacker/Auth:    {:<66}║", stacker_status);
+    eprintln!("║  Debug Mode:      {:<66}║", debug_mode);
+    eprintln!("╚════════════════════════════════════════════════════════════════════════════════════════════╝");
     eprintln!();
 }
 
