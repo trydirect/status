@@ -34,6 +34,7 @@ pub enum StackerCommand {
     FetchConfig(FetchConfigCommand),
     ApplyConfig(ApplyConfigCommand),
     DeployApp(DeployAppCommand),
+    RemoveApp(RemoveAppCommand),
     FetchAllConfigs(FetchAllConfigsCommand),
     DeployWithConfigs(DeployWithConfigsCommand),
     ConfigDiff(ConfigDiffCommand),
@@ -164,6 +165,22 @@ pub struct DeployAppCommand {
     force_recreate: bool,
 }
 
+/// Command to remove an app container and associated config
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoveAppCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+    #[serde(default = "default_true")]
+    delete_config: bool,
+    #[serde(default)]
+    remove_volumes: bool,
+    #[serde(default)]
+    remove_image: bool,
+}
+
 /// Command to fetch all app configurations from Vault for a deployment
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
@@ -279,6 +296,13 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::DeployApp(payload)))
+        }
+        "remove_app" | "stacker.remove_app" => {
+            let payload: RemoveAppCommand =
+                serde_json::from_value(cmd.params.clone()).context("invalid remove_app payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::RemoveApp(payload)))
         }
         "fetch_all_configs" | "stacker.fetch_all_configs" => {
             let payload: FetchAllConfigsCommand = serde_json::from_value(cmd.params.clone())
@@ -658,6 +682,38 @@ impl DeployAppCommand {
     }
 }
 
+impl RemoveAppCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.app_code.is_empty() {
+            bail!("app_code is required");
+        }
+        Ok(())
+    }
+}
+
 impl FetchAllConfigsCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
@@ -753,6 +809,26 @@ fn trimmed(value: &str) -> String {
 }
 
 #[cfg(feature = "docker")]
+fn resolve_compose_paths(deployment_hash: &str, app_code: &str) -> (String, String) {
+    use std::path::Path;
+
+    if let Ok(dir) = std::env::var("COMPOSE_PROJECT_DIR") {
+        let file = format!("{}/docker-compose.yml", dir);
+        return (dir, file);
+    }
+
+    let hash_dir = format!("/home/trydirect/{}", deployment_hash);
+    let hash_file = format!("{}/docker-compose.yml", hash_dir);
+    if Path::new(&hash_file).exists() {
+        return (hash_dir, hash_file);
+    }
+
+    let app_dir = format!("/home/trydirect/{}", app_code);
+    let app_file = format!("{}/docker-compose.yml", app_dir);
+    (app_dir, app_file)
+}
+
+#[cfg(feature = "docker")]
 fn base_result(
     agent_cmd: &AgentCommand,
     deployment_hash: &str,
@@ -825,6 +901,7 @@ async fn execute_with_docker(
         StackerCommand::FetchConfig(data) => handle_fetch_config(agent_cmd, data).await,
         StackerCommand::ApplyConfig(data) => handle_apply_config(agent_cmd, data).await,
         StackerCommand::DeployApp(data) => handle_deploy_app(agent_cmd, data).await,
+        StackerCommand::RemoveApp(data) => handle_remove_app(agent_cmd, data).await,
         StackerCommand::FetchAllConfigs(data) => handle_fetch_all_configs(agent_cmd, data).await,
         StackerCommand::DeployWithConfigs(data) => {
             handle_deploy_with_configs(agent_cmd, data).await
@@ -1768,11 +1845,9 @@ async fn handle_deploy_app(
 
     // Determine the compose working directory
     // Standard TryDirect deployments use /home/trydirect/<deployment_hash>
-    let compose_dir = std::env::var("COMPOSE_PROJECT_DIR")
-        .unwrap_or_else(|_| format!("/home/trydirect/{}", data.app_code));
+    let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
 
     // Check if compose file exists
-    let compose_file = format!("{}/docker-compose.yml", compose_dir);
     if !std::path::Path::new(&compose_file).exists() {
         let error = make_error(
             "compose_not_found",
@@ -1974,6 +2049,144 @@ async fn handle_deploy_app(
             result.result = Some(body);
             result.errors = Some(errors);
         }
+    }
+
+    Ok(result)
+}
+
+/// Handle remove_app command - stop and remove a service container and purge config
+#[cfg(feature = "docker")]
+async fn handle_remove_app(
+    agent_cmd: &AgentCommand,
+    data: &RemoveAppCommand,
+) -> Result<CommandResult> {
+    use std::path::Path;
+    use tokio::process::Command;
+
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "remove_app",
+    );
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
+
+    if !Path::new(&compose_file).exists() {
+        let error = make_error(
+            "compose_not_found",
+            format!("docker-compose.yml not found at {}", compose_file),
+            None,
+        );
+        result.status = "failed".into();
+        result.error = Some(error.message.clone());
+        result.errors = Some(vec![error]);
+        return Ok(result);
+    }
+
+    // Best-effort stop before removal
+    let _ = Command::new("docker")
+        .arg("compose")
+        .arg("-f")
+        .arg(&compose_file)
+        .arg("stop")
+        .arg(&data.app_code)
+        .current_dir(&compose_dir)
+        .output()
+        .await;
+
+    let mut rm_cmd = Command::new("docker");
+    rm_cmd
+        .arg("compose")
+        .arg("-f")
+        .arg(&compose_file)
+        .arg("rm")
+        .arg("-f");
+    if data.remove_volumes {
+        rm_cmd.arg("-v");
+    }
+    rm_cmd.arg(&data.app_code).current_dir(&compose_dir);
+
+    let mut removal_error: Option<CommandError> = None;
+    match rm_cmd.output().await {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                removal_error = Some(make_error(
+                    "remove_failed",
+                    format!("docker compose rm failed: {}", stderr.trim()),
+                    None,
+                ));
+            }
+        }
+        Err(err) => {
+            removal_error = Some(make_error(
+                "remove_exec_failed",
+                format!("Failed to execute docker compose rm: {}", err),
+                None,
+            ));
+        }
+    }
+
+    if data.delete_config {
+        match crate::security::vault_client::VaultClient::from_env() {
+            Ok(Some(client)) => {
+                if let Err(err) = client
+                    .delete_app_config(&data.deployment_hash, &data.app_code)
+                    .await
+                {
+                    errors.push(make_error(
+                        "vault_cleanup_failed",
+                        "App removed but failed to delete config from Vault",
+                        Some(err.to_string()),
+                    ));
+                }
+            }
+            Ok(None) => {
+                errors.push(make_error(
+                    "vault_not_configured",
+                    "Vault client not configured; skipped config cleanup",
+                    None,
+                ));
+            }
+            Err(err) => {
+                errors.push(make_error(
+                    "vault_init_failed",
+                    "Failed to initialize Vault client for cleanup",
+                    Some(err.to_string()),
+                ));
+            }
+        }
+    }
+
+    if data.remove_image {
+        let _ = Command::new("docker")
+            .arg("image")
+            .arg("rm")
+            .arg(&data.app_code)
+            .output()
+            .await;
+    }
+
+    if let Some(err) = removal_error.clone() {
+        errors.push(err.clone());
+        result.status = "failed".into();
+        result.error = Some(err.message.clone());
+    }
+
+    let body = json!({
+        "type": "remove_app",
+        "deployment_hash": data.deployment_hash.clone(),
+        "app_code": data.app_code.clone(),
+        "status": if removal_error.is_some() { "failed" } else { "removed" },
+        "removed_at": now_timestamp(),
+        "errors": if errors.is_empty() { json!(null) } else { errors_value(&errors) },
+    });
+
+    result.result = Some(body);
+    if !errors.is_empty() {
+        result.errors = Some(errors);
     }
 
     Ok(result)
