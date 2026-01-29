@@ -151,6 +151,10 @@ pub struct DeployAppCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    /// Optional: docker-compose.yml content (generated from J2 template)
+    /// If provided, will be written to disk before deploying
+    #[serde(default)]
+    compose_content: Option<String>,
     /// Optional: specific image to use (overrides compose file)
     #[serde(default)]
     image: Option<String>,
@@ -1847,6 +1851,47 @@ async fn handle_deploy_app(
     // Standard TryDirect deployments use /home/trydirect/<deployment_hash>
     let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
 
+    // If compose_content is provided, write it to disk (for new deployments)
+    if let Some(compose_content) = &data.compose_content {
+        tracing::info!(
+            deployment_hash = %data.deployment_hash,
+            app_code = %data.app_code,
+            compose_dir = %compose_dir,
+            "Writing docker-compose.yml from command payload"
+        );
+
+        // Create the directory if it doesn't exist
+        if let Err(e) = tokio::fs::create_dir_all(&compose_dir).await {
+            let error = make_error(
+                "dir_create_failed",
+                format!("Failed to create directory {}: {}", compose_dir, e),
+                None,
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+
+        // Write the compose file
+        if let Err(e) = tokio::fs::write(&compose_file, compose_content).await {
+            let error = make_error(
+                "compose_write_failed",
+                format!("Failed to write docker-compose.yml: {}", e),
+                None,
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+
+        tracing::info!(
+            compose_file = %compose_file,
+            "docker-compose.yml written successfully"
+        );
+    }
+
     // Check if compose file exists
     if !std::path::Path::new(&compose_file).exists() {
         let error = make_error(
@@ -2462,6 +2507,7 @@ async fn handle_deploy_with_configs(
     let deploy_cmd = DeployAppCommand {
         deployment_hash: data.deployment_hash.clone(),
         app_code: data.app_code.clone(),
+        compose_content: None, // Compose already written in step 1 from Vault
         image: None,
         env_vars: None,
         pull: data.pull,
