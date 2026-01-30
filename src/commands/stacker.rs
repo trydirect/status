@@ -832,6 +832,69 @@ fn resolve_compose_paths(deployment_hash: &str, app_code: &str) -> (String, Stri
     (app_dir, app_file)
 }
 
+/// Represents which compose command variant is available on the system.
+#[cfg(feature = "docker")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ComposeVariant {
+    /// Docker Compose V2 plugin: `docker compose`
+    Plugin,
+    /// Standalone docker-compose binary: `docker-compose`
+    Standalone,
+}
+
+/// Detect which docker compose variant is available on the system.
+/// Tries `docker compose version` first (plugin), then `docker-compose version` (standalone).
+/// Result is cached for the lifetime of the process.
+#[cfg(feature = "docker")]
+pub async fn detect_compose_variant() -> Option<ComposeVariant> {
+    use tokio::process::Command;
+
+    static COMPOSE_VARIANT: OnceLock<Option<ComposeVariant>> = OnceLock::new();
+
+    // Return cached result if available
+    if let Some(variant) = COMPOSE_VARIANT.get() {
+        return *variant;
+    }
+
+    // Try docker compose (plugin) first
+    let plugin_result = Command::new("docker")
+        .arg("compose")
+        .arg("version")
+        .output()
+        .await;
+
+    if let Ok(output) = plugin_result {
+        if output.status.success() {
+            let _ = COMPOSE_VARIANT.set(Some(ComposeVariant::Plugin));
+            return Some(ComposeVariant::Plugin);
+        }
+    }
+
+    // Try docker-compose (standalone) as fallback
+    let standalone_result = Command::new("docker-compose").arg("version").output().await;
+
+    if let Ok(output) = standalone_result {
+        if output.status.success() {
+            let _ = COMPOSE_VARIANT.set(Some(ComposeVariant::Standalone));
+            return Some(ComposeVariant::Standalone);
+        }
+    }
+
+    // Neither is available
+    let _ = COMPOSE_VARIANT.set(None);
+    None
+}
+
+/// Build a compose command with the correct binary/syntax based on what's available.
+/// Returns (command_program, initial_args) where initial_args should be prepended to actual args.
+#[cfg(feature = "docker")]
+pub fn build_compose_command(variant: ComposeVariant) -> (String, Vec<String>) {
+    match variant {
+        ComposeVariant::Plugin => ("docker".to_string(), vec!["compose".to_string()]),
+        ComposeVariant::Standalone => ("docker-compose".to_string(), vec![]),
+    }
+}
+
 #[cfg(feature = "docker")]
 fn base_result(
     agent_cmd: &AgentCommand,
@@ -1905,6 +1968,30 @@ async fn handle_deploy_app(
         return Ok(result);
     }
 
+    // Detect which compose variant is available (docker compose or docker-compose)
+    let compose_variant = match detect_compose_variant().await {
+        Some(variant) => {
+            tracing::debug!(
+                variant = ?variant,
+                "Using compose variant"
+            );
+            variant
+        }
+        None => {
+            let error = make_error(
+                "compose_not_available",
+                "Neither 'docker compose' (plugin) nor 'docker-compose' (standalone) is available on this system",
+                Some("Install Docker Compose plugin with: apt-get install docker-compose-plugin".to_string()),
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
+    let (compose_program, compose_base_args) = build_compose_command(compose_variant);
+
     // Step 1: Pull the image if requested
     if data.pull {
         tracing::info!(
@@ -1913,8 +2000,11 @@ async fn handle_deploy_app(
             "Pulling docker image for service"
         );
 
-        let pull_result = Command::new("docker")
-            .arg("compose")
+        let mut pull_cmd = Command::new(&compose_program);
+        for arg in &compose_base_args {
+            pull_cmd.arg(arg);
+        }
+        let pull_result = pull_cmd
             .arg("-f")
             .arg(&compose_file)
             .arg("pull")
@@ -1953,8 +2043,11 @@ async fn handle_deploy_app(
             "Force recreating: stopping existing container"
         );
 
-        let _ = Command::new("docker")
-            .arg("compose")
+        let mut stop_cmd = Command::new(&compose_program);
+        for arg in &compose_base_args {
+            stop_cmd.arg(arg);
+        }
+        let _ = stop_cmd
             .arg("-f")
             .arg(&compose_file)
             .arg("stop")
@@ -1963,8 +2056,11 @@ async fn handle_deploy_app(
             .output()
             .await;
 
-        let _ = Command::new("docker")
-            .arg("compose")
+        let mut rm_cmd = Command::new(&compose_program);
+        for arg in &compose_base_args {
+            rm_cmd.arg(arg);
+        }
+        let _ = rm_cmd
             .arg("-f")
             .arg(&compose_file)
             .arg("rm")
@@ -1983,9 +2079,11 @@ async fn handle_deploy_app(
         "Deploying service with docker compose"
     );
 
-    let mut compose_cmd = Command::new("docker");
+    let mut compose_cmd = Command::new(&compose_program);
+    for arg in &compose_base_args {
+        compose_cmd.arg(arg);
+    }
     compose_cmd
-        .arg("compose")
         .arg("-f")
         .arg(&compose_file)
         .arg("up")
@@ -2130,9 +2228,29 @@ async fn handle_remove_app(
         return Ok(result);
     }
 
+    // Detect which compose variant is available
+    let compose_variant = match detect_compose_variant().await {
+        Some(variant) => variant,
+        None => {
+            let error = make_error(
+                "compose_not_available",
+                "Neither 'docker compose' (plugin) nor 'docker-compose' (standalone) is available",
+                None,
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+    let (compose_program, compose_base_args) = build_compose_command(compose_variant);
+
     // Best-effort stop before removal
-    let _ = Command::new("docker")
-        .arg("compose")
+    let mut stop_cmd = Command::new(&compose_program);
+    for arg in &compose_base_args {
+        stop_cmd.arg(arg);
+    }
+    let _ = stop_cmd
         .arg("-f")
         .arg(&compose_file)
         .arg("stop")
@@ -2141,13 +2259,11 @@ async fn handle_remove_app(
         .output()
         .await;
 
-    let mut rm_cmd = Command::new("docker");
-    rm_cmd
-        .arg("compose")
-        .arg("-f")
-        .arg(&compose_file)
-        .arg("rm")
-        .arg("-f");
+    let mut rm_cmd = Command::new(&compose_program);
+    for arg in &compose_base_args {
+        rm_cmd.arg(arg);
+    }
+    rm_cmd.arg("-f").arg(&compose_file).arg("rm").arg("-f");
     if data.remove_volumes {
         rm_cmd.arg("-v");
     }

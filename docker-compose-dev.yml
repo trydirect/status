@@ -10,6 +10,9 @@ services:
      - .:/app
      - /var/run/docker.sock:/var/run/docker.sock
      - /data/encrypted:/data/encrypted
+     # Mount docker CLI from host for deploy_app/remove_app commands
+     - /usr/bin/docker:/usr/bin/docker:ro
+     - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
     env_file:
       - .env
     environment:

@@ -27,6 +27,9 @@ services:
     volumes:
      # Agent needs Docker socket for container monitoring and logs
      - /var/run/docker.sock:/var/run/docker.sock
+     # Mount docker CLI from host for deploy_app/remove_app commands
+     - /usr/bin/docker:/usr/bin/docker:ro
+     - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
     env_file:
       - .env
     environment:
@@ -46,6 +49,9 @@ services:
     volumes:
      # Compose agent has exclusive Docker socket access for operations
      - /var/run/docker.sock:/var/run/docker.sock
+     # Mount docker CLI from host for compose commands
+     - /usr/bin/docker:/usr/bin/docker:ro
+     - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
      - .:/app
     env_file:
       - .env
