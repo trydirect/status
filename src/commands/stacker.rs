@@ -167,6 +167,9 @@ pub struct DeployAppCommand {
     /// Whether to remove existing container before deploying
     #[serde(default)]
     force_recreate: bool,
+    /// Optional: config files to write before deploying (uses existing AppConfig struct)
+    #[serde(default)]
+    config_files: Option<Vec<crate::security::vault_client::AppConfig>>,
 }
 
 /// Command to remove an app container and associated config
@@ -1955,6 +1958,25 @@ async fn handle_deploy_app(
         );
     }
 
+    // Write config files if provided (e.g., telegraf.conf, nginx.conf, etc.)
+    if let Some(config_files) = &data.config_files {
+        for config in config_files {
+            tracing::info!(
+                app_code = %data.app_code,
+                destination = %config.destination_path,
+                "Writing config file from command payload"
+            );
+            if let Err(e) = write_config_to_disk(config).await {
+                errors.push(make_error(
+                    "config_write_warning",
+                    format!("Failed to write config file {}: {}", config.destination_path, e),
+                    None,
+                ));
+                // Continue with other configs, don't fail entirely
+            }
+        }
+    }
+
     // Check if compose file exists
     if !std::path::Path::new(&compose_file).exists() {
         let error = make_error(
@@ -2628,6 +2650,7 @@ async fn handle_deploy_with_configs(
         env_vars: None,
         pull: data.pull,
         force_recreate: data.force_recreate,
+        config_files: None, // Configs already written in step 1 from Vault
     };
 
     let deploy_result = handle_deploy_app(agent_cmd, &deploy_cmd).await?;
