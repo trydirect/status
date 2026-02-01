@@ -3172,7 +3172,7 @@ async fn handle_configure_proxy(
     agent_cmd: &AgentCommand,
     data: &ConfigureProxyCommand,
 ) -> Result<CommandResult> {
-    use reqwest::Client;
+    use crate::connectors::npm::{NpmClient, ProxyHostRequest};
 
     let mut result = base_result(
         agent_cmd,
@@ -3181,7 +3181,7 @@ async fn handle_configure_proxy(
         "configure_proxy",
     );
 
-    // NPM connection settings with defaults
+    // Create NPM client with provided or default credentials
     let npm_host = data.npm_host.clone().unwrap_or_else(|| {
         std::env::var("NPM_HOST").unwrap_or_else(|_| "http://nginx-proxy-manager:81".to_string())
     });
@@ -3192,60 +3192,7 @@ async fn handle_configure_proxy(
         std::env::var("NPM_PASSWORD").unwrap_or_else(|_| "changeme".to_string())
     });
 
-    let client = Client::new();
-
-    // Step 1: Authenticate with NPM
-    tracing::info!(
-        npm_host = %npm_host,
-        action = %data.action,
-        domains = ?data.domain_names,
-        "Authenticating with Nginx Proxy Manager"
-    );
-
-    let token_response = match client
-        .post(format!("{}/api/tokens", npm_host))
-        .json(&json!({
-            "identity": npm_email,
-            "secret": npm_password
-        }))
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            let error = make_error(
-                "npm_connection_failed",
-                "Failed to connect to Nginx Proxy Manager",
-                Some(e.to_string()),
-            );
-            result.status = "error".to_string();
-            result.error = Some(error.message.clone());
-            return Ok(result);
-        }
-    };
-
-    if !token_response.status().is_success() {
-        let status = token_response.status();
-        let body = token_response.text().await.unwrap_or_default();
-        let error = make_error(
-            "npm_auth_failed",
-            format!("NPM authentication failed: {} - {}", status, body),
-            None,
-        );
-        result.status = "error".to_string();
-        result.error = Some(error.message.clone());
-        return Ok(result);
-    }
-
-    let token_data: Value = token_response
-        .json()
-        .await
-        .context("Failed to parse NPM token response")?;
-    let token = token_data["token"]
-        .as_str()
-        .context("No token in NPM response")?;
-
-    tracing::debug!("NPM authentication successful");
+    let mut npm_client = NpmClient::with_credentials(npm_host, npm_email, npm_password);
 
     // Determine forward_host (default to app_code if not specified)
     let forward_host = data
@@ -3255,58 +3202,25 @@ async fn handle_configure_proxy(
 
     match data.action.as_str() {
         "create" | "update" => {
-            // Step 2: Create/Update proxy host
-            let certificate_id: Value = if data.ssl_enabled {
-                json!("new")
-            } else {
-                Value::Null
+            let request = ProxyHostRequest {
+                domain_names: data.domain_names.clone(),
+                forward_host: forward_host.clone(),
+                forward_port: data.forward_port,
+                ssl_enabled: data.ssl_enabled,
+                ssl_forced: data.ssl_forced,
+                http2_support: data.http2_support,
             };
-            let proxy_host_payload = json!({
-                "domain_names": data.domain_names,
-                "forward_scheme": "http",
-                "forward_host": forward_host,
-                "forward_port": data.forward_port,
-                "certificate_id": certificate_id,
-                "ssl_forced": data.ssl_forced,
-                "http2_support": data.http2_support,
-                "block_exploits": true,
-                "allow_websocket_upgrade": true,
-                "access_list_id": 0,
-                "meta": {
-                    "letsencrypt_agree": true,
-                    "dns_challenge": false
-                },
-                "locations": []
-            });
 
-            tracing::info!(
-                forward_host = %forward_host,
-                forward_port = %data.forward_port,
-                ssl = %data.ssl_enabled,
-                "Creating/updating proxy host in NPM"
-            );
-
-            let create_response = client
-                .post(format!("{}/api/nginx/proxy-hosts", npm_host))
-                .header("Authorization", format!("Bearer {}", token))
-                .json(&proxy_host_payload)
-                .send()
-                .await;
-
-            match create_response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body: Value = resp.json().await.unwrap_or(json!({}));
-
-                    if status.is_success() {
-                        tracing::info!(proxy_host_id = ?body["id"], "Proxy host created successfully");
+            match npm_client.create_proxy_host(&request).await {
+                Ok(proxy_result) => {
+                    if proxy_result.success {
                         result.result = Some(json!({
                             "type": "configure_proxy",
                             "action": data.action,
                             "deployment_hash": data.deployment_hash,
                             "app_code": data.app_code,
                             "status": "success",
-                            "proxy_host_id": body["id"],
+                            "proxy_host_id": proxy_result.proxy_host_id,
                             "domain_names": data.domain_names,
                             "forward_host": forward_host,
                             "forward_port": data.forward_port,
@@ -3314,119 +3228,44 @@ async fn handle_configure_proxy(
                             "created_at": now_timestamp(),
                         }));
                     } else {
-                        let error = make_error(
-                            "npm_create_failed",
-                            format!("Failed to create proxy host: {} - {:?}", status, body),
-                            None,
-                        );
+                        let error = make_error("npm_create_failed", &proxy_result.message, None);
                         result.status = "error".to_string();
                         result.error = Some(error.message.clone());
                     }
                 }
                 Err(e) => {
-                    let error = make_error(
-                        "npm_request_failed",
-                        "Failed to send request to NPM",
-                        Some(e.to_string()),
-                    );
+                    let error =
+                        make_error("npm_error", "NPM operation failed", Some(e.to_string()));
                     result.status = "error".to_string();
                     result.error = Some(error.message.clone());
                 }
             }
         }
-        "delete" => {
-            // Step 2: Find existing proxy host by domain
-            let list_response = client
-                .get(format!("{}/api/nginx/proxy-hosts", npm_host))
-                .header("Authorization", format!("Bearer {}", token))
-                .send()
-                .await;
-
-            match list_response {
-                Ok(resp) => {
-                    let hosts: Vec<Value> = resp.json().await.unwrap_or_default();
-
-                    // Find the proxy host with matching domain
-                    let matching_host = hosts.iter().find(|host| {
-                        if let Some(domains) = host["domain_names"].as_array() {
-                            domains.iter().any(|d| {
-                                data.domain_names
-                                    .iter()
-                                    .any(|target| d.as_str().map(|s| s == target).unwrap_or(false))
-                            })
-                        } else {
-                            false
-                        }
-                    });
-
-                    if let Some(host) = matching_host {
-                        let host_id = host["id"].as_i64().unwrap_or(0);
-
-                        // Delete the proxy host
-                        let delete_resp = client
-                            .delete(format!("{}/api/nginx/proxy-hosts/{}", npm_host, host_id))
-                            .header("Authorization", format!("Bearer {}", token))
-                            .send()
-                            .await;
-
-                        match delete_resp {
-                            Ok(resp) if resp.status().is_success() => {
-                                tracing::info!(proxy_host_id = %host_id, "Proxy host deleted successfully");
-                                result.result = Some(json!({
-                                    "type": "configure_proxy",
-                                    "action": "delete",
-                                    "deployment_hash": data.deployment_hash,
-                                    "app_code": data.app_code,
-                                    "status": "success",
-                                    "deleted_proxy_host_id": host_id,
-                                    "deleted_at": now_timestamp(),
-                                }));
-                            }
-                            Ok(resp) => {
-                                let status = resp.status();
-                                let body = resp.text().await.unwrap_or_default();
-                                let error = make_error(
-                                    "npm_delete_failed",
-                                    format!("Failed to delete proxy host: {} - {}", status, body),
-                                    None,
-                                );
-                                result.status = "error".to_string();
-                                result.error = Some(error.message.clone());
-                            }
-                            Err(e) => {
-                                let error = make_error(
-                                    "npm_request_failed",
-                                    "Failed to send delete request to NPM",
-                                    Some(e.to_string()),
-                                );
-                                result.status = "error".to_string();
-                                result.error = Some(error.message.clone());
-                            }
-                        }
-                    } else {
-                        // No matching proxy host found - consider it success (idempotent)
-                        tracing::warn!(domains = ?data.domain_names, "No matching proxy host found to delete");
-                        result.result = Some(json!({
-                            "type": "configure_proxy",
-                            "action": "delete",
-                            "deployment_hash": data.deployment_hash,
-                            "app_code": data.app_code,
-                            "status": "success",
-                            "message": "No matching proxy host found (already deleted?)",
-                        }));
-                    }
-                }
-                Err(e) => {
-                    let error = make_error(
-                        "npm_list_failed",
-                        "Failed to list proxy hosts from NPM",
-                        Some(e.to_string()),
-                    );
+        "delete" => match npm_client.delete_proxy_host(&data.domain_names).await {
+            Ok(proxy_result) => {
+                if proxy_result.success {
+                    result.result = Some(json!({
+                        "type": "configure_proxy",
+                        "action": "delete",
+                        "deployment_hash": data.deployment_hash,
+                        "app_code": data.app_code,
+                        "status": "success",
+                        "deleted_proxy_host_id": proxy_result.proxy_host_id,
+                        "message": proxy_result.message,
+                        "deleted_at": now_timestamp(),
+                    }));
+                } else {
+                    let error = make_error("npm_delete_failed", &proxy_result.message, None);
                     result.status = "error".to_string();
                     result.error = Some(error.message.clone());
                 }
             }
-        }
+            Err(e) => {
+                let error = make_error("npm_error", "NPM operation failed", Some(e.to_string()));
+                result.status = "error".to_string();
+                result.error = Some(error.message.clone());
+            }
+        },
         _ => {
             let error = make_error(
                 "invalid_action",
