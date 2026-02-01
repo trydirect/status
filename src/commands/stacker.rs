@@ -49,6 +49,9 @@ pub struct HealthCommand {
     app_code: String,
     #[serde(default = "default_true")]
     include_metrics: bool,
+    /// When true and app_code is "system" or empty, return system containers (status_panel, compose-agent)
+    #[serde(default)]
+    include_system: bool,
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -1008,6 +1011,49 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         }
     };
 
+    // Handle system containers request (status_panel, compose-agent, etc.)
+    if data.include_system && (data.app_code.is_empty() || data.app_code == "system") {
+        let system_patterns = [
+            "status",
+            "status_panel",
+            "status-panel",
+            "compose-agent",
+            "compose_agent",
+        ];
+        let system_containers: Vec<_> = containers
+            .iter()
+            .filter(|c| {
+                let name = c.name.trim_start_matches('/').to_lowercase();
+                system_patterns.iter().any(|p| name.contains(p))
+            })
+            .collect();
+
+        let mut system_list = Vec::new();
+        for entry in &system_containers {
+            let container_state = map_container_state(&entry.status).to_string();
+            let mut item = json!({
+                "app_code": entry.name.trim_start_matches('/'),
+                "container_name": entry.name.trim_start_matches('/'),
+                "container_state": container_state,
+                "status": derive_health_status(&container_state, false),
+            });
+            if data.include_metrics {
+                item["metrics"] = build_metrics(entry);
+            }
+            system_list.push(item);
+        }
+
+        let body = json!({
+            "type": "system_health",
+            "deployment_hash": data.deployment_hash.clone(),
+            "status": "ok",
+            "last_heartbeat_at": now_timestamp(),
+            "system_containers": system_list,
+        });
+        result.result = Some(body);
+        return Ok(result);
+    }
+
     let container = containers
         .iter()
         .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
@@ -1869,6 +1915,19 @@ pub async fn write_config_to_disk(config: &crate::security::vault_client::AppCon
 
     let path = Path::new(&config.destination_path);
 
+    // Check if the destination path exists as a directory (Docker sometimes creates these)
+    // If so, remove it first so we can write the file
+    if path.exists() && path.is_dir() {
+        tracing::warn!(
+            path = %config.destination_path,
+            "Destination path exists as directory, removing it to write file"
+        );
+        fs::remove_dir_all(path).context(format!(
+            "Failed to remove directory at file destination: {}",
+            config.destination_path
+        ))?;
+    }
+
     // Create parent directories if needed
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context(format!("Failed to create directory: {:?}", parent))?;
@@ -1969,7 +2028,10 @@ async fn handle_deploy_app(
             if let Err(e) = write_config_to_disk(config).await {
                 errors.push(make_error(
                     "config_write_warning",
-                    format!("Failed to write config file {}: {}", config.destination_path, e),
+                    format!(
+                        "Failed to write config file {}: {}",
+                        config.destination_path, e
+                    ),
                     None,
                 ));
                 // Continue with other configs, don't fail entirely
@@ -2026,11 +2088,12 @@ async fn handle_deploy_app(
         for arg in &compose_base_args {
             pull_cmd.arg(arg);
         }
+        // Don't specify service name - pull ALL services defined in compose file
+        // The compose file may have services with different names than app_code
         let pull_result = pull_cmd
             .arg("-f")
             .arg(&compose_file)
             .arg("pull")
-            .arg(&data.app_code)
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -2065,6 +2128,8 @@ async fn handle_deploy_app(
             "Force recreating: stopping existing container"
         );
 
+        // Don't specify service name - stop ALL services defined in compose file
+        // The compose file may have services with different names than app_code
         let mut stop_cmd = Command::new(&compose_program);
         for arg in &compose_base_args {
             stop_cmd.arg(arg);
@@ -2073,7 +2138,6 @@ async fn handle_deploy_app(
             .arg("-f")
             .arg(&compose_file)
             .arg("stop")
-            .arg(&data.app_code)
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -2087,7 +2151,6 @@ async fn handle_deploy_app(
             .arg(&compose_file)
             .arg("rm")
             .arg("-f")
-            .arg(&data.app_code)
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -2105,13 +2168,14 @@ async fn handle_deploy_app(
     for arg in &compose_base_args {
         compose_cmd.arg(arg);
     }
+    // Don't specify service name - deploy ALL services defined in compose file
+    // The compose file may have services with different names than app_code
+    // Also removed --no-deps since we want all services to start properly
     compose_cmd
         .arg("-f")
         .arg(&compose_file)
         .arg("up")
         .arg("-d")
-        .arg("--no-deps") // Don't start linked services
-        .arg(&data.app_code)
         .current_dir(&compose_dir);
 
     // Add environment variables if provided
