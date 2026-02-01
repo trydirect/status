@@ -1906,6 +1906,123 @@ async fn handle_apply_config(
     Ok(result)
 }
 
+/// Parse compose content and ensure all referenced env_file paths exist
+/// Creates empty files if they don't exist to prevent docker compose failures
+#[cfg(feature = "docker")]
+async fn ensure_env_files_exist(
+    compose_content: &str,
+    compose_dir: &str,
+    errors: &mut Vec<CommandError>,
+) {
+    use regex::Regex;
+    use std::path::Path;
+
+    // Match env_file entries in compose - handles both single file and list format
+    // Examples:
+    //   env_file: .env
+    //   env_file: "/path/to/.env"
+    //   env_file:
+    //     - .env
+    //     - "/path/to/other.env"
+    let env_file_pattern = Regex::new(r#"env_file:\s*\n?\s*-?\s*["']?([^"'\n]+)["']?"#)
+        .unwrap_or_else(|_| {
+            // Fallback simple pattern
+            Regex::new(r#"env_file:\s*["']?([^"'\n]+)["']?"#).unwrap()
+        });
+
+    // Also match list items under env_file:
+    let list_item_pattern = Regex::new(r#"^\s*-\s*["']?([^"'\n]+)["']?\s*$"#).unwrap();
+
+    let mut env_files: Vec<String> = Vec::new();
+
+    // Find all env_file references
+    for cap in env_file_pattern.captures_iter(compose_content) {
+        if let Some(file_match) = cap.get(1) {
+            let file_path = file_match.as_str().trim();
+            if !file_path.is_empty() && !file_path.starts_with('-') {
+                env_files.push(file_path.to_string());
+            }
+        }
+    }
+
+    // Also scan for list items following env_file:
+    let mut in_env_file_section = false;
+    for line in compose_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("env_file:") {
+            in_env_file_section = true;
+            // Check for inline value
+            let after_colon = trimmed.strip_prefix("env_file:").unwrap_or("").trim();
+            if !after_colon.is_empty() && !after_colon.starts_with('-') {
+                let clean = after_colon.trim_matches(|c| c == '"' || c == '\'');
+                if !clean.is_empty() {
+                    env_files.push(clean.to_string());
+                }
+            }
+        } else if in_env_file_section {
+            if let Some(cap) = list_item_pattern.captures(trimmed) {
+                if let Some(file_match) = cap.get(1) {
+                    env_files.push(file_match.as_str().trim().to_string());
+                }
+            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                // End of env_file section
+                in_env_file_section = false;
+            }
+        }
+    }
+
+    // Deduplicate
+    env_files.sort();
+    env_files.dedup();
+
+    // Ensure each env file exists
+    for env_file in env_files {
+        let full_path = if env_file.starts_with('/') {
+            env_file.clone()
+        } else {
+            format!("{}/{}", compose_dir, env_file)
+        };
+
+        let path = Path::new(&full_path);
+
+        if !path.exists() {
+            tracing::warn!(
+                env_file = %full_path,
+                "Compose references env_file that doesn't exist, creating empty file"
+            );
+
+            // Create parent directories if needed
+            if let Some(parent) = path.parent() {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    errors.push(make_error(
+                        "env_file_dir_warning",
+                        format!(
+                            "Failed to create directory for env file {}: {}",
+                            full_path, e
+                        ),
+                        None,
+                    ));
+                    continue;
+                }
+            }
+
+            // Create empty env file
+            if let Err(e) = tokio::fs::write(&full_path, "# Auto-created empty env file\n").await {
+                errors.push(make_error(
+                    "env_file_create_warning",
+                    format!("Failed to create empty env file {}: {}", full_path, e),
+                    None,
+                ));
+            } else {
+                tracing::info!(
+                    env_file = %full_path,
+                    "Created empty env file to prevent compose failure"
+                );
+            }
+        }
+    }
+}
+
 /// Write config file to disk with proper permissions
 #[cfg(feature = "docker")]
 pub async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig) -> Result<()> {
@@ -2072,6 +2189,12 @@ async fn handle_deploy_app(
                 );
             }
         }
+    }
+
+    // If compose_content references env_file, ensure those files exist
+    // This prevents docker compose from failing due to missing env files
+    if let Some(compose_content) = &data.compose_content {
+        ensure_env_files_exist(compose_content, &compose_dir, &mut errors).await;
     }
 
     // Check if compose file exists
