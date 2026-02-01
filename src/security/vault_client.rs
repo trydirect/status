@@ -469,7 +469,8 @@ impl VaultClient {
     //
     // ## Security Model
     //
-    // App configs are stored under: {prefix}/{deployment_hash}/apps/{app_name}/config
+    // App configs are stored under: {prefix}/{deployment_hash}/apps/{app_code}/{config_type}
+    // Where config_type is "_compose" for docker-compose.yml or "_config" for app-specific configs
     //
     // This path structure ensures:
     // - Each deployment's configs are isolated from others
@@ -480,16 +481,30 @@ impl VaultClient {
     ///
     /// ## Path Template
     ///
-    /// `{base_url}/v1/{prefix}/{deployment_hash}/apps/{app_name}/config`
+    /// `{base_url}/v1/{prefix}/{deployment_hash}/apps/{app_code}/{config_type}`
     ///
     /// This creates a hierarchical structure where:
     /// - `deployment_hash` isolates tenants
-    /// - `apps/` groups all app configs
-    /// - `{app_name}/config` stores the specific app's configuration
+    /// - `apps/{app_code}/` groups all configs for an app
+    /// - `{config_type}` is "_compose" or "_config"
+    ///
+    /// ## app_name format
+    /// - "telegraf" -> apps/telegraf/_compose
+    /// - "telegraf_config" -> apps/telegraf/_config
+    /// - "_compose" -> apps/_compose/_compose (legacy global compose)
     fn config_path(&self, deployment_hash: &str, app_name: &str) -> String {
+        // Parse app_name to determine app_code and config_type
+        let (app_code, config_type) = if app_name == "_compose" {
+            ("_compose", "_compose")
+        } else if let Some(app_code) = app_name.strip_suffix("_config") {
+            (app_code, "_config")
+        } else {
+            (app_name, "_compose")
+        };
+
         format!(
-            "{}/v1/{}/{}/apps/{}/config",
-            self.base_url, self.prefix, deployment_hash, app_name
+            "{}/v1/{}/{}/apps/{}/{}",
+            self.base_url, self.prefix, deployment_hash, app_code, config_type
         )
     }
 

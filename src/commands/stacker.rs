@@ -2039,6 +2039,41 @@ async fn handle_deploy_app(
         }
     }
 
+    // Write .env file from env_vars if provided
+    // This handles the case where compose uses env_file: .env
+    if let Some(env_vars) = &data.env_vars {
+        if !env_vars.is_empty() {
+            let env_file_path = format!("{}/.env", compose_dir);
+            tracing::info!(
+                app_code = %data.app_code,
+                env_file = %env_file_path,
+                var_count = env_vars.len(),
+                "Writing .env file from env_vars"
+            );
+
+            // Generate .env content (KEY=VALUE format)
+            let env_content: String = env_vars
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if let Err(e) = tokio::fs::write(&env_file_path, &env_content).await {
+                errors.push(make_error(
+                    "env_file_warning",
+                    format!("Failed to write .env file: {}", e),
+                    None,
+                ));
+                // Continue anyway - compose might work without it
+            } else {
+                tracing::info!(
+                    env_file = %env_file_path,
+                    ".env file written successfully"
+                );
+            }
+        }
+    }
+
     // Check if compose file exists
     if !std::path::Path::new(&compose_file).exists() {
         let error = make_error(

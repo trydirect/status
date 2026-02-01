@@ -30,6 +30,8 @@ services:
      # Mount docker CLI from host for deploy_app/remove_app commands
      - /usr/bin/docker:/usr/bin/docker:ro
      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
+     # Mount host path for compose and config files
+     - /home/trydirect:/home/trydirect
     env_file:
       - .env
     environment:
