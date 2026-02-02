@@ -1,5 +1,66 @@
 # Changelog
 
+## 2026-02-02
+### Added - Container Exec & Server Resources Commands
+
+#### New Stacker Commands (`commands/stacker.rs`)
+- `ExecCommand` / `stacker.exec`: Execute commands inside running containers
+  - Parameters: deployment_hash, app_code, command, timeout (1-120s)
+  - **Security**: Blocks dangerous commands (rm -rf /, mkfs, dd if, shutdown, reboot, poweroff, halt, init 0/6, fork bombs)
+  - Case-insensitive pattern matching for security blocks
+  - Returns exit_code, stdout, stderr (output redacted for secrets)
+  - Comprehensive test suite with 27 security tests
+
+- `ServerResourcesCommand` / `stacker.server_resources`: Collect server metrics
+  - Parameters: deployment_hash, include_disk, include_network, include_processes
+  - Uses MetricsCollector for CPU, memory, disk, network, and process info
+  - Returns structured JSON with system resource data
+
+- `ListContainersCommand` / `stacker.list_containers`: List deployment containers
+  - Parameters: deployment_hash, include_health, include_logs, log_lines (1-1000)
+  - Returns container list with status, health info, and optional recent logs
+
+#### Docker Module Updates (`agent/docker.rs`)
+- Added `exec_in_container_with_output()`: Execute commands and capture stdout/stderr separately
+  - Creates exec instance, starts with output capture
+  - Waits for completion and inspects exit code
+  - Returns structured (exit_code, stdout, stderr) tuple
+
+#### Test Coverage
+- `exec_command_security_tests`: 27 tests covering blocked commands, validation, timeout clamping
+- `server_resources_command_tests`: 3 tests for parsing and validation
+- `list_containers_command_tests`: 3 tests for parsing and log_lines clamping
+
+## 2026-01-29
+### Added - Unified Configuration Management Commands
+
+#### New Stacker Commands (`commands/stacker.rs`)
+- `FetchAllConfigs` / `stacker.fetch_all_configs`: Bulk fetch all app configs from Vault
+  - Parameters: deployment_hash, app_codes (optional - fetch all if empty), apply, archive
+  - Lists all available configs via Vault LIST operation
+  - Optionally writes all configs to disk
+  - Optionally creates tar.gz archive of all configs
+  - Returns detailed summary with fetched/applied counts
+
+- `DeployWithConfigs` / `stacker.deploy_with_configs`: Unified config+deploy operation
+  - Parameters: deployment_hash, app_code, pull, force_recreate, apply_configs
+  - Fetches docker-compose.yml from Vault (_compose key) and app-specific .env
+  - Writes configs to disk before deployment
+  - Delegates to existing deploy_app handler for container orchestration
+  - Combines config and deploy results in single response
+
+- `ConfigDiff` / `stacker.config_diff`: Detect configuration drift
+  - Parameters: deployment_hash, app_codes (optional), include_diff
+  - Compares SHA256 hashes of Vault configs vs deployed files
+  - Reports status: synced, drifted, or missing for each app
+  - Optionally includes line counts and content previews for drifted configs
+  - Summary with total/synced/drifted/missing counts
+
+#### Command Infrastructure
+- Added normalize/validate/with_command_context for all new commands
+- Integrated all new commands into execute_with_docker dispatch
+- Added test cases for command parsing
+
 ## 2026-01-23
 ### Added - Vault Configuration Management
 

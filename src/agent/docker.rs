@@ -618,3 +618,82 @@ pub async fn exec_in_container(name: &str, cmd: &str) -> Result<()> {
         Err(anyhow::anyhow!("exec failed with code {}", exit_code))
     }
 }
+
+/// Execute a shell command inside a running container and return output.
+/// Returns (exit_code, stdout, stderr) tuple.
+pub async fn exec_in_container_with_output(name: &str, cmd: &str) -> Result<(i64, String, String)> {
+    use bollard::exec::StartExecResults;
+    use futures_util::StreamExt;
+
+    let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+
+    // Create exec instance
+    let exec = docker
+        .create_exec(
+            &resolved_name,
+            CreateExecOptions {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(false),
+                cmd: Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    cmd.to_string(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("create exec")?;
+
+    // Start exec and capture output
+    let start = docker
+        .start_exec(&exec.id, None)
+        .await
+        .context("start exec")?;
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+
+    match start {
+        StartExecResults::Detached => {
+            debug!(container = name, command = cmd, "exec detached");
+        }
+        StartExecResults::Attached { mut output, .. } => {
+            while let Some(item) = output.next().await {
+                match item {
+                    Ok(LogOutput::StdOut { message }) => {
+                        stdout.push_str(&String::from_utf8_lossy(&message));
+                    }
+                    Ok(LogOutput::StdErr { message }) => {
+                        stderr.push_str(&String::from_utf8_lossy(&message));
+                    }
+                    Ok(LogOutput::Console { message }) => {
+                        stdout.push_str(&String::from_utf8_lossy(&message));
+                    }
+                    Ok(LogOutput::StdIn { .. }) => {}
+                    Err(e) => error!("exec output stream error: {}", e),
+                }
+            }
+        }
+    }
+
+    // Inspect exec to get exit code
+    let info = docker
+        .inspect_exec(&exec.id)
+        .await
+        .context("inspect exec")?;
+    let exit_code = info.exit_code.unwrap_or_default();
+
+    debug!(
+        container = name,
+        command = cmd,
+        exit_code,
+        "exec completed with output"
+    );
+
+    Ok((exit_code, stdout, stderr))
+}
