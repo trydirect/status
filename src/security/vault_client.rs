@@ -490,12 +490,18 @@ impl VaultClient {
     ///
     /// ## app_name format
     /// - "telegraf" -> apps/telegraf/_compose
+    /// - "telegraf_env" -> apps/telegraf/_env
     /// - "telegraf_config" -> apps/telegraf/_config
+    /// - "telegraf_configs" -> apps/telegraf/_configs
     /// - "_compose" -> apps/_compose/_compose (legacy global compose)
     fn config_path(&self, deployment_hash: &str, app_name: &str) -> String {
         // Parse app_name to determine app_code and config_type
         let (app_code, config_type) = if app_name == "_compose" {
             ("_compose", "_compose")
+        } else if let Some(app_code) = app_name.strip_suffix("_env") {
+            (app_code, "_env")
+        } else if let Some(app_code) = app_name.strip_suffix("_configs") {
+            (app_code, "_configs")
         } else if let Some(app_code) = app_name.strip_suffix("_config") {
             (app_code, "_config")
         } else {
