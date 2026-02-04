@@ -347,91 +347,93 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
     let normalized = cmd.name.trim().to_lowercase();
     match normalized.as_str() {
         "health" | "stacker.health" => {
-            let payload: HealthCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid health payload")?;
+            let payload: HealthCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid health payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Health(payload)))
         }
         "logs" | "stacker.logs" => {
-            let payload: LogsCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid logs payload")?;
+            let payload: LogsCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid logs payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Logs(payload)))
         }
         "restart" | "stacker.restart" => {
-            let payload: RestartCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid restart payload")?;
+            let payload: RestartCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid restart payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Restart(payload)))
         }
         "stop" | "stacker.stop" => {
-            let payload: StopCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid stop payload")?;
+            let payload: StopCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid stop payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Stop(payload)))
         }
         "start" | "stacker.start" => {
-            let payload: StartCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid start payload")?;
+            let payload: StartCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid start payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::Start(payload)))
         }
         "error_summary" | "stacker.error_summary" => {
-            let payload: ErrorSummaryCommand = serde_json::from_value(cmd.params.clone())
+            let payload: ErrorSummaryCommand = serde_json::from_value(unwrap_params(&cmd.params))
                 .context("invalid error_summary payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::ErrorSummary(payload)))
         }
         "fetch_config" | "stacker.fetch_config" => {
-            let payload: FetchConfigCommand = serde_json::from_value(cmd.params.clone())
+            let payload: FetchConfigCommand = serde_json::from_value(unwrap_params(&cmd.params))
                 .context("invalid fetch_config payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::FetchConfig(payload)))
         }
         "apply_config" | "stacker.apply_config" => {
-            let payload: ApplyConfigCommand = serde_json::from_value(cmd.params.clone())
+            let payload: ApplyConfigCommand = serde_json::from_value(unwrap_params(&cmd.params))
                 .context("invalid apply_config payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::ApplyConfig(payload)))
         }
         "deploy_app" | "stacker.deploy_app" => {
-            let payload: DeployAppCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid deploy_app payload")?;
+            let payload: DeployAppCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid deploy_app payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::DeployApp(payload)))
         }
         "remove_app" | "stacker.remove_app" => {
-            let payload: RemoveAppCommand =
-                serde_json::from_value(cmd.params.clone()).context("invalid remove_app payload")?;
+            let payload: RemoveAppCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid remove_app payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::RemoveApp(payload)))
         }
         "fetch_all_configs" | "stacker.fetch_all_configs" => {
-            let payload: FetchAllConfigsCommand = serde_json::from_value(cmd.params.clone())
-                .context("invalid fetch_all_configs payload")?;
+            let payload: FetchAllConfigsCommand =
+                serde_json::from_value(unwrap_params(&cmd.params))
+                    .context("invalid fetch_all_configs payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::FetchAllConfigs(payload)))
         }
         "deploy_with_configs" | "stacker.deploy_with_configs" => {
-            let payload: DeployWithConfigsCommand = serde_json::from_value(cmd.params.clone())
-                .context("invalid deploy_with_configs payload")?;
+            let payload: DeployWithConfigsCommand =
+                serde_json::from_value(unwrap_params(&cmd.params))
+                    .context("invalid deploy_with_configs payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::DeployWithConfigs(payload)))
         }
         "config_diff" | "stacker.config_diff" => {
-            let payload: ConfigDiffCommand = serde_json::from_value(cmd.params.clone())
+            let payload: ConfigDiffCommand = serde_json::from_value(unwrap_params(&cmd.params))
                 .context("invalid config_diff payload")?;
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
