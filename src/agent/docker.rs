@@ -65,12 +65,56 @@ fn docker_client() -> Result<Docker> {
 
 fn name_matches(container_name: &str, app_code: &str) -> bool {
     let normalized = container_name.trim_start_matches('/');
-    normalized == app_code
-        || normalized == format!("{}_1", app_code)
-        || normalized.ends_with(&format!("-{}", app_code))
+
+    // Exact match
+    if normalized == app_code {
+        return true;
+    }
+
+    // With replica number: app_1
+    if normalized == format!("{}_1", app_code) {
+        return true;
+    }
+
+    // Suffix patterns: something-app or something_app (app at the end)
+    if normalized.ends_with(&format!("-{}", app_code))
         || normalized.ends_with(&format!("_{}", app_code))
         || normalized.ends_with(&format!("_{}_1", app_code))
         || normalized.ends_with(&format!("-{}-1", app_code))
+    {
+        return true;
+    }
+
+    // Pattern: app-DIGIT (Docker Compose: service-1)
+    if let Some(rest) = normalized.strip_prefix(&format!("{}-", app_code)) {
+        if rest.chars().all(|c| c.is_numeric()) {
+            return true;
+        }
+    }
+
+    // Pattern: prefix-app-DIGIT (Docker Compose: project-service-1)
+    if let Some(pos) = normalized.rfind(&format!("-{}-", app_code)) {
+        let after_app = pos + app_code.len() + 2; // +2 for the two dashes
+        if after_app < normalized.len() {
+            let suffix = &normalized[after_app..];
+            if suffix.chars().all(|c| c.is_numeric()) {
+                return true;
+            }
+        }
+    }
+
+    // Pattern: prefix_app_DIGIT (old Docker Compose: project_service_1)
+    if let Some(pos) = normalized.rfind(&format!("_{}_", app_code)) {
+        let after_app = pos + app_code.len() + 2;
+        if after_app < normalized.len() {
+            let suffix = &normalized[after_app..];
+            if suffix.chars().all(|c| c.is_numeric()) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 async fn resolve_container_name(name: &str) -> Result<String> {
@@ -82,16 +126,39 @@ async fn resolve_container_name(name: &str) -> Result<String> {
         .await
         .context("list containers")?;
 
+    tracing::debug!(
+        app_code = name,
+        container_count = list.len(),
+        "Attempting to resolve container name"
+    );
+
+    let mut available_containers = Vec::new();
+
     for container in list {
         if let Some(names) = container.names {
             for entry in names {
+                let normalized = entry.trim_start_matches('/');
+                available_containers.push(normalized.to_string());
+
                 if name_matches(&entry, name) {
-                    return Ok(entry.trim_start_matches('/').to_string());
+                    tracing::info!(
+                        app_code = name,
+                        resolved_name = normalized,
+                        "Container name resolved successfully"
+                    );
+                    return Ok(normalized.to_string());
                 }
             }
         }
     }
 
+    tracing::warn!(
+        app_code = name,
+        available_containers = ?available_containers,
+        "No matching container found. Attempted patterns: exact match, prefix, suffix, contains",
+    );
+
+    // Return original name (will fail at Docker API level with helpful error)
     Ok(name.to_string())
 }
 
@@ -696,4 +763,72 @@ pub async fn exec_in_container_with_output(name: &str, cmd: &str) -> Result<(i64
     );
 
     Ok((exit_code, stdout, stderr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_name_matches_exact() {
+        assert!(name_matches("komodo", "komodo"));
+        assert!(name_matches("/komodo", "komodo"));
+    }
+
+    #[test]
+    fn test_name_matches_replica_suffix() {
+        assert!(name_matches("komodo_1", "komodo"));
+        assert!(name_matches("/komodo_1", "komodo"));
+    }
+
+    #[test]
+    fn test_name_matches_docker_compose_v2() {
+        // Docker Compose v2 format: project-service-replica
+        assert!(name_matches("myproject-komodo-1", "komodo"));
+        // Note: komodo-server-1 should NOT match "komodo" (it's a different service)
+        assert!(!name_matches("komodo-server-1", "komodo"));
+    }
+
+    #[test]
+    fn test_name_matches_project_prefix() {
+        // Old Docker Compose format: project_service_replica
+        assert!(name_matches("project_komodo_1", "komodo"));
+        assert!(name_matches("myapp_komodo_1", "komodo"));
+    }
+
+    #[test]
+    fn test_name_matches_suffix_patterns() {
+        assert!(name_matches("project-komodo", "komodo"));
+        assert!(name_matches("stack_komodo", "komodo"));
+        assert!(name_matches("app-komodo-1", "komodo"));
+    }
+
+    #[test]
+    fn test_name_matches_contains_patterns() {
+        // Middle occurrence with numeric suffix
+        assert!(name_matches("stack-komodo-1", "komodo"));
+        assert!(name_matches("app_komodo_2", "komodo"));
+        // But NOT when followed by non-numeric
+        assert!(!name_matches("stack-komodo-production", "komodo"));
+        assert!(!name_matches("app_komodo_prod", "komodo"));
+    }
+
+    #[test]
+    fn test_name_matches_no_match() {
+        assert!(!name_matches("telegraf", "komodo"));
+        assert!(!name_matches("komodo-core", "komodo")); // "komodo" is prefix, not exact
+        assert!(!name_matches("ferretdb", "komodo"));
+    }
+
+    #[test]
+    fn test_name_matches_real_world_examples() {
+        // Examples from actual deployments
+        assert!(name_matches("komodo", "komodo"));
+        assert!(name_matches("telegraf", "telegraf"));
+        assert!(name_matches("statuspanel_agent", "agent"));
+        assert!(name_matches(
+            "project-nginx_proxy_manager-1",
+            "nginx_proxy_manager"
+        ));
+    }
 }

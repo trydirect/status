@@ -97,9 +97,9 @@ impl MetricsCollector {
 
         let cpu_usage_pct = system.global_cpu_info().cpu_usage();
 
-        // sysinfo reports memory in KiB; convert to bytes for clarity.
-        let memory_total_bytes = system.total_memory() * 1024;
-        let memory_used_bytes = system.used_memory() * 1024;
+        // sysinfo 0.30+ reports memory in bytes directly
+        let memory_total_bytes = system.total_memory();
+        let memory_used_bytes = system.used_memory();
         let memory_used_pct = if memory_total_bytes > 0 {
             (memory_used_bytes as f64 / memory_total_bytes as f64 * 100.0) as f32
         } else {
