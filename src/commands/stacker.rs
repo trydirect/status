@@ -2806,93 +2806,153 @@ async fn handle_remove_app(
     let mut errors: Vec<CommandError> = Vec::new();
 
     let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
+    let compose_exists = Path::new(&compose_file).exists();
 
-    if !Path::new(&compose_file).exists() {
-        let error = make_error(
-            "compose_not_found",
-            format!("docker-compose.yml not found at {}", compose_file),
-            None,
-        );
-        result.status = "failed".into();
-        result.error = Some(error.message.clone());
-        result.errors = Some(vec![error]);
-        return Ok(result);
-    }
+    // Track whether container was successfully removed
+    let mut container_removed = false;
 
-    // Detect which compose variant is available
-    let compose_variant = match detect_compose_variant().await {
-        Some(variant) => variant,
-        None => {
-            let error = make_error(
-                "compose_not_available",
-                "Neither 'docker compose' (plugin) nor 'docker-compose' (standalone) is available",
-                None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+    if compose_exists {
+        // Detect which compose variant is available
+        let compose_variant = detect_compose_variant().await;
+
+        if let Some(variant) = compose_variant {
+            let (compose_program, compose_base_args) = build_compose_command(variant);
+
+            // Best-effort stop before removal
+            let mut stop_cmd = Command::new(&compose_program);
+            for arg in &compose_base_args {
+                stop_cmd.arg(arg);
+            }
+            let _ = stop_cmd
+                .arg("-f")
+                .arg(&compose_file)
+                .arg("stop")
+                .arg(&data.app_code)
+                .current_dir(&compose_dir)
+                .output()
+                .await;
+
+            let mut rm_cmd = Command::new(&compose_program);
+            for arg in &compose_base_args {
+                rm_cmd.arg(arg);
+            }
+            rm_cmd.arg("-f").arg(&compose_file).arg("rm").arg("-f");
+            if data.remove_volumes {
+                rm_cmd.arg("-v");
+            }
+            rm_cmd.arg(&data.app_code).current_dir(&compose_dir);
+
+            match rm_cmd.output().await {
+                Ok(output) => {
+                    if output.status.success() {
+                        container_removed = true;
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!(
+                            app_code = %data.app_code,
+                            stderr = %stderr.trim(),
+                            "docker compose rm failed, will try direct docker rm"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        app_code = %data.app_code,
+                        error = %err,
+                        "docker compose rm exec failed, will try direct docker rm"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!("Neither docker compose plugin nor docker-compose is available");
         }
-    };
-    let (compose_program, compose_base_args) = build_compose_command(compose_variant);
-
-    // Best-effort stop before removal
-    let mut stop_cmd = Command::new(&compose_program);
-    for arg in &compose_base_args {
-        stop_cmd.arg(arg);
+    } else {
+        tracing::warn!(
+            compose_file = %compose_file,
+            "docker-compose.yml not found, will try direct docker rm"
+        );
     }
-    let _ = stop_cmd
-        .arg("-f")
-        .arg(&compose_file)
-        .arg("stop")
-        .arg(&data.app_code)
-        .current_dir(&compose_dir)
-        .output()
-        .await;
 
-    let mut rm_cmd = Command::new(&compose_program);
-    for arg in &compose_base_args {
-        rm_cmd.arg(arg);
-    }
-    rm_cmd.arg("-f").arg(&compose_file).arg("rm").arg("-f");
-    if data.remove_volumes {
-        rm_cmd.arg("-v");
-    }
-    rm_cmd.arg(&data.app_code).current_dir(&compose_dir);
+    // Fallback: use direct docker stop + docker rm if compose-based removal failed
+    if !container_removed {
+        tracing::info!(
+            app_code = %data.app_code,
+            "Attempting direct docker stop/rm for container"
+        );
 
-    let mut removal_error: Option<CommandError> = None;
-    match rm_cmd.output().await {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                removal_error = Some(make_error(
-                    "remove_failed",
-                    format!("docker compose rm failed: {}", stderr.trim()),
-                    None,
-                ));
+        // Try to stop by container name (common naming: {app_code} or {project}-{app_code}-1)
+        let _ = Command::new("docker")
+            .arg("stop")
+            .arg(&data.app_code)
+            .output()
+            .await;
+
+        match Command::new("docker")
+            .arg("rm")
+            .arg("-f")
+            .arg(&data.app_code)
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                container_removed = true;
+                tracing::info!(
+                    app_code = %data.app_code,
+                    "Container removed via direct docker rm"
+                );
+            }
+            _ => {
+                // Also try compose-style naming: {deployment_hash}-{app_code}-1
+                let compose_name = format!("{}-{}-1", data.deployment_hash, data.app_code);
+                let _ = Command::new("docker")
+                    .arg("stop")
+                    .arg(&compose_name)
+                    .output()
+                    .await;
+
+                match Command::new("docker")
+                    .arg("rm")
+                    .arg("-f")
+                    .arg(&compose_name)
+                    .output()
+                    .await
+                {
+                    Ok(output) if output.status.success() => {
+                        container_removed = true;
+                        tracing::info!(
+                            container = %compose_name,
+                            "Container removed via direct docker rm (compose-style name)"
+                        );
+                    }
+                    _ => {
+                        errors.push(make_error(
+                            "remove_failed",
+                            format!(
+                                "Could not remove container for app '{}' (tried compose and direct docker rm)",
+                                data.app_code
+                            ),
+                            None,
+                        ));
+                    }
+                }
             }
         }
-        Err(err) => {
-            removal_error = Some(make_error(
-                "remove_exec_failed",
-                format!("Failed to execute docker compose rm: {}", err),
-                None,
-            ));
-        }
     }
 
+    // Clean up config from Vault
     if data.delete_config {
         match crate::security::vault_client::VaultClient::from_env() {
             Ok(Some(client)) => {
-                if let Err(err) = client
-                    .delete_app_config(&data.deployment_hash, &data.app_code)
-                    .await
-                {
-                    errors.push(make_error(
-                        "vault_cleanup_failed",
-                        "App removed but failed to delete config from Vault",
-                        Some(err.to_string()),
-                    ));
+                // Delete compose, env, and config keys from Vault
+                for suffix in &["", "_env", "_configs"] {
+                    let key = format!("{}{}", data.app_code, suffix);
+                    if let Err(err) = client.delete_app_config(&data.deployment_hash, &key).await {
+                        tracing::warn!(
+                            key = %key,
+                            error = %err,
+                            "Failed to delete Vault key (may not exist)"
+                        );
+                    }
                 }
             }
             Ok(None) => {
@@ -2912,6 +2972,41 @@ async fn handle_remove_app(
         }
     }
 
+    // Clean up files from disk: compose file, .env, config directory
+    if data.delete_config {
+        let app_dir = format!("/home/trydirect/{}/{}", data.deployment_hash, data.app_code);
+        if Path::new(&app_dir).exists() {
+            match tokio::fs::remove_dir_all(&app_dir).await {
+                Ok(_) => {
+                    tracing::info!(path = %app_dir, "Removed app config directory from disk");
+                }
+                Err(e) => {
+                    tracing::warn!(path = %app_dir, error = %e, "Failed to remove app config directory");
+                    errors.push(make_error(
+                        "disk_cleanup_warning",
+                        format!("Failed to remove config directory {}: {}", app_dir, e),
+                        None,
+                    ));
+                }
+            }
+        }
+
+        // Also remove compose file and .env if they were per-app (in deployment_hash dir)
+        if compose_exists {
+            let _ = tokio::fs::remove_file(&compose_file).await;
+            let env_file = format!("{}/{}", compose_dir, ".env");
+            let _ = tokio::fs::remove_file(&env_file).await;
+
+            // Remove compose_dir if empty after cleanup
+            if let Ok(mut entries) = tokio::fs::read_dir(&compose_dir).await {
+                if entries.next_entry().await.ok().flatten().is_none() {
+                    let _ = tokio::fs::remove_dir(&compose_dir).await;
+                    tracing::info!(path = %compose_dir, "Removed empty compose directory");
+                }
+            }
+        }
+    }
+
     if data.remove_image {
         let _ = Command::new("docker")
             .arg("image")
@@ -2921,17 +3016,21 @@ async fn handle_remove_app(
             .await;
     }
 
-    if let Some(err) = removal_error.clone() {
-        errors.push(err.clone());
+    let removal_status = if container_removed {
+        "removed"
+    } else {
+        "failed"
+    };
+    if !container_removed {
         result.status = "failed".into();
-        result.error = Some(err.message.clone());
+        result.error = errors.first().map(|e| e.message.clone());
     }
 
     let body = json!({
         "type": "remove_app",
         "deployment_hash": data.deployment_hash.clone(),
         "app_code": data.app_code.clone(),
-        "status": if removal_error.is_some() { "failed" } else { "removed" },
+        "status": removal_status,
         "removed_at": now_timestamp(),
         "errors": if errors.is_empty() { json!(null) } else { errors_value(&errors) },
     });
