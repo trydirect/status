@@ -9,7 +9,7 @@ use serde_json::json;
 #[cfg(feature = "docker")]
 use serde_json::Value;
 #[cfg(feature = "docker")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
 
@@ -329,6 +329,28 @@ pub struct ListContainersCommand {
     /// Number of log lines to include if include_logs is true
     #[serde(default = "default_logs_tail")]
     log_lines: usize,
+    /// Optional container mapping for grouping by app_code
+    #[serde(default)]
+    app_container_map: Vec<AppContainerMap>,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContainerMapEntry {
+    container_name_pattern: String,
+    container_role: String,
+    #[serde(default)]
+    maps_to_app_code: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppContainerMap {
+    app_code: String,
+    #[serde(default)]
+    container_map: Vec<ContainerMapEntry>,
 }
 
 fn default_exec_timeout() -> u32 {
@@ -3745,12 +3767,25 @@ async fn handle_list_containers(
 ) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, "", "list_containers");
 
+    #[derive(Clone)]
+    struct ContainerMatchMeta {
+        name: String,
+        image: String,
+        labels: HashMap<String, String>,
+    }
+
     // Get container list with health metrics if requested
+    let mut container_meta: Vec<ContainerMatchMeta> = Vec::new();
     let mut containers = if data.include_health {
         match docker::list_container_health().await {
             Ok(list) => list
                 .into_iter()
                 .map(|c| {
+                    container_meta.push(ContainerMatchMeta {
+                        name: c.name.clone(),
+                        image: c.image.clone(),
+                        labels: c.labels.clone(),
+                    });
                     json!({
                         "name": c.name,
                         "status": c.status,
@@ -3783,6 +3818,11 @@ async fn handle_list_containers(
             Ok(list) => list
                 .into_iter()
                 .map(|c| {
+                    container_meta.push(ContainerMatchMeta {
+                        name: c.name.clone(),
+                        image: String::new(),
+                        labels: HashMap::new(),
+                    });
                     json!({
                         "name": c.name,
                         "status": c.status,
@@ -3823,11 +3863,73 @@ async fn handle_list_containers(
         }
     }
 
+    let mut apps: Vec<Value> = Vec::new();
+    let mut orphan_containers: Vec<Value> = Vec::new();
+
+    if !data.app_container_map.is_empty() {
+        let mut containers_by_name: HashMap<String, Value> = HashMap::new();
+        for container in &containers {
+            if let Some(name) = container.get("name").and_then(|v| v.as_str()) {
+                containers_by_name.insert(name.to_string(), container.clone());
+            }
+        }
+
+        let mut matched_names: HashSet<String> = HashSet::new();
+
+        for app in &data.app_container_map {
+            let mut grouped_containers: Vec<Value> = Vec::new();
+            for entry in &app.container_map {
+                if let Some(meta) = container_meta.iter().find(|meta| {
+                    container_matches(
+                        &meta.name,
+                        &entry.container_name_pattern,
+                        &meta.labels,
+                        &meta.image,
+                    )
+                }) {
+                    if let Some(mut container_value) = containers_by_name.get(&meta.name).cloned() {
+                        if let Some(obj) = container_value.as_object_mut() {
+                            obj.insert(
+                                "container_role".to_string(),
+                                json!(entry.container_role.clone()),
+                            );
+                            obj.insert(
+                                "maps_to_app_code".to_string(),
+                                json!(entry.maps_to_app_code.clone()),
+                            );
+                            obj.insert(
+                                "display_name".to_string(),
+                                json!(entry.display_name.clone()),
+                            );
+                            obj.insert("app_code".to_string(), json!(app.app_code.clone()));
+                        }
+                        grouped_containers.push(container_value);
+                        matched_names.insert(meta.name.clone());
+                    }
+                }
+            }
+
+            apps.push(json!({
+                "app_code": app.app_code.clone(),
+                "containers": grouped_containers,
+            }));
+        }
+
+        for container in &containers {
+            let name = container.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if !name.is_empty() && !matched_names.contains(name) {
+                orphan_containers.push(container.clone());
+            }
+        }
+    }
+
     result.result = Some(json!({
         "type": "list_containers",
         "deployment_hash": data.deployment_hash,
         "container_count": containers.len(),
         "containers": containers,
+        "apps": apps,
+        "orphan_containers": orphan_containers,
         "include_health": data.include_health,
         "include_logs": data.include_logs,
         "listed_at": now_timestamp(),
