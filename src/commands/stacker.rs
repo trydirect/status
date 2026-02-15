@@ -51,6 +51,8 @@ pub struct HealthCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
     #[serde(default = "default_true")]
     include_metrics: bool,
     /// When true and app_code is "system" or empty, return system containers (status_panel, compose-agent)
@@ -65,6 +67,8 @@ pub struct LogsCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
     cursor: Option<String>,
     #[serde(default = "default_logs_limit")]
     limit: usize,
@@ -82,6 +86,8 @@ pub struct RestartCommand {
     #[serde(default)]
     app_code: String,
     #[serde(default)]
+    container: Option<String>,
+    #[serde(default)]
     force: bool,
 }
 
@@ -92,6 +98,8 @@ pub struct StopCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
     #[serde(default = "default_stop_timeout")]
     timeout: u32,
 }
@@ -103,6 +111,8 @@ pub struct StartCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -290,6 +300,8 @@ pub struct ExecCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
     /// The command to execute inside the container
     command: String,
     /// Timeout in seconds (default: 30, max: 120)
@@ -532,10 +544,26 @@ fn unwrap_params(params: &serde_json::Value) -> serde_json::Value {
         .unwrap_or_else(|| params.clone())
 }
 
+fn resolve_container_name(app_code: &str, container: &Option<String>) -> String {
+    if let Some(value) = container.as_ref() {
+        let trimmed_value = trimmed(value);
+        if !trimmed_value.is_empty() {
+            return trimmed_value;
+        }
+    }
+    trimmed(app_code)
+}
+
 impl HealthCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self
     }
 
@@ -568,6 +596,12 @@ impl LogsCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self.limit = self.limit.clamp(1, LOGS_MAX_LIMIT);
         if let Some(streams) = &mut self.streams {
             let filtered: Vec<String> = streams
@@ -626,6 +660,12 @@ impl RestartCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self
     }
 
@@ -658,6 +698,12 @@ impl StopCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self.timeout = self.timeout.clamp(1, 300); // Max 5 minutes
         self
     }
@@ -691,6 +737,12 @@ impl StartCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self
     }
 
@@ -1026,6 +1078,12 @@ impl ExecCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self.command = self.command.trim().to_string();
         // Clamp timeout between 1 and 120 seconds
         self.timeout = self.timeout.clamp(1, 120);
@@ -1308,6 +1366,8 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         }
     };
 
+    let target_name = resolve_container_name(&data.app_code, &data.container);
+
     // Handle system containers request (status_panel, compose-agent, etc.)
     if data.include_system && (data.app_code.is_empty() || data.app_code == "system") {
         let system_patterns = [
@@ -1353,7 +1413,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+        .find(|c| container_matches(&c.name, &target_name, &c.labels, &c.image));
 
     let mut errors: Vec<CommandError> = Vec::new();
     let container_state = if let Some(entry) = container {
@@ -1361,7 +1421,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
     } else {
         errors.push(make_error(
             "container_not_found",
-            format!("Container `{}` not found", data.app_code),
+            format!("Container `{}` not found", target_name),
             None,
         ));
         "unknown".to_string()
@@ -1394,8 +1454,9 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 #[cfg(feature = "docker")]
 async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "logs");
+    let target_name = resolve_container_name(&data.app_code, &data.container);
     let window = match docker::get_container_logs_window(
-        &data.app_code,
+        &target_name,
         data.cursor.clone(),
         Some(data.limit),
     )
@@ -1458,25 +1519,26 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
 async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "restart");
     let mut errors: Vec<CommandError> = Vec::new();
+    let target_name = resolve_container_name(&data.app_code, &data.container);
 
-    if let Err(e) = docker::restart(&data.app_code).await {
+    if let Err(e) = docker::restart(&target_name).await {
         errors.push(make_error(
             "restart_failed",
-            format!("Restart failed for `{}`", data.app_code),
+            format!("Restart failed for `{}`", target_name),
             Some(e.to_string()),
         ));
 
         if data.force {
-            if let Err(stop_err) = docker::stop(&data.app_code).await {
+            if let Err(stop_err) = docker::stop(&target_name).await {
                 errors.push(make_error(
                     "force_stop_failed",
-                    format!("Force stop failed for `{}`", data.app_code),
+                    format!("Force stop failed for `{}`", target_name),
                     Some(stop_err.to_string()),
                 ));
-            } else if let Err(retry_err) = docker::restart(&data.app_code).await {
+            } else if let Err(retry_err) = docker::restart(&target_name).await {
                 errors.push(make_error(
                     "force_restart_failed",
-                    format!("Forced restart failed for `{}`", data.app_code),
+                    format!("Forced restart failed for `{}`", target_name),
                     Some(retry_err.to_string()),
                 ));
             } else {
@@ -1509,7 +1571,7 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
     };
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+        .find(|c| container_matches(&c.name, &target_name, &c.labels, &c.image));
     let container_state = container
         .map(|c| map_container_state(&c.status).to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -1517,7 +1579,7 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
     if container.is_none() && errors.is_empty() {
         errors.push(make_error(
             "container_not_found",
-            format!("Container `{}` not found", data.app_code),
+            format!("Container `{}` not found", target_name),
             None,
         ));
     }
@@ -1546,11 +1608,12 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
 async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "stop");
     let mut errors: Vec<CommandError> = Vec::new();
+    let target_name = resolve_container_name(&data.app_code, &data.container);
 
-    if let Err(e) = docker::stop_with_timeout(&data.app_code, data.timeout).await {
+    if let Err(e) = docker::stop_with_timeout(&target_name, data.timeout).await {
         errors.push(make_error(
             "stop_failed",
-            format!("Stop failed for `{}`", data.app_code),
+            format!("Stop failed for `{}`", target_name),
             Some(e.to_string()),
         ));
     }
@@ -1581,7 +1644,7 @@ async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<Com
 
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+        .find(|c| container_matches(&c.name, &target_name, &c.labels, &c.image));
     let container_state = container
         .map(|c| map_container_state(&c.status).to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -1610,11 +1673,12 @@ async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<Com
 async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "start");
     let mut errors: Vec<CommandError> = Vec::new();
+    let target_name = resolve_container_name(&data.app_code, &data.container);
 
-    if let Err(e) = docker::start(&data.app_code).await {
+    if let Err(e) = docker::start(&target_name).await {
         errors.push(make_error(
             "start_failed",
-            format!("Start failed for `{}`", data.app_code),
+            format!("Start failed for `{}`", target_name),
             Some(e.to_string()),
         ));
     }
@@ -1645,7 +1709,7 @@ async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<C
 
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+        .find(|c| container_matches(&c.name, &target_name, &c.labels, &c.image));
     let container_state = container
         .map(|c| map_container_state(&c.status).to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -1653,7 +1717,7 @@ async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<C
     if container.is_none() && errors.is_empty() {
         errors.push(make_error(
             "container_not_found",
-            format!("Container `{}` not found", data.app_code),
+            format!("Container `{}` not found", target_name),
             None,
         ));
     }
@@ -3659,11 +3723,12 @@ async fn handle_configure_proxy(
 #[cfg(feature = "docker")]
 async fn handle_exec(agent_cmd: &AgentCommand, data: &ExecCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "exec");
+    let target_name = resolve_container_name(&data.app_code, &data.container);
 
     // Execute the command inside the container with timeout
     match tokio::time::timeout(
         std::time::Duration::from_secs(data.timeout as u64),
-        docker::exec_in_container_with_output(&data.app_code, &data.command),
+        docker::exec_in_container_with_output(&target_name, &data.command),
     )
     .await
     {
@@ -3690,10 +3755,11 @@ async fn handle_exec(agent_cmd: &AgentCommand, data: &ExecCommand) -> Result<Com
                 }));
             }
             Err(e) => {
+                let details = e.to_string();
                 let error = make_error(
                     "exec_failed",
-                    "Failed to execute command",
-                    Some(e.to_string()),
+                    format!("Failed to execute command: {}", details),
+                    Some(details),
                 );
                 result.status = "error".to_string();
                 result.error = Some(error.message.clone());
