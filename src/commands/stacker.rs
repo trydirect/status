@@ -4336,6 +4336,7 @@ mod exec_command_security_tests {
         ExecCommand {
             deployment_hash: "testhash".to_string(),
             app_code: app_code.to_string(),
+            container: None,
             command: command.to_string(),
             timeout: 30,
             redact_output: true,
@@ -4550,6 +4551,7 @@ mod exec_command_security_tests {
         let mut cmd = ExecCommand {
             deployment_hash: "test".to_string(),
             app_code: "testapp".to_string(),
+            container: None,
             command: "ls".to_string(),
             timeout: 999, // Way over max
             redact_output: true,
@@ -4563,6 +4565,7 @@ mod exec_command_security_tests {
         let mut cmd = ExecCommand {
             deployment_hash: "test".to_string(),
             app_code: "testapp".to_string(),
+            container: None,
             command: "ls".to_string(),
             timeout: 0, // Below min
             redact_output: true,
@@ -4699,6 +4702,7 @@ mod list_containers_command_tests {
             include_health: true,
             include_logs: true,
             log_lines: 500, // Way over max
+            app_container_map: Vec::new(),
         };
         cmd = cmd.normalize();
         assert_eq!(cmd.log_lines, 100); // Should be clamped to 100
@@ -4711,6 +4715,7 @@ mod list_containers_command_tests {
             include_health: true,
             include_logs: true,
             log_lines: 0, // Below min
+            app_container_map: Vec::new(),
         };
         cmd = cmd.normalize();
         assert_eq!(cmd.log_lines, 1); // Should be clamped to 1
