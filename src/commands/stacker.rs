@@ -544,6 +544,7 @@ fn unwrap_params(params: &serde_json::Value) -> serde_json::Value {
         .unwrap_or_else(|| params.clone())
 }
 
+#[cfg(feature = "docker")]
 fn resolve_container_name(app_code: &str, container: &Option<String>) -> String {
     if let Some(value) = container.as_ref() {
         let trimmed_value = trimmed(value);
