@@ -9,7 +9,7 @@ use serde_json::json;
 #[cfg(feature = "docker")]
 use serde_json::Value;
 #[cfg(feature = "docker")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
 
@@ -51,6 +51,8 @@ pub struct HealthCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
     #[serde(default = "default_true")]
     include_metrics: bool,
     /// When true and app_code is "system" or empty, return system containers (status_panel, compose-agent)
@@ -65,6 +67,8 @@ pub struct LogsCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
     cursor: Option<String>,
     #[serde(default = "default_logs_limit")]
     limit: usize,
@@ -82,6 +86,8 @@ pub struct RestartCommand {
     #[serde(default)]
     app_code: String,
     #[serde(default)]
+    container: Option<String>,
+    #[serde(default)]
     force: bool,
 }
 
@@ -92,6 +98,8 @@ pub struct StopCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
     #[serde(default = "default_stop_timeout")]
     timeout: u32,
 }
@@ -103,6 +111,8 @@ pub struct StartCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -290,6 +300,8 @@ pub struct ExecCommand {
     deployment_hash: String,
     #[serde(default)]
     app_code: String,
+    #[serde(default)]
+    container: Option<String>,
     /// The command to execute inside the container
     command: String,
     /// Timeout in seconds (default: 30, max: 120)
@@ -329,6 +341,28 @@ pub struct ListContainersCommand {
     /// Number of log lines to include if include_logs is true
     #[serde(default = "default_logs_tail")]
     log_lines: usize,
+    /// Optional container mapping for grouping by app_code
+    #[serde(default)]
+    app_container_map: Vec<AppContainerMap>,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContainerMapEntry {
+    container_name_pattern: String,
+    container_role: String,
+    #[serde(default)]
+    maps_to_app_code: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppContainerMap {
+    app_code: String,
+    #[serde(default)]
+    container_map: Vec<ContainerMapEntry>,
 }
 
 fn default_exec_timeout() -> u32 {
@@ -510,10 +544,27 @@ fn unwrap_params(params: &serde_json::Value) -> serde_json::Value {
         .unwrap_or_else(|| params.clone())
 }
 
+#[cfg(feature = "docker")]
+fn resolve_container_name(app_code: &str, container: &Option<String>) -> String {
+    if let Some(value) = container.as_ref() {
+        let trimmed_value = trimmed(value);
+        if !trimmed_value.is_empty() {
+            return trimmed_value;
+        }
+    }
+    trimmed(app_code)
+}
+
 impl HealthCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self
     }
 
@@ -546,6 +597,12 @@ impl LogsCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self.limit = self.limit.clamp(1, LOGS_MAX_LIMIT);
         if let Some(streams) = &mut self.streams {
             let filtered: Vec<String> = streams
@@ -604,6 +661,12 @@ impl RestartCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self
     }
 
@@ -636,6 +699,12 @@ impl StopCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self.timeout = self.timeout.clamp(1, 300); // Max 5 minutes
         self
     }
@@ -669,6 +738,12 @@ impl StartCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self
     }
 
@@ -1004,6 +1079,12 @@ impl ExecCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
         self.command = self.command.trim().to_string();
         // Clamp timeout between 1 and 120 seconds
         self.timeout = self.timeout.clamp(1, 120);
@@ -1286,6 +1367,8 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         }
     };
 
+    let target_name = resolve_container_name(&data.app_code, &data.container);
+
     // Handle system containers request (status_panel, compose-agent, etc.)
     if data.include_system && (data.app_code.is_empty() || data.app_code == "system") {
         let system_patterns = [
@@ -1331,7 +1414,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+        .find(|c| container_matches(&c.name, &target_name, &c.labels, &c.image));
 
     let mut errors: Vec<CommandError> = Vec::new();
     let container_state = if let Some(entry) = container {
@@ -1339,7 +1422,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
     } else {
         errors.push(make_error(
             "container_not_found",
-            format!("Container `{}` not found", data.app_code),
+            format!("Container `{}` not found", target_name),
             None,
         ));
         "unknown".to_string()
@@ -1372,8 +1455,9 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 #[cfg(feature = "docker")]
 async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "logs");
+    let target_name = resolve_container_name(&data.app_code, &data.container);
     let window = match docker::get_container_logs_window(
-        &data.app_code,
+        &target_name,
         data.cursor.clone(),
         Some(data.limit),
     )
@@ -1436,25 +1520,26 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
 async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "restart");
     let mut errors: Vec<CommandError> = Vec::new();
+    let target_name = resolve_container_name(&data.app_code, &data.container);
 
-    if let Err(e) = docker::restart(&data.app_code).await {
+    if let Err(e) = docker::restart(&target_name).await {
         errors.push(make_error(
             "restart_failed",
-            format!("Restart failed for `{}`", data.app_code),
+            format!("Restart failed for `{}`", target_name),
             Some(e.to_string()),
         ));
 
         if data.force {
-            if let Err(stop_err) = docker::stop(&data.app_code).await {
+            if let Err(stop_err) = docker::stop(&target_name).await {
                 errors.push(make_error(
                     "force_stop_failed",
-                    format!("Force stop failed for `{}`", data.app_code),
+                    format!("Force stop failed for `{}`", target_name),
                     Some(stop_err.to_string()),
                 ));
-            } else if let Err(retry_err) = docker::restart(&data.app_code).await {
+            } else if let Err(retry_err) = docker::restart(&target_name).await {
                 errors.push(make_error(
                     "force_restart_failed",
-                    format!("Forced restart failed for `{}`", data.app_code),
+                    format!("Forced restart failed for `{}`", target_name),
                     Some(retry_err.to_string()),
                 ));
             } else {
@@ -1487,7 +1572,7 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
     };
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+        .find(|c| container_matches(&c.name, &target_name, &c.labels, &c.image));
     let container_state = container
         .map(|c| map_container_state(&c.status).to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -1495,7 +1580,7 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
     if container.is_none() && errors.is_empty() {
         errors.push(make_error(
             "container_not_found",
-            format!("Container `{}` not found", data.app_code),
+            format!("Container `{}` not found", target_name),
             None,
         ));
     }
@@ -1524,11 +1609,12 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
 async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "stop");
     let mut errors: Vec<CommandError> = Vec::new();
+    let target_name = resolve_container_name(&data.app_code, &data.container);
 
-    if let Err(e) = docker::stop_with_timeout(&data.app_code, data.timeout).await {
+    if let Err(e) = docker::stop_with_timeout(&target_name, data.timeout).await {
         errors.push(make_error(
             "stop_failed",
-            format!("Stop failed for `{}`", data.app_code),
+            format!("Stop failed for `{}`", target_name),
             Some(e.to_string()),
         ));
     }
@@ -1559,7 +1645,7 @@ async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<Com
 
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+        .find(|c| container_matches(&c.name, &target_name, &c.labels, &c.image));
     let container_state = container
         .map(|c| map_container_state(&c.status).to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -1588,11 +1674,12 @@ async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<Com
 async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "start");
     let mut errors: Vec<CommandError> = Vec::new();
+    let target_name = resolve_container_name(&data.app_code, &data.container);
 
-    if let Err(e) = docker::start(&data.app_code).await {
+    if let Err(e) = docker::start(&target_name).await {
         errors.push(make_error(
             "start_failed",
-            format!("Start failed for `{}`", data.app_code),
+            format!("Start failed for `{}`", target_name),
             Some(e.to_string()),
         ));
     }
@@ -1623,7 +1710,7 @@ async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<C
 
     let container = containers
         .iter()
-        .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
+        .find(|c| container_matches(&c.name, &target_name, &c.labels, &c.image));
     let container_state = container
         .map(|c| map_container_state(&c.status).to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -1631,7 +1718,7 @@ async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<C
     if container.is_none() && errors.is_empty() {
         errors.push(make_error(
             "container_not_found",
-            format!("Container `{}` not found", data.app_code),
+            format!("Container `{}` not found", target_name),
             None,
         ));
     }
@@ -2806,93 +2893,153 @@ async fn handle_remove_app(
     let mut errors: Vec<CommandError> = Vec::new();
 
     let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
+    let compose_exists = Path::new(&compose_file).exists();
 
-    if !Path::new(&compose_file).exists() {
-        let error = make_error(
-            "compose_not_found",
-            format!("docker-compose.yml not found at {}", compose_file),
-            None,
-        );
-        result.status = "failed".into();
-        result.error = Some(error.message.clone());
-        result.errors = Some(vec![error]);
-        return Ok(result);
-    }
+    // Track whether container was successfully removed
+    let mut container_removed = false;
 
-    // Detect which compose variant is available
-    let compose_variant = match detect_compose_variant().await {
-        Some(variant) => variant,
-        None => {
-            let error = make_error(
-                "compose_not_available",
-                "Neither 'docker compose' (plugin) nor 'docker-compose' (standalone) is available",
-                None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+    if compose_exists {
+        // Detect which compose variant is available
+        let compose_variant = detect_compose_variant().await;
+
+        if let Some(variant) = compose_variant {
+            let (compose_program, compose_base_args) = build_compose_command(variant);
+
+            // Best-effort stop before removal
+            let mut stop_cmd = Command::new(&compose_program);
+            for arg in &compose_base_args {
+                stop_cmd.arg(arg);
+            }
+            let _ = stop_cmd
+                .arg("-f")
+                .arg(&compose_file)
+                .arg("stop")
+                .arg(&data.app_code)
+                .current_dir(&compose_dir)
+                .output()
+                .await;
+
+            let mut rm_cmd = Command::new(&compose_program);
+            for arg in &compose_base_args {
+                rm_cmd.arg(arg);
+            }
+            rm_cmd.arg("-f").arg(&compose_file).arg("rm").arg("-f");
+            if data.remove_volumes {
+                rm_cmd.arg("-v");
+            }
+            rm_cmd.arg(&data.app_code).current_dir(&compose_dir);
+
+            match rm_cmd.output().await {
+                Ok(output) => {
+                    if output.status.success() {
+                        container_removed = true;
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!(
+                            app_code = %data.app_code,
+                            stderr = %stderr.trim(),
+                            "docker compose rm failed, will try direct docker rm"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        app_code = %data.app_code,
+                        error = %err,
+                        "docker compose rm exec failed, will try direct docker rm"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!("Neither docker compose plugin nor docker-compose is available");
         }
-    };
-    let (compose_program, compose_base_args) = build_compose_command(compose_variant);
-
-    // Best-effort stop before removal
-    let mut stop_cmd = Command::new(&compose_program);
-    for arg in &compose_base_args {
-        stop_cmd.arg(arg);
+    } else {
+        tracing::warn!(
+            compose_file = %compose_file,
+            "docker-compose.yml not found, will try direct docker rm"
+        );
     }
-    let _ = stop_cmd
-        .arg("-f")
-        .arg(&compose_file)
-        .arg("stop")
-        .arg(&data.app_code)
-        .current_dir(&compose_dir)
-        .output()
-        .await;
 
-    let mut rm_cmd = Command::new(&compose_program);
-    for arg in &compose_base_args {
-        rm_cmd.arg(arg);
-    }
-    rm_cmd.arg("-f").arg(&compose_file).arg("rm").arg("-f");
-    if data.remove_volumes {
-        rm_cmd.arg("-v");
-    }
-    rm_cmd.arg(&data.app_code).current_dir(&compose_dir);
+    // Fallback: use direct docker stop + docker rm if compose-based removal failed
+    if !container_removed {
+        tracing::info!(
+            app_code = %data.app_code,
+            "Attempting direct docker stop/rm for container"
+        );
 
-    let mut removal_error: Option<CommandError> = None;
-    match rm_cmd.output().await {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                removal_error = Some(make_error(
-                    "remove_failed",
-                    format!("docker compose rm failed: {}", stderr.trim()),
-                    None,
-                ));
+        // Try to stop by container name (common naming: {app_code} or {project}-{app_code}-1)
+        let _ = Command::new("docker")
+            .arg("stop")
+            .arg(&data.app_code)
+            .output()
+            .await;
+
+        match Command::new("docker")
+            .arg("rm")
+            .arg("-f")
+            .arg(&data.app_code)
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                container_removed = true;
+                tracing::info!(
+                    app_code = %data.app_code,
+                    "Container removed via direct docker rm"
+                );
+            }
+            _ => {
+                // Also try compose-style naming: {deployment_hash}-{app_code}-1
+                let compose_name = format!("{}-{}-1", data.deployment_hash, data.app_code);
+                let _ = Command::new("docker")
+                    .arg("stop")
+                    .arg(&compose_name)
+                    .output()
+                    .await;
+
+                match Command::new("docker")
+                    .arg("rm")
+                    .arg("-f")
+                    .arg(&compose_name)
+                    .output()
+                    .await
+                {
+                    Ok(output) if output.status.success() => {
+                        container_removed = true;
+                        tracing::info!(
+                            container = %compose_name,
+                            "Container removed via direct docker rm (compose-style name)"
+                        );
+                    }
+                    _ => {
+                        errors.push(make_error(
+                            "remove_failed",
+                            format!(
+                                "Could not remove container for app '{}' (tried compose and direct docker rm)",
+                                data.app_code
+                            ),
+                            None,
+                        ));
+                    }
+                }
             }
         }
-        Err(err) => {
-            removal_error = Some(make_error(
-                "remove_exec_failed",
-                format!("Failed to execute docker compose rm: {}", err),
-                None,
-            ));
-        }
     }
 
+    // Clean up config from Vault
     if data.delete_config {
         match crate::security::vault_client::VaultClient::from_env() {
             Ok(Some(client)) => {
-                if let Err(err) = client
-                    .delete_app_config(&data.deployment_hash, &data.app_code)
-                    .await
-                {
-                    errors.push(make_error(
-                        "vault_cleanup_failed",
-                        "App removed but failed to delete config from Vault",
-                        Some(err.to_string()),
-                    ));
+                // Delete compose, env, and config keys from Vault
+                for suffix in &["", "_env", "_configs"] {
+                    let key = format!("{}{}", data.app_code, suffix);
+                    if let Err(err) = client.delete_app_config(&data.deployment_hash, &key).await {
+                        tracing::warn!(
+                            key = %key,
+                            error = %err,
+                            "Failed to delete Vault key (may not exist)"
+                        );
+                    }
                 }
             }
             Ok(None) => {
@@ -2912,6 +3059,41 @@ async fn handle_remove_app(
         }
     }
 
+    // Clean up files from disk: compose file, .env, config directory
+    if data.delete_config {
+        let app_dir = format!("/home/trydirect/{}/{}", data.deployment_hash, data.app_code);
+        if Path::new(&app_dir).exists() {
+            match tokio::fs::remove_dir_all(&app_dir).await {
+                Ok(_) => {
+                    tracing::info!(path = %app_dir, "Removed app config directory from disk");
+                }
+                Err(e) => {
+                    tracing::warn!(path = %app_dir, error = %e, "Failed to remove app config directory");
+                    errors.push(make_error(
+                        "disk_cleanup_warning",
+                        format!("Failed to remove config directory {}: {}", app_dir, e),
+                        None,
+                    ));
+                }
+            }
+        }
+
+        // Also remove compose file and .env if they were per-app (in deployment_hash dir)
+        if compose_exists {
+            let _ = tokio::fs::remove_file(&compose_file).await;
+            let env_file = format!("{}/{}", compose_dir, ".env");
+            let _ = tokio::fs::remove_file(&env_file).await;
+
+            // Remove compose_dir if empty after cleanup
+            if let Ok(mut entries) = tokio::fs::read_dir(&compose_dir).await {
+                if entries.next_entry().await.ok().flatten().is_none() {
+                    let _ = tokio::fs::remove_dir(&compose_dir).await;
+                    tracing::info!(path = %compose_dir, "Removed empty compose directory");
+                }
+            }
+        }
+    }
+
     if data.remove_image {
         let _ = Command::new("docker")
             .arg("image")
@@ -2921,17 +3103,21 @@ async fn handle_remove_app(
             .await;
     }
 
-    if let Some(err) = removal_error.clone() {
-        errors.push(err.clone());
+    let removal_status = if container_removed {
+        "removed"
+    } else {
+        "failed"
+    };
+    if !container_removed {
         result.status = "failed".into();
-        result.error = Some(err.message.clone());
+        result.error = errors.first().map(|e| e.message.clone());
     }
 
     let body = json!({
         "type": "remove_app",
         "deployment_hash": data.deployment_hash.clone(),
         "app_code": data.app_code.clone(),
-        "status": if removal_error.is_some() { "failed" } else { "removed" },
+        "status": removal_status,
         "removed_at": now_timestamp(),
         "errors": if errors.is_empty() { json!(null) } else { errors_value(&errors) },
     });
@@ -3538,11 +3724,12 @@ async fn handle_configure_proxy(
 #[cfg(feature = "docker")]
 async fn handle_exec(agent_cmd: &AgentCommand, data: &ExecCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "exec");
+    let target_name = resolve_container_name(&data.app_code, &data.container);
 
     // Execute the command inside the container with timeout
     match tokio::time::timeout(
         std::time::Duration::from_secs(data.timeout as u64),
-        docker::exec_in_container_with_output(&data.app_code, &data.command),
+        docker::exec_in_container_with_output(&target_name, &data.command),
     )
     .await
     {
@@ -3569,10 +3756,11 @@ async fn handle_exec(agent_cmd: &AgentCommand, data: &ExecCommand) -> Result<Com
                 }));
             }
             Err(e) => {
+                let details = e.to_string();
                 let error = make_error(
                     "exec_failed",
-                    "Failed to execute command",
-                    Some(e.to_string()),
+                    format!("Failed to execute command: {}", details),
+                    Some(details),
                 );
                 result.status = "error".to_string();
                 result.error = Some(error.message.clone());
@@ -3646,12 +3834,25 @@ async fn handle_list_containers(
 ) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, "", "list_containers");
 
+    #[derive(Clone)]
+    struct ContainerMatchMeta {
+        name: String,
+        image: String,
+        labels: HashMap<String, String>,
+    }
+
     // Get container list with health metrics if requested
+    let mut container_meta: Vec<ContainerMatchMeta> = Vec::new();
     let mut containers = if data.include_health {
         match docker::list_container_health().await {
             Ok(list) => list
                 .into_iter()
                 .map(|c| {
+                    container_meta.push(ContainerMatchMeta {
+                        name: c.name.clone(),
+                        image: c.image.clone(),
+                        labels: c.labels.clone(),
+                    });
                     json!({
                         "name": c.name,
                         "status": c.status,
@@ -3684,6 +3885,11 @@ async fn handle_list_containers(
             Ok(list) => list
                 .into_iter()
                 .map(|c| {
+                    container_meta.push(ContainerMatchMeta {
+                        name: c.name.clone(),
+                        image: String::new(),
+                        labels: HashMap::new(),
+                    });
                     json!({
                         "name": c.name,
                         "status": c.status,
@@ -3724,11 +3930,73 @@ async fn handle_list_containers(
         }
     }
 
+    let mut apps: Vec<Value> = Vec::new();
+    let mut orphan_containers: Vec<Value> = Vec::new();
+
+    if !data.app_container_map.is_empty() {
+        let mut containers_by_name: HashMap<String, Value> = HashMap::new();
+        for container in &containers {
+            if let Some(name) = container.get("name").and_then(|v| v.as_str()) {
+                containers_by_name.insert(name.to_string(), container.clone());
+            }
+        }
+
+        let mut matched_names: HashSet<String> = HashSet::new();
+
+        for app in &data.app_container_map {
+            let mut grouped_containers: Vec<Value> = Vec::new();
+            for entry in &app.container_map {
+                if let Some(meta) = container_meta.iter().find(|meta| {
+                    container_matches(
+                        &meta.name,
+                        &entry.container_name_pattern,
+                        &meta.labels,
+                        &meta.image,
+                    )
+                }) {
+                    if let Some(mut container_value) = containers_by_name.get(&meta.name).cloned() {
+                        if let Some(obj) = container_value.as_object_mut() {
+                            obj.insert(
+                                "container_role".to_string(),
+                                json!(entry.container_role.clone()),
+                            );
+                            obj.insert(
+                                "maps_to_app_code".to_string(),
+                                json!(entry.maps_to_app_code.clone()),
+                            );
+                            obj.insert(
+                                "display_name".to_string(),
+                                json!(entry.display_name.clone()),
+                            );
+                            obj.insert("app_code".to_string(), json!(app.app_code.clone()));
+                        }
+                        grouped_containers.push(container_value);
+                        matched_names.insert(meta.name.clone());
+                    }
+                }
+            }
+
+            apps.push(json!({
+                "app_code": app.app_code.clone(),
+                "containers": grouped_containers,
+            }));
+        }
+
+        for container in &containers {
+            let name = container.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if !name.is_empty() && !matched_names.contains(name) {
+                orphan_containers.push(container.clone());
+            }
+        }
+    }
+
     result.result = Some(json!({
         "type": "list_containers",
         "deployment_hash": data.deployment_hash,
         "container_count": containers.len(),
         "containers": containers,
+        "apps": apps,
+        "orphan_containers": orphan_containers,
         "include_health": data.include_health,
         "include_logs": data.include_logs,
         "listed_at": now_timestamp(),
@@ -4069,6 +4337,7 @@ mod exec_command_security_tests {
         ExecCommand {
             deployment_hash: "testhash".to_string(),
             app_code: app_code.to_string(),
+            container: None,
             command: command.to_string(),
             timeout: 30,
             redact_output: true,
@@ -4283,6 +4552,7 @@ mod exec_command_security_tests {
         let mut cmd = ExecCommand {
             deployment_hash: "test".to_string(),
             app_code: "testapp".to_string(),
+            container: None,
             command: "ls".to_string(),
             timeout: 999, // Way over max
             redact_output: true,
@@ -4296,6 +4566,7 @@ mod exec_command_security_tests {
         let mut cmd = ExecCommand {
             deployment_hash: "test".to_string(),
             app_code: "testapp".to_string(),
+            container: None,
             command: "ls".to_string(),
             timeout: 0, // Below min
             redact_output: true,
@@ -4432,6 +4703,7 @@ mod list_containers_command_tests {
             include_health: true,
             include_logs: true,
             log_lines: 500, // Way over max
+            app_container_map: Vec::new(),
         };
         cmd = cmd.normalize();
         assert_eq!(cmd.log_lines, 100); // Should be clamped to 100
@@ -4444,6 +4716,7 @@ mod list_containers_command_tests {
             include_health: true,
             include_logs: true,
             log_lines: 0, // Below min
+            app_container_map: Vec::new(),
         };
         cmd = cmd.normalize();
         assert_eq!(cmd.log_lines, 1); // Should be clamped to 1

@@ -140,6 +140,19 @@ async fn resolve_container_name(name: &str) -> Result<String> {
                 let normalized = entry.trim_start_matches('/');
                 available_containers.push(normalized.to_string());
 
+                if let Some(labels) = container.labels.as_ref() {
+                    if let Some(service) = labels.get("com.docker.compose.service") {
+                        if service == name {
+                            tracing::info!(
+                                app_code = name,
+                                resolved_name = normalized,
+                                "Container name resolved via compose service label"
+                            );
+                            return Ok(normalized.to_string());
+                        }
+                    }
+                }
+
                 if name_matches(&entry, name) {
                     tracing::info!(
                         app_code = name,
