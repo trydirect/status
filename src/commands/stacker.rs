@@ -20,6 +20,8 @@ use crate::transport::{Command as AgentCommand, CommandResult};
 #[cfg(feature = "docker")]
 use crate::agent::docker;
 
+use super::firewall::{self, ConfigureFirewallCommand};
+
 const LOGS_DEFAULT_LIMIT: usize = 400;
 const LOGS_MAX_LIMIT: usize = 1000;
 
@@ -42,6 +44,7 @@ pub enum StackerCommand {
     Exec(ExecCommand),
     ServerResources(ServerResourcesCommand),
     ListContainers(ListContainersCommand),
+    ConfigureFirewall(ConfigureFirewallCommand),
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -502,6 +505,14 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             payload.validate()?;
             Ok(Some(StackerCommand::ListContainers(payload)))
         }
+        "configure_firewall" | "stacker.configure_firewall" => {
+            let payload: ConfigureFirewallCommand =
+                serde_json::from_value(unwrap_params(&cmd.params))
+                    .context("invalid configure_firewall payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::ConfigureFirewall(payload)))
+        }
         _ => Ok(None),
     }
 }
@@ -509,10 +520,16 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
 pub async fn execute_stacker_command(
     agent_cmd: &AgentCommand,
     command: &StackerCommand,
+    firewall_policy: &firewall::FirewallPolicy,
 ) -> Result<CommandResult> {
+    // Firewall commands don't require Docker
+    if let StackerCommand::ConfigureFirewall(data) = command {
+        return firewall::handle_configure_firewall(agent_cmd, data, firewall_policy).await;
+    }
+
     #[cfg(feature = "docker")]
     {
-        execute_with_docker(agent_cmd, command).await
+        execute_with_docker(agent_cmd, command, firewall_policy).await
     }
     #[cfg(not(feature = "docker"))]
     {
@@ -1315,6 +1332,7 @@ fn make_error(code: &str, message: impl Into<String>, details: Option<String>) -
 async fn execute_with_docker(
     agent_cmd: &AgentCommand,
     command: &StackerCommand,
+    firewall_policy: &firewall::FirewallPolicy,
 ) -> Result<CommandResult> {
     match command {
         StackerCommand::Health(data) => handle_health(agent_cmd, data).await,
@@ -1336,6 +1354,9 @@ async fn execute_with_docker(
         StackerCommand::Exec(data) => handle_exec(agent_cmd, data).await,
         StackerCommand::ServerResources(data) => handle_server_resources(agent_cmd, data).await,
         StackerCommand::ListContainers(data) => handle_list_containers(agent_cmd, data).await,
+        StackerCommand::ConfigureFirewall(data) => {
+            firewall::handle_configure_firewall(agent_cmd, data, firewall_policy).await
+        }
     }
 }
 

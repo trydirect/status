@@ -2,6 +2,7 @@ pub mod deploy;
 pub mod docker_executor;
 pub mod docker_ops;
 pub mod executor;
+pub mod firewall;
 pub mod self_update;
 pub mod stacker;
 pub mod timeout;

@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::config::Config;
 use crate::commands::executor::CommandExecutor;
+use crate::commands::firewall::FirewallPolicy;
 use crate::commands::TimeoutStrategy;
 use crate::monitoring::{spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore};
 use crate::transport::{http_polling, CommandResult};
@@ -89,18 +90,23 @@ pub async fn run(config_path: String) -> Result<()> {
         "long-polling configuration initialized"
     );
 
+    // Build firewall policy from config (no API port in daemon mode)
+    let firewall_policy = FirewallPolicy::from_config(&cfg, None);
+
+    let ctx = PollingContext {
+        dashboard_url,
+        deployment_hash,
+        agent_id,
+        agent_token,
+        polling_timeout,
+        polling_backoff,
+        command_timeout,
+        firewall_policy,
+    };
+
     // Spawn the long-polling loop
     let polling_handle = tokio::spawn(async move {
-        polling_loop(
-            dashboard_url,
-            deployment_hash,
-            agent_id,
-            agent_token,
-            polling_timeout,
-            polling_backoff,
-            command_timeout,
-        )
-        .await;
+        polling_loop(ctx).await;
     });
 
     // Wait for shutdown signal (Ctrl+C) then stop all loops
@@ -115,8 +121,7 @@ pub async fn run(config_path: String) -> Result<()> {
     Ok(())
 }
 
-/// Long-polling loop: continuously waits for commands and executes them
-async fn polling_loop(
+struct PollingContext {
     dashboard_url: String,
     deployment_hash: String,
     agent_id: String,
@@ -124,16 +129,20 @@ async fn polling_loop(
     polling_timeout: u64,
     polling_backoff: u64,
     command_timeout: u64,
-) {
+    firewall_policy: FirewallPolicy,
+}
+
+/// Long-polling loop: continuously waits for commands and executes them
+async fn polling_loop(ctx: PollingContext) {
     let executor = CommandExecutor::new();
 
     loop {
         match http_polling::wait_for_command(
-            &dashboard_url,
-            &deployment_hash,
-            &agent_id,
-            &agent_token,
-            polling_timeout,
+            &ctx.dashboard_url,
+            &ctx.deployment_hash,
+            &ctx.agent_id,
+            &ctx.agent_token,
+            ctx.polling_timeout,
             None,
         )
         .await
@@ -146,17 +155,7 @@ async fn polling_loop(
                         "command received from dashboard queue"
                     );
                     // Execute the command with configured timeout
-                    match execute_and_report(
-                        &executor,
-                        &dashboard_url,
-                        &deployment_hash,
-                        &agent_id,
-                        &agent_token,
-                        cmd,
-                        command_timeout,
-                    )
-                    .await
-                    {
+                    match execute_and_report(&executor, &ctx, cmd).await {
                         Ok(_) => {
                             info!("command execution and reporting completed");
                         }
@@ -176,10 +175,10 @@ async fn polling_loop(
                 // Network error — apply backoff before retrying
                 error!("polling error: {}", e);
                 info!(
-                    backoff_secs = polling_backoff,
+                    backoff_secs = ctx.polling_backoff,
                     "applying backoff before retry"
                 );
-                tokio::time::sleep(Duration::from_secs(polling_backoff)).await;
+                tokio::time::sleep(Duration::from_secs(ctx.polling_backoff)).await;
             }
         }
     }
@@ -188,12 +187,8 @@ async fn polling_loop(
 /// Execute a command and report results back to dashboard
 async fn execute_and_report(
     executor: &CommandExecutor,
-    dashboard_url: &str,
-    deployment_hash: &str,
-    agent_id: &str,
-    agent_token: &str,
+    ctx: &PollingContext,
     cmd: crate::transport::Command,
-    command_timeout: u64,
 ) -> Result<()> {
     use crate::commands::stacker::{execute_stacker_command, parse_stacker_command};
 
@@ -205,7 +200,7 @@ async fn execute_and_report(
                 command_type = %cmd.name,
                 "executing stacker command"
             );
-            match execute_stacker_command(&cmd, &stacker_cmd).await {
+            match execute_stacker_command(&cmd, &stacker_cmd, &ctx.firewall_policy).await {
                 Ok(result) => result,
                 Err(e) => {
                     error!(command_id = %cmd.command_id, error = %e, "stacker command execution failed");
@@ -227,7 +222,7 @@ async fn execute_and_report(
                 command_name = %cmd.name,
                 "executing as shell command"
             );
-            let strategy = TimeoutStrategy::backup_strategy(command_timeout);
+            let strategy = TimeoutStrategy::backup_strategy(ctx.command_timeout);
             let exec_result = executor.execute(&cmd, strategy).await;
 
             match exec_result {
@@ -274,11 +269,11 @@ async fn execute_and_report(
         "reporting command result to stacker"
     );
     http_polling::report_result(
-        dashboard_url,
-        agent_id,
-        agent_token,
+        &ctx.dashboard_url,
+        &ctx.agent_id,
+        &ctx.agent_token,
         &cmd_result.command_id,
-        deployment_hash,
+        &ctx.deployment_hash,
         &cmd_result.status,
         &cmd_result.result,
         &cmd_result.error,
@@ -291,8 +286,13 @@ async fn execute_and_report(
     );
 
     if let Some(app_status) = build_app_status_update(&cmd_result) {
-        if let Err(e) =
-            http_polling::update_app_status(dashboard_url, agent_id, agent_token, &app_status).await
+        if let Err(e) = http_polling::update_app_status(
+            &ctx.dashboard_url,
+            &ctx.agent_id,
+            &ctx.agent_token,
+            &app_status,
+        )
+        .await
         {
             warn!(
                 command_id = %cmd_result.command_id,

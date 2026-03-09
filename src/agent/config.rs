@@ -13,6 +13,19 @@ pub struct AppInfo {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FirewallConfig {
+    /// If set, only these ports can be managed by the firewall module.
+    /// Ports not in this list will be rejected. If absent, all non-protected
+    /// ports are allowed.
+    #[serde(default)]
+    pub allowed_ports: Option<Vec<u16>>,
+    /// Additional ports to protect beyond the hardcoded set (SSH, DNS, DHCP, NTP).
+    /// For example, a non-standard SSH port like 2222.
+    #[serde(default)]
+    pub extra_protected_ports: Vec<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub domain: Option<String>,
@@ -24,6 +37,8 @@ pub struct Config {
     pub compose_agent_enabled: bool,
     #[serde(default)]
     pub control_plane: Option<String>, // "status_panel" or "compose_agent"
+    #[serde(default)]
+    pub firewall: Option<FirewallConfig>,
 }
 
 impl Config {
