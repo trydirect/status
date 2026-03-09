@@ -244,13 +244,6 @@ impl ConfigureFirewallCommand {
             }
         }
 
-        // Public ports default to 0.0.0.0/0
-        for rule in self.public_ports.iter_mut() {
-            if rule.source == "0.0.0.0/0" {
-                // already correct
-            }
-        }
-
         self
     }
 
