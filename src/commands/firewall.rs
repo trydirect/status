@@ -841,11 +841,33 @@ async fn handle_flush(result: &mut CommandResult, data: &ConfigureFirewallComman
 // ---------------------------------------------------------------------------
 
 /// Build the iptables comment for a rule: `stacker:{app_code}:{description}`
+///
+/// The resulting string is sanitized to remove control characters (including
+/// newlines) and truncated to a safe maximum length to avoid iptables
+/// rejecting the rule or misinterpreting the comment.
 fn build_comment(app_code: &str, rule: &FirewallPortRule) -> String {
     let desc = rule.comment.as_deref().unwrap_or(&rule.protocol);
-    format!("{}{}:{}", STACKER_COMMENT_PREFIX, app_code, desc)
+    let raw = format!("{}{}:{}", STACKER_COMMENT_PREFIX, app_code, desc);
+    sanitize_iptables_comment(&raw)
 }
 
+/// Sanitize an iptables comment string by stripping control characters
+/// (including newlines) and truncating to a safe maximum length.
+fn sanitize_iptables_comment(text: &str) -> String {
+    // Remove all control characters to prevent iptables from rejecting
+    // the rule or interpreting embedded newlines/tabs.
+    let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
+
+    // Truncate to a conservative maximum length; iptables itself allows
+    // longer comments, but overly long comments can still cause issues.
+    const MAX_COMMENT_LEN: usize = 255;
+
+    if cleaned.chars().count() > MAX_COMMENT_LEN {
+        cleaned.chars().take(MAX_COMMENT_LEN).collect()
+    } else {
+        cleaned
+    }
+}
 /// Check if iptables is available on the system.
 async fn check_iptables_available() -> Result<()> {
     let output = TokioCommand::new("iptables")
