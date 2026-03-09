@@ -31,6 +31,7 @@ fn test_config() -> Arc<Config> {
         ssl: Some("letsencrypt".to_string()),
         compose_agent_enabled: false,
         control_plane: None,
+        firewall: None,
     })
 }
 
@@ -39,7 +40,7 @@ fn router_with_env(agent_id: &str, token: &str, scopes: &str) -> Router {
     std::env::set_var("AGENT_TOKEN", token);
     std::env::set_var("AGENT_SCOPES", scopes);
     std::env::set_var("RATE_LIMIT_PER_MIN", "1000");
-    let state = Arc::new(AppState::new(test_config(), false));
+    let state = Arc::new(AppState::new(test_config(), false, None));
     create_router(state)
 }
 
@@ -160,7 +161,7 @@ async fn rate_limit_returns_429() {
     std::env::set_var("AGENT_ID", "agent-1");
     std::env::set_var("AGENT_TOKEN", "secret-token");
     std::env::set_var("AGENT_SCOPES", "commands:execute");
-    let state = Arc::new(AppState::new(test_config(), false));
+    let state = Arc::new(AppState::new(test_config(), false, None));
     let app = create_router(state);
     let path = "/api/v1/commands/execute";
 
