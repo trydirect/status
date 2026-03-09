@@ -293,14 +293,23 @@ fn validate_source_cidr(source: &str) -> Result<()> {
     }
     // Try parsing as CIDR (ip/prefix)
     if let Some((ip_part, prefix_part)) = source.split_once('/') {
-        let _ip: IpAddr = ip_part
+        let ip: IpAddr = ip_part
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid IP in source CIDR: {}", source))?;
         let prefix: u8 = prefix_part
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid prefix length in source CIDR: {}", source))?;
-        if prefix > 128 {
-            bail!("invalid CIDR prefix length: {}", prefix);
+        match ip {
+            IpAddr::V4(_) => {
+                if prefix > 32 {
+                    bail!("invalid IPv4 CIDR prefix length: {}", prefix);
+                }
+            }
+            IpAddr::V6(_) => {
+                if prefix > 128 {
+                    bail!("invalid IPv6 CIDR prefix length: {}", prefix);
+                }
+            }
         }
     } else {
         // Plain IP address
