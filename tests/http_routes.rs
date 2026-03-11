@@ -20,12 +20,13 @@ fn test_config() -> Arc<Config> {
         ssl: Some("letsencrypt".to_string()),
         compose_agent_enabled: false,
         control_plane: None,
+        firewall: None,
     })
 }
 
 // Helper to create router without UI
 fn test_router() -> Router {
-    let state = Arc::new(AppState::new(test_config(), false));
+    let state = Arc::new(AppState::new(test_config(), false, None));
     create_router(state)
 }
 

@@ -34,6 +34,7 @@ use crate::agent::docker;
 #[cfg(feature = "docker")]
 use crate::commands::execute_docker_operation;
 use crate::commands::executor::CommandExecutor;
+use crate::commands::firewall::FirewallPolicy;
 use crate::commands::{
     backup_current_binary, deploy_temp_binary, record_rollback, restart_service, rollback_latest,
 };
@@ -121,10 +122,11 @@ pub struct AppState {
     pub vault_client: Option<VaultClient>,
     pub token_cache: Option<TokenCache>,
     pub update_jobs: UpdateJobs,
+    pub firewall_policy: FirewallPolicy,
 }
 
 impl AppState {
-    pub fn new(config: Arc<Config>, with_ui: bool) -> Self {
+    pub fn new(config: Arc<Config>, with_ui: bool, api_port: Option<u16>) -> Self {
         let templates = if with_ui {
             match Tera::new("templates/**/*.html") {
                 Ok(t) => {
@@ -148,6 +150,8 @@ impl AppState {
         let token_cache = vault_client
             .is_some()
             .then(|| TokenCache::new(std::env::var("AGENT_TOKEN").unwrap_or_default()));
+
+        let firewall_policy = FirewallPolicy::from_config(&config, api_port);
 
         Self {
             session_store: SessionStore::new(),
@@ -181,6 +185,7 @@ impl AppState {
             vault_client,
             token_cache,
             update_jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            firewall_policy,
         }
     }
 }
@@ -1343,7 +1348,7 @@ async fn commands_execute(
         }
     };
     if let Some(stacker_cmd) = parsed_stacker_cmd {
-        match execute_stacker_command(&cmd, &stacker_cmd).await {
+        match execute_stacker_command(&cmd, &stacker_cmd, &state.firewall_policy).await {
             Ok(result) => {
                 return Json(result).into_response();
             }
@@ -1511,7 +1516,7 @@ async fn rotate_token(
 
 pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
     let cfg = Arc::new(config);
-    let state = Arc::new(AppState::new(cfg, with_ui));
+    let state = Arc::new(AppState::new(cfg, with_ui, Some(port)));
 
     // Spawn token refresh task if Vault is configured
     if let (Some(vault_client), Some(token_cache)) = (&state.vault_client, &state.token_cache) {
