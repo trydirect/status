@@ -1388,6 +1388,66 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         }
     };
 
+    if data.app_code == "all" {
+        let mut container_items: Vec<Value> = Vec::new();
+        let mut has_running = false;
+        let mut has_starting = false;
+        let mut has_exited = false;
+        let mut has_failed = false;
+        let mut has_unknown = false;
+
+        for entry in &containers {
+            let container_state = map_container_state(&entry.status).to_string();
+            match container_state.as_str() {
+                "running" => has_running = true,
+                "starting" => has_starting = true,
+                "exited" => has_exited = true,
+                "failed" => has_failed = true,
+                _ => has_unknown = true,
+            }
+
+            let mut item = json!({
+                "app_code": entry.name.trim_start_matches('/'),
+                "container_name": entry.name.trim_start_matches('/'),
+                "container_state": container_state,
+                "status": derive_health_status(&container_state, false),
+            });
+
+            if data.include_metrics {
+                item["metrics"] = build_metrics(entry);
+            }
+            container_items.push(item);
+        }
+
+        let (container_state, status) = if container_items.is_empty() {
+            ("unknown", "unknown")
+        } else if has_failed {
+            ("failed", "unhealthy")
+        } else if has_exited {
+            ("exited", "unhealthy")
+        } else if has_starting {
+            ("starting", "unhealthy")
+        } else if has_unknown {
+            ("unknown", "unknown")
+        } else if has_running {
+            ("running", "ok")
+        } else {
+            ("unknown", "unknown")
+        };
+
+        let body = json!({
+            "type": "health",
+            "deployment_hash": data.deployment_hash.clone(),
+            "app_code": data.app_code.clone(),
+            "status": status,
+            "container_state": container_state,
+            "last_heartbeat_at": now_timestamp(),
+            "containers": container_items,
+        });
+        result.result = Some(body);
+        return Ok(result);
+    }
+
     let target_name = resolve_container_name(&data.app_code, &data.container);
 
     // Handle system containers request (status_panel, compose-agent, etc.)
