@@ -109,12 +109,34 @@ verify_checksum() {
 install_binary() {
     chmod +x "${TMPDIR}/${ASSET_NAME}"
 
+    # Ensure INSTALL_DIR exists
+    if [ ! -d "$INSTALL_DIR" ]; then
+        if mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+            :
+        else
+            if command -v sudo >/dev/null 2>&1; then
+                echo "Creating installation directory ${INSTALL_DIR} with sudo..."
+                sudo mkdir -p "$INSTALL_DIR"
+            else
+                echo "Error: installation directory ${INSTALL_DIR} does not exist and could not be created without sudo." >&2
+                echo "Please create it manually or set INSTALL_DIR to a writable directory you own." >&2
+                exit 1
+            fi
+        fi
+    fi
+
     # Use sudo if we can't write to INSTALL_DIR
     if [ -w "$INSTALL_DIR" ]; then
         mv "${TMPDIR}/${ASSET_NAME}" "${INSTALL_DIR}/status"
     else
-        echo "Elevated permissions required to install to ${INSTALL_DIR}"
-        sudo mv "${TMPDIR}/${ASSET_NAME}" "${INSTALL_DIR}/status"
+        if command -v sudo >/dev/null 2>&1; then
+            echo "Elevated permissions required to install to ${INSTALL_DIR}"
+            sudo mv "${TMPDIR}/${ASSET_NAME}" "${INSTALL_DIR}/status"
+        else
+            echo "Error: cannot write to ${INSTALL_DIR} and sudo is not available." >&2
+            echo "Please install manually or choose a different INSTALL_DIR." >&2
+            exit 1
+        fi
     fi
 }
 
