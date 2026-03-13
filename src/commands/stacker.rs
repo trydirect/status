@@ -52,72 +52,63 @@ mod tests_aggregate_app_all {
 
     #[test]
     fn no_containers_is_unknown() {
-        let (state, status) =
-            aggregate_app_all_status(false, false, false, false, false, false);
+        let (state, status) = aggregate_app_all_status(false, false, false, false, false, false);
         assert_eq!(state, "unknown");
         assert_eq!(status, "unknown");
     }
 
     #[test]
     fn running_only_is_ok() {
-        let (state, status) =
-            aggregate_app_all_status(true, false, false, false, false, true);
+        let (state, status) = aggregate_app_all_status(true, false, false, false, false, true);
         assert_eq!(state, "running");
         assert_eq!(status, "ok");
     }
 
     #[test]
     fn starting_only_is_unhealthy_starting() {
-        let (state, status) =
-            aggregate_app_all_status(false, true, false, false, false, true);
+        let (state, status) = aggregate_app_all_status(false, true, false, false, false, true);
         assert_eq!(state, "starting");
         assert_eq!(status, "unhealthy");
     }
 
     #[test]
     fn exited_only_is_unhealthy_exited() {
-        let (state, status) =
-            aggregate_app_all_status(false, false, true, false, false, true);
+        let (state, status) = aggregate_app_all_status(false, false, true, false, false, true);
         assert_eq!(state, "exited");
         assert_eq!(status, "unhealthy");
     }
 
     #[test]
     fn failed_only_is_unhealthy_failed() {
-        let (state, status) =
-            aggregate_app_all_status(false, false, false, true, false, true);
+        let (state, status) = aggregate_app_all_status(false, false, false, true, false, true);
         assert_eq!(state, "failed");
         assert_eq!(status, "unhealthy");
     }
 
     #[test]
     fn unknown_only_is_unknown() {
-        let (state, status) =
-            aggregate_app_all_status(false, false, false, false, true, true);
+        let (state, status) = aggregate_app_all_status(false, false, false, false, true, true);
         assert_eq!(state, "unknown");
         assert_eq!(status, "unknown");
     }
 
     #[test]
     fn failed_takes_precedence_over_running() {
-        let (state, status) =
-            aggregate_app_all_status(true, false, false, true, false, true);
+        let (state, status) = aggregate_app_all_status(true, false, false, true, false, true);
         assert_eq!(state, "failed");
         assert_eq!(status, "unhealthy");
     }
 
     #[test]
     fn exited_takes_precedence_over_running() {
-        let (state, status) =
-            aggregate_app_all_status(true, false, true, false, false, true);
+        let (state, status) = aggregate_app_all_status(true, false, true, false, false, true);
         assert_eq!(state, "exited");
         assert_eq!(status, "unhealthy");
     }
 
     #[test]
     fn starting_takes_precedence_over_running() {
-        let (state, status) =
-            aggregate_app_all_status(true, true, false, false, false, true);
+        let (state, status) = aggregate_app_all_status(true, true, false, false, false, true);
         assert_eq!(state, "starting");
         assert_eq!(status, "unhealthy");
     }
