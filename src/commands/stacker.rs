@@ -20,6 +20,109 @@ use crate::transport::{Command as AgentCommand, CommandResult};
 #[cfg(feature = "docker")]
 use crate::agent::docker;
 
+#[cfg(any(feature = "docker", test))]
+fn aggregate_app_all_status(
+    has_running: bool,
+    has_starting: bool,
+    has_exited: bool,
+    has_failed: bool,
+    has_unknown: bool,
+    has_any_containers: bool,
+) -> (&'static str, &'static str) {
+    if !has_any_containers {
+        ("unknown", "unknown")
+    } else if has_failed {
+        ("failed", "unhealthy")
+    } else if has_exited {
+        ("exited", "unhealthy")
+    } else if has_starting {
+        ("starting", "unhealthy")
+    } else if has_unknown {
+        ("unknown", "unknown")
+    } else if has_running {
+        ("running", "ok")
+    } else {
+        ("unknown", "unknown")
+    }
+}
+
+#[cfg(test)]
+mod tests_aggregate_app_all {
+    use super::aggregate_app_all_status;
+
+    #[test]
+    fn no_containers_is_unknown() {
+        let (state, status) =
+            aggregate_app_all_status(false, false, false, false, false, false);
+        assert_eq!(state, "unknown");
+        assert_eq!(status, "unknown");
+    }
+
+    #[test]
+    fn running_only_is_ok() {
+        let (state, status) =
+            aggregate_app_all_status(true, false, false, false, false, true);
+        assert_eq!(state, "running");
+        assert_eq!(status, "ok");
+    }
+
+    #[test]
+    fn starting_only_is_unhealthy_starting() {
+        let (state, status) =
+            aggregate_app_all_status(false, true, false, false, false, true);
+        assert_eq!(state, "starting");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn exited_only_is_unhealthy_exited() {
+        let (state, status) =
+            aggregate_app_all_status(false, false, true, false, false, true);
+        assert_eq!(state, "exited");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn failed_only_is_unhealthy_failed() {
+        let (state, status) =
+            aggregate_app_all_status(false, false, false, true, false, true);
+        assert_eq!(state, "failed");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn unknown_only_is_unknown() {
+        let (state, status) =
+            aggregate_app_all_status(false, false, false, false, true, true);
+        assert_eq!(state, "unknown");
+        assert_eq!(status, "unknown");
+    }
+
+    #[test]
+    fn failed_takes_precedence_over_running() {
+        let (state, status) =
+            aggregate_app_all_status(true, false, false, true, false, true);
+        assert_eq!(state, "failed");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn exited_takes_precedence_over_running() {
+        let (state, status) =
+            aggregate_app_all_status(true, false, true, false, false, true);
+        assert_eq!(state, "exited");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn starting_takes_precedence_over_running() {
+        let (state, status) =
+            aggregate_app_all_status(true, true, false, false, false, true);
+        assert_eq!(state, "starting");
+        assert_eq!(status, "unhealthy");
+    }
+}
+
 use super::firewall::{self, ConfigureFirewallCommand};
 
 const LOGS_DEFAULT_LIMIT: usize = 400;
@@ -1419,21 +1522,14 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
             container_items.push(item);
         }
 
-        let (container_state, status) = if container_items.is_empty() {
-            ("unknown", "unknown")
-        } else if has_failed {
-            ("failed", "unhealthy")
-        } else if has_exited {
-            ("exited", "unhealthy")
-        } else if has_starting {
-            ("starting", "unhealthy")
-        } else if has_unknown {
-            ("unknown", "unknown")
-        } else if has_running {
-            ("running", "ok")
-        } else {
-            ("unknown", "unknown")
-        };
+        let (container_state, status) = aggregate_app_all_status(
+            has_running,
+            has_starting,
+            has_exited,
+            has_failed,
+            has_unknown,
+            !container_items.is_empty(),
+        );
 
         let body = json!({
             "type": "health",
