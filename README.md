@@ -27,7 +27,7 @@ curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh 
 Pin a specific version:
 
 ```bash
-VERSION=v0.1.3 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
+VERSION=v0.1.4 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 ```
 
 Custom install directory:
