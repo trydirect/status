@@ -320,7 +320,7 @@ async fn main() -> Result<()> {
                             commands::UpdatePhase::Completed => {
                                 println!("Update downloaded and verified successfully.");
                                 println!(
-                                    "Run 'status update deploy' via the API to apply the update."
+                                    "Use the update deployment API endpoint (or dashboard) to apply the update."
                                 );
                                 break;
                             }
