@@ -10,8 +10,8 @@ pub mod validator;
 pub mod version_check;
 
 pub use deploy::{
-    backup_current_binary, deploy_temp_binary, record_rollback, restart_service, rollback_latest,
-    RollbackEntry, RollbackManifest,
+    backup_current_binary, deploy_temp_binary, load_manifest, record_rollback, restart_service,
+    rollback_latest, RollbackEntry, RollbackManifest,
 };
 pub use docker_executor::execute_docker_operation;
 pub use docker_ops::DockerOperation;
