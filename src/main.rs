@@ -180,7 +180,7 @@ enum Commands {
 enum UpdateAction {
     /// Check for available updates
     Check,
-    /// Download and apply the latest update
+    /// Download and verify the latest update (deploy separately)
     Apply {
         /// Target version (default: latest)
         #[arg(long)]
