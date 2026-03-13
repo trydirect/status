@@ -3,7 +3,7 @@
 # Usage: curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 #
 # Environment variables:
-#   VERSION     - Pin a specific version (e.g. "v0.1.3"). Default: latest release.
+#   VERSION     - Pin a specific version (e.g. "v0.1.4"). Default: latest release.
 #   INSTALL_DIR - Installation directory. Default: /usr/local/bin
 
 set -eu
