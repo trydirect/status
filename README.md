@@ -1,237 +1,196 @@
-[![Docker CI/CD](https://github.com/trydirect/status/actions/workflows/ci.yml/badge.svg)](https://github.com/trydirect/status/actions/workflows/ci.yml)
-![Docker Stars](https://img.shields.io/docker/stars/trydirect/status.svg)
-![Docker Pulls](https://img.shields.io/docker/pulls/trydirect/status.svg)
-![Docker Automated](https://img.shields.io/docker/cloud/automated/trydirect/status.svg)
-![Docker Build](https://img.shields.io/docker/cloud/build/trydirect/status.svg)
-<a href="https://discord.gg/nsjje55wuu"><img alt="Discord" src="https://img.shields.io/discord/578119430391988232?label=discord"></a>
-[![Gitter chat](https://badges.gitter.im/trydirect/community.png)](https://gitter.im/try-direct/community)
-<br><br><br><br>
 <div align="center">
-<img width="300" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status.png"> 
- </div>
- <div align="center">
-Server stack health application with UI.</div>
-<br><br><br><br>
 
-<center><img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/screenshot.png"></center>
+<img width="200" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status.png">
 
+# Status Panel
+
+**A lightweight infrastructure agent for server and container management.**
+
+Monitors health, collects metrics, manages Docker containers, and executes commands — all from a single statically-linked binary.
+
+[![CI](https://github.com/trydirect/status/actions/workflows/ci.yml/badge.svg)](https://github.com/trydirect/status/actions/workflows/ci.yml)
+[![Docker Pulls](https://img.shields.io/docker/pulls/trydirect/status.svg)](https://hub.docker.com/r/trydirect/status)
+[![GitHub Release](https://img.shields.io/github/v/release/trydirect/status)](https://github.com/trydirect/status/releases/latest)
+[![Discord](https://img.shields.io/discord/578119430391988232?label=discord&color=5865F2)](https://discord.gg/nsjje55wuu)
+
+</div>
+
+---
+
+## Highlights
+
+- **Single binary** — statically linked (musl), zero runtime dependencies
+- **Docker management** — list, start, stop, restart, pause containers; health checks and log retrieval
+- **System metrics** — CPU, memory, disk usage via CLI or JSON API
+- **18+ remote commands** — health, logs, exec, deploy, config management, firewall, proxy, and more via Stacker integration
+- **Self-update** — download, verify (SHA256), deploy, and rollback — all built in
+- **Secure by default** — HMAC-SHA256 signed requests, replay protection, rate limiting, audit logging
+- **Vault integration** — fetch, apply, and diff app configs from HashiCorp Vault
+- **Flexible modes** — run as a CLI tool, background daemon, API server, or API+UI server
 
 ## Quick Install
-
-Install the latest release (Linux x86_64):
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 ```
 
-Pin a specific version:
+Pin a specific version or choose a custom directory:
 
 ```bash
 VERSION=v0.1.4 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
-```
-
-Custom install directory:
-
-```bash
 INSTALL_DIR=~/.local/bin curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 ```
 
-Verify installation:
+Verify:
 
 ```bash
 status --version
 ```
 
-## Build
+## CLI Commands
+
+```
+status serve [--port 5000] [--with-ui]   Start the HTTP API server
+status containers                         List all Docker containers
+status health [name]                      Check container or stack health
+status logs <name> [-n 100]               Fetch container logs
+status start <name>                       Start a stopped container
+status stop <name>                        Stop a running container
+status restart <name>                     Restart a container
+status pause <name>                       Pause a container
+status metrics [--json]                   Show CPU, memory, disk usage
+status update check                       Check for new versions
+status update apply [--version V]         Download and verify an update
+status update rollback                    Roll back to previous version
+```
+
+## Running Modes
+
+**CLI** — run a single command and exit:
+
+```bash
+status health
+status metrics --json
+status logs my-app -n 50
+```
+
+**Daemon** — background polling agent:
+
+```bash
+status --daemon --config config.json
+```
+
+**API server** — local HTTP interface:
+
+```bash
+status serve --port 5000           # JSON API only
+status serve --port 5000 --with-ui # API + web dashboard
+```
+
+## Build from Source
 
 ```bash
 cargo build --release
 ```
 
-## Run
-
-Foreground daemon (default without subcommands):
+Minimal build (no Docker support):
 
 ```bash
-./target/release/status --config config.json
+cargo build --release --no-default-features --features minimal
 ```
 
-Daemon mode (background):
+## Docker
 
 ```bash
-./target/release/status --daemon --config config.json
+docker pull trydirect/status:latest
 ```
 
-Local API server (API-only mode):
+Or use Docker Compose with the included `docker-compose.yml` for a full setup with API server and background agent.
 
-```bash
-./target/release/status serve --port 5000
-```
+## API Reference
 
-Local API server with UI (serves HTML templates):
+### Core Endpoints
 
-```bash
-./target/release/status serve --port 5000 --with-ui
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check |
+| `GET` | `/capabilities` | System capabilities |
+| `GET` | `/metrics` | Current system metrics |
+| `GET` | `/metrics/stream` | WebSocket metrics stream |
 
-Then open your browser to `http://localhost:5000/login` to access the web interface.
+### Command Execution
 
-Docker operations (requires `--features docker`):
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/commands/execute` | Execute a validated command |
+| `GET` | `/api/v1/commands/wait/{hash}` | Long-poll for queued commands |
+| `POST` | `/api/v1/commands/enqueue` | Enqueue a command |
+| `POST` | `/api/v1/commands/report` | Report execution result |
 
-```bash
-cargo run --features docker --bin status -- containers
-cargo run --features docker --bin status -- restart status
-```
+### Self-Update
 
-## Features
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/self/version` | Current and available versions |
+| `POST` | `/api/self/update/start` | Start update job |
+| `GET` | `/api/self/update/status/{id}` | Check update progress |
+| `POST` | `/api/self/update/deploy` | Deploy prepared binary |
+| `POST` | `/api/self/update/rollback` | Restore previous version |
 
-- **API-only mode**: Returns JSON responses for programmatic access
-- **UI mode** (`--with-ui`): Serves HTML templates from `templates/` directory with static files from `static/`
-- Docker container management (list, restart, stop, pause)
-- Session-based authentication
-- Health check endpoint
-- Self-update (beta): remote version check, binary download + SHA256 verify, deploy with backup/rollback
+### Stacker Commands (Remote)
 
-## Command Execution (API)
+The agent accepts signed commands from the Stacker dashboard covering the full lifecycle:
 
-Execute validated shell commands via the local API. The endpoint accepts a `transport::Command` payload and returns a `transport::CommandResult`.
+| Command | Description |
+|---------|-------------|
+| `health` | Container health with optional metrics |
+| `logs` | Container logs with cursor pagination |
+| `start` / `stop` / `restart` | Container lifecycle |
+| `exec` | Run command inside a container (sandboxed) |
+| `server_resources` | CPU, memory, disk, network metrics |
+| `list_containers` | All containers with health and logs |
+| `error_summary` | Categorized error analysis |
+| `deploy_app` / `remove_app` | App deployment via docker-compose |
+| `fetch_config` / `apply_config` | Vault config management |
+| `config_diff` | Detect configuration drift |
+| `configure_proxy` | Nginx proxy management |
+| `configure_firewall` | iptables policy management |
 
-- Endpoint: `POST /api/v1/commands/execute`
-- Required fields: `id` (string), `name` (full command line)
-- Optional: `params.timeout_secs` (number) to override the default 60s timeout
+## Security
 
-Example: run a simple echo
+- **HMAC-SHA256** request signing with `AGENT_TOKEN`
+- **Replay protection** via `X-Request-Id` tracking
+- **Rate limiting** per agent
+- **Command validation** — conservative allowlist, blocked shells and metacharacters
+- **Exec sandboxing** — dangerous commands (`rm -rf /`, `mkfs`, `shutdown`, etc.) are blocked
+- **Audit logging** — all auth attempts and scope denials recorded
+- **Vault integration** — secrets and configs stored securely, never in plaintext
 
-```bash
-curl -s \
-	-H 'Content-Type: application/json' \
-	-X POST http://localhost:5000/api/v1/commands/execute \
-	-d '{
-		"id": "cmd-001",
-		"name": "echo hello from agent",
-		"params": { "timeout_secs": 10 }
-	}' | jq .
-```
+## Configuration
 
-Example: run a short sleep
+| Environment Variable | Description |
+|---------------------|-------------|
+| `AGENT_ID` | Unique agent identifier |
+| `AGENT_TOKEN` | Authentication token for signed requests |
+| `DASHBOARD_URL` | Remote dashboard URL |
+| `VAULT_ADDRESS` | HashiCorp Vault server URL |
+| `UPDATE_SERVER_URL` | Remote update server for version checks |
+| `COMPOSE_AGENT_ENABLED` | Enable compose-agent mode |
+| `METRICS_INTERVAL_SECS` | Metrics collection interval |
 
-```bash
-curl -s \
-	-H 'Content-Type: application/json' \
-	-X POST http://localhost:5000/api/v1/commands/execute \
-	-d '{
-		"id": "cmd-002",
-		"name": "sleep 2",
-		"params": { "timeout_secs": 5 }
-	}' | jq .
-```
+## Contributing
 
-Notes:
-- Commands are validated by a conservative allowlist and safety checks; see `src/commands/validator.rs`.
-- Disallowed by default: shells (`sh`, `bash`, `zsh`) and metacharacters like `; | & > <`.
-- Absolute paths must match allowed prefixes (defaults: `/tmp`, `/var/tmp`).
-- Output (`stdout`/`stderr`) and `exit_code` are included when available, along with a `status` of `success`, `failed`, `timeout`, or `killed`.
+1. Fork the repo
+2. Create a feature branch from `testing`
+3. Run `cargo fmt --all && cargo clippy -- -D warnings`
+4. Open a PR against `testing`
 
-## Long-Poll Command Queue
+## License
 
-The agent supports an in-memory command queue for dashboard-driven execution via long-polling. Commands are queued and agents poll for them with configurable timeouts.
+See [LICENSE](LICENSE) for details.
 
-> **Note:** The built-in Axum server (for local development) exposes `/api/v1/commands/*` routes. When the agent talks to the remote Stacker dashboard it uses the dedicated `/api/v1/agent/commands/*` namespace (for example `/api/v1/agent/commands/wait/{deployment_hash}`) **and** includes `Authorization: Bearer <AGENT_TOKEN>` in every request.
+---
 
-### Endpoints
-
-- `GET /api/v1/commands/wait/{hash}?timeout=N` (local) / `GET /api/v1/agent/commands/wait/{deployment_hash}?timeout=N` (Stacker) - Long-poll for next queued command (default 30s timeout)
-- `POST /api/v1/commands/report` (local) / `POST /api/v1/agent/commands/report` (Stacker) - Report command execution result
-- `POST /api/v1/commands/enqueue` (local) / `POST /api/v1/agent/commands/enqueue` (Stacker) - Enqueue a command (for testing/local use)
-
-All endpoints require `X-Agent-Id` header matching the `AGENT_ID` environment variable.
-
-### Manual Testing
-
-Start the server with agent ID:
-
-```bash
-export AGENT_ID=test-agent
-cargo r -- serve --port 5000
-```
-
-**Terminal 1: Long-poll for commands**
-
-```bash
-curl -H 'X-Agent-Id: test-agent' \
-  'http://localhost:5000/api/v1/commands/wait/demo?timeout=10'
-```
-
-**Terminal 2: Enqueue a command**
-
-```bash
-curl -s \
-  -H 'Content-Type: application/json' \
-  -X POST http://localhost:5000/api/v1/commands/enqueue \
-  -d '{
-    "id": "cmd-001",
-    "name": "echo hello from queue",
-    "params": {}
-  }' | jq .
-```
-
-The long-poll in Terminal 1 will immediately return the queued command.
-
-**Report command result**
-
-```bash
-curl -s \
-  -H 'Content-Type: application/json' \
-  -H 'X-Agent-Id: test-agent' \
-  -X POST http://localhost:5000/api/v1/commands/report \
-  -d '{
-    "command_id": "cmd-001",
-    "status": "success",
-    "result": {"exit_code": 0, "stdout": "hello from queue\n"},
-    "error": null
-  }' | jq .
-```
-
-### Demo Script
-
-Run the automated demo:
-
-```bash
-export AGENT_ID=test-agent
-./examples/long_poll_demo.sh
-```
-
-This script starts a background poller, enqueues a command, and demonstrates the long-poll notification mechanism.
-
-## Templates
-
-The UI uses Tera templating engine (similar to Jinja2). Templates are located in:
-- `templates/` - HTML templates (login.html, index.html, error.html)
-- `static/` - CSS, JavaScript, and other static assets
-
-## Notes
-
-- Reads `config.json` and normalizes `apps_info` to structured items.
-- Subsystems marked with `@todo` will be implemented per `.ai/GOAL.md`.
-
-## Self-update (beta)
-
-- Env vars: `UPDATE_SERVER_URL` or `UPDATE_BINARY_URL`, optional `UPDATE_EXPECTED_SHA256`, `AGENT_ID`, `UPDATE_STORAGE_PATH`
-- Endpoints:
-  - `GET /api/self/version` → current + available (when `UPDATE_SERVER_URL` is set)
-  - `POST /api/self/update/start` → returns `job_id` (requires `X-Agent-Id`)
-  - `GET /api/self/update/status/{id}` → phase: pending|downloading|verifying|completed|failed
-  - `POST /api/self/update/deploy` → body: `{ "job_id", "install_path?", "service_name?" }`; backs up current binary, deploys prepared one
-  - `POST /api/self/update/rollback` → restore latest backup
-
-Example (start + deploy):
-
-```bash
-curl -X POST http://localhost:5000/api/self/update/start \
-  -H "X-Agent-Id: $AGENT_ID" \
-  -d '{"version":"1.2.3"}'
-
-curl -X POST http://localhost:5000/api/self/update/deploy \
-  -H "X-Agent-Id: $AGENT_ID" \
-  -d '{"job_id":"<returned-id>","service_name":"status-panel"}'
-```
+<div align="center">
+Built with Rust. Maintained by <a href="https://github.com/trydirect">TryDirect</a>.
+</div>
