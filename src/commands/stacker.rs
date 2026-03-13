@@ -20,6 +20,100 @@ use crate::transport::{Command as AgentCommand, CommandResult};
 #[cfg(feature = "docker")]
 use crate::agent::docker;
 
+#[cfg(any(feature = "docker", test))]
+fn aggregate_app_all_status(
+    has_running: bool,
+    has_starting: bool,
+    has_exited: bool,
+    has_failed: bool,
+    has_unknown: bool,
+    has_any_containers: bool,
+) -> (&'static str, &'static str) {
+    if !has_any_containers {
+        ("unknown", "unknown")
+    } else if has_failed {
+        ("failed", "unhealthy")
+    } else if has_exited {
+        ("exited", "unhealthy")
+    } else if has_starting {
+        ("starting", "unhealthy")
+    } else if has_unknown {
+        ("unknown", "unknown")
+    } else if has_running {
+        ("running", "ok")
+    } else {
+        ("unknown", "unknown")
+    }
+}
+
+#[cfg(test)]
+mod tests_aggregate_app_all {
+    use super::aggregate_app_all_status;
+
+    #[test]
+    fn no_containers_is_unknown() {
+        let (state, status) = aggregate_app_all_status(false, false, false, false, false, false);
+        assert_eq!(state, "unknown");
+        assert_eq!(status, "unknown");
+    }
+
+    #[test]
+    fn running_only_is_ok() {
+        let (state, status) = aggregate_app_all_status(true, false, false, false, false, true);
+        assert_eq!(state, "running");
+        assert_eq!(status, "ok");
+    }
+
+    #[test]
+    fn starting_only_is_unhealthy_starting() {
+        let (state, status) = aggregate_app_all_status(false, true, false, false, false, true);
+        assert_eq!(state, "starting");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn exited_only_is_unhealthy_exited() {
+        let (state, status) = aggregate_app_all_status(false, false, true, false, false, true);
+        assert_eq!(state, "exited");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn failed_only_is_unhealthy_failed() {
+        let (state, status) = aggregate_app_all_status(false, false, false, true, false, true);
+        assert_eq!(state, "failed");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn unknown_only_is_unknown() {
+        let (state, status) = aggregate_app_all_status(false, false, false, false, true, true);
+        assert_eq!(state, "unknown");
+        assert_eq!(status, "unknown");
+    }
+
+    #[test]
+    fn failed_takes_precedence_over_running() {
+        let (state, status) = aggregate_app_all_status(true, false, false, true, false, true);
+        assert_eq!(state, "failed");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn exited_takes_precedence_over_running() {
+        let (state, status) = aggregate_app_all_status(true, false, true, false, false, true);
+        assert_eq!(state, "exited");
+        assert_eq!(status, "unhealthy");
+    }
+
+    #[test]
+    fn starting_takes_precedence_over_running() {
+        let (state, status) = aggregate_app_all_status(true, true, false, false, false, true);
+        assert_eq!(state, "starting");
+        assert_eq!(status, "unhealthy");
+    }
+}
+
 use super::firewall::{self, ConfigureFirewallCommand};
 
 const LOGS_DEFAULT_LIMIT: usize = 400;
@@ -1387,6 +1481,59 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
             return Ok(result);
         }
     };
+
+    if data.app_code == "all" {
+        let mut container_items: Vec<Value> = Vec::new();
+        let mut has_running = false;
+        let mut has_starting = false;
+        let mut has_exited = false;
+        let mut has_failed = false;
+        let mut has_unknown = false;
+
+        for entry in &containers {
+            let container_state = map_container_state(&entry.status).to_string();
+            match container_state.as_str() {
+                "running" => has_running = true,
+                "starting" => has_starting = true,
+                "exited" => has_exited = true,
+                "failed" => has_failed = true,
+                _ => has_unknown = true,
+            }
+
+            let mut item = json!({
+                "app_code": entry.name.trim_start_matches('/'),
+                "container_name": entry.name.trim_start_matches('/'),
+                "container_state": container_state,
+                "status": derive_health_status(&container_state, false),
+            });
+
+            if data.include_metrics {
+                item["metrics"] = build_metrics(entry);
+            }
+            container_items.push(item);
+        }
+
+        let (container_state, status) = aggregate_app_all_status(
+            has_running,
+            has_starting,
+            has_exited,
+            has_failed,
+            has_unknown,
+            !container_items.is_empty(),
+        );
+
+        let body = json!({
+            "type": "health",
+            "deployment_hash": data.deployment_hash.clone(),
+            "app_code": data.app_code.clone(),
+            "status": status,
+            "container_state": container_state,
+            "last_heartbeat_at": now_timestamp(),
+            "containers": container_items,
+        });
+        result.result = Some(body);
+        return Ok(result);
+    }
 
     let target_name = resolve_container_name(&data.app_code, &data.container);
 

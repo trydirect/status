@@ -16,6 +16,32 @@ Server stack health application with UI.</div>
 <center><img width="1063" alt="Screen Shot 2019-05-21 at 12 45 11 PM" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/screenshot.png"></center>
 
 
+## Quick Install
+
+Install the latest release (Linux x86_64):
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
+```
+
+Pin a specific version:
+
+```bash
+VERSION=v0.1.4 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
+```
+
+Custom install directory:
+
+```bash
+INSTALL_DIR=~/.local/bin curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
+```
+
+Verify installation:
+
+```bash
+status --version
+```
+
 ## Build
 
 ```bash

@@ -1,5 +1,5 @@
 use dotenvy::dotenv;
-use status_panel::{agent, comms, utils};
+use status_panel::{agent, commands, comms, monitoring, utils};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -142,9 +142,52 @@ enum Commands {
     /// Stop container
     #[cfg(feature = "docker")]
     Stop { name: String },
+    /// Start a stopped container
+    #[cfg(feature = "docker")]
+    Start { name: String },
     /// Pause container
     #[cfg(feature = "docker")]
     Pause { name: String },
+    /// Check container health
+    #[cfg(feature = "docker")]
+    Health {
+        /// Container name (omit for all containers)
+        name: Option<String>,
+    },
+    /// Fetch container logs
+    #[cfg(feature = "docker")]
+    Logs {
+        /// Container name
+        name: String,
+        /// Number of log lines to show
+        #[arg(short = 'n', long, default_value_t = 100)]
+        lines: u32,
+    },
+    /// Print system metrics (CPU, memory, disk)
+    Metrics {
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Self-update management
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateAction {
+    /// Check for available updates
+    Check,
+    /// Download and verify the latest update (deploy separately)
+    Apply {
+        /// Target version (default: latest)
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Rollback to the previous version
+    Rollback,
 }
 
 fn run_daemon() -> Result<()> {
@@ -195,7 +238,114 @@ async fn main() -> Result<()> {
         #[cfg(feature = "docker")]
         Some(Commands::Stop { name }) => agent::docker::stop(&name).await?,
         #[cfg(feature = "docker")]
+        Some(Commands::Start { name }) => agent::docker::start(&name).await?,
+        #[cfg(feature = "docker")]
         Some(Commands::Pause { name }) => agent::docker::pause(&name).await?,
+        #[cfg(feature = "docker")]
+        Some(Commands::Health { name }) => {
+            let all_health = agent::docker::list_container_health().await?;
+            if let Some(container) = name {
+                let normalized = container.trim_start_matches('/');
+                let filtered: Vec<_> = all_health
+                    .into_iter()
+                    .filter(|h| h.name == normalized)
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&filtered)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&all_health)?);
+            }
+        }
+        #[cfg(feature = "docker")]
+        Some(Commands::Logs { name, lines }) => {
+            let logs = agent::docker::get_container_logs(&name, &lines.to_string()).await?;
+            print!("{}", logs);
+        }
+        Some(Commands::Metrics { json }) => {
+            let collector = monitoring::MetricsCollector::new();
+            let snapshot = collector.snapshot().await;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else {
+                println!("CPU Usage:    {:.1}%", snapshot.cpu_usage_pct);
+                println!(
+                    "Memory:       {} / {} MB ({:.1}%)",
+                    snapshot.memory_used_bytes / 1_048_576,
+                    snapshot.memory_total_bytes / 1_048_576,
+                    if snapshot.memory_total_bytes > 0 {
+                        (snapshot.memory_used_bytes as f64 / snapshot.memory_total_bytes as f64)
+                            * 100.0
+                    } else {
+                        0.0
+                    }
+                );
+                println!(
+                    "Disk:         {} / {} GB ({:.1}%)",
+                    snapshot.disk_used_bytes / 1_073_741_824,
+                    snapshot.disk_total_bytes / 1_073_741_824,
+                    if snapshot.disk_total_bytes > 0 {
+                        (snapshot.disk_used_bytes as f64 / snapshot.disk_total_bytes as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                );
+                println!("Disk Usage:   {:.1}%", snapshot.disk_used_pct);
+            }
+        }
+        Some(Commands::Update { action }) => match action {
+            UpdateAction::Check => {
+                println!("Current version: {}", VERSION);
+                match commands::check_remote_version().await? {
+                    Some(remote) => {
+                        println!("Latest version:  {}", remote.version);
+                        if remote.version != VERSION {
+                            println!("Update available!");
+                        } else {
+                            println!("Already up to date.");
+                        }
+                    }
+                    None => {
+                        println!("Could not check for updates (UPDATE_SERVER_URL not set).");
+                    }
+                }
+            }
+            UpdateAction::Apply { version } => {
+                println!("Starting update...");
+                let jobs = commands::UpdateJobs::default();
+                let job_id = commands::start_update_job(jobs.clone(), version).await?;
+                println!("Update job started: {}", job_id);
+                // Poll until complete
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Some(status) = commands::get_update_status(jobs.clone(), &job_id).await {
+                        match status.phase {
+                            commands::UpdatePhase::Completed => {
+                                println!("Update downloaded and verified successfully.");
+                                println!(
+                                    "Use the update deployment API endpoint (or dashboard) to apply the update."
+                                );
+                                break;
+                            }
+                            commands::UpdatePhase::Failed(ref msg) => {
+                                eprintln!("Update failed: {}", msg);
+                                std::process::exit(1);
+                            }
+                            _ => continue,
+                        }
+                    }
+                }
+            }
+            UpdateAction::Rollback => {
+                let manifest = commands::load_manifest().await?;
+                if manifest.entries.is_empty() {
+                    println!("No rollback entries found.");
+                } else {
+                    let latest = &manifest.entries[manifest.entries.len() - 1];
+                    println!("Rolling back to backup: {}", latest.backup_path);
+                    commands::rollback_latest().await?;
+                    println!("Rollback complete.");
+                }
+            }
+        },
         None => {
             // Default: run the agent daemon
             if args.compose_mode {
