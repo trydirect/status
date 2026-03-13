@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.4 — 2026-03-13
+### Added — CLI Improvements, Install Script & GitHub Releases
+
+#### CI: GitHub Releases on Tags
+- Added `v*` tag trigger to CI workflow
+- New `create-release` job: downloads musl binary, generates SHA256 checksum, publishes GitHub Release via `softprops/action-gh-release@v2`
+- Tag-triggered artifacts now use clean names without SHA suffix (e.g. `status-linux-x86_64-musl-v0.1.4`)
+
+#### Install Script (`install.sh`)
+- POSIX `sh` installer: `curl -sSfL .../install.sh | sh`
+- Detects OS/arch (Linux x86_64 only initially)
+- Queries GitHub API for latest release (no `jq` dependency)
+- Supports `VERSION` env var to pin a specific version
+- Supports `INSTALL_DIR` env var (default `/usr/local/bin`)
+- Downloads musl binary, verifies SHA256 checksum, installs with `sudo` if needed
+
+#### New CLI Subcommands (`src/main.rs`)
+- `start <name>` — Start a stopped container (Docker)
+- `health [name]` — Check container health for one or all containers (Docker)
+- `logs <name> [-n lines]` — Fetch container logs with configurable line count (Docker)
+- `metrics [--json]` — Print system metrics: CPU, memory, disk usage
+- `update check` — Check for available updates against remote server
+- `update apply [--version V]` — Download and verify an update
+- `update rollback` — Rollback to the previous binary version
+
+#### README
+- Added "Quick Install" section with examples for latest install, version pinning, custom directory, and verification
+
 ## 2026-02-02
 ### Added - Container Exec & Server Resources Commands
 
