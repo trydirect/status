@@ -245,9 +245,10 @@ async fn main() -> Result<()> {
         Some(Commands::Health { name }) => {
             let all_health = agent::docker::list_container_health().await?;
             if let Some(container) = name {
+                let normalized = container.trim_start_matches('/');
                 let filtered: Vec<_> = all_health
                     .into_iter()
-                    .filter(|h| h.name == container)
+                    .filter(|h| h.name == normalized)
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&filtered)?);
             } else {
