@@ -914,7 +914,8 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/v1/commands/report", post(commands_report))
         .route("/api/v1/commands/execute", post(commands_execute))
         .route("/api/v1/commands/enqueue", post(commands_enqueue))
-        .route("/api/v1/auth/rotate-token", post(rotate_token));
+        .route("/api/v1/auth/rotate-token", post(rotate_token))
+        .route("/api/v1/register", post(register_handler));
 
     #[cfg(feature = "docker")]
     {
@@ -1557,4 +1558,59 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
     info!("HTTP server listening on {}", addr);
     axum::serve(listener, app).into_future().await?;
     Ok(())
+}
+
+// --- Agent self-registration ---
+
+#[derive(Debug, Deserialize)]
+struct RegisterRequest {
+    purchase_token: String,
+    stack_id: String,
+    /// Optional override for the Stacker Server URL
+    server: Option<String>,
+}
+
+async fn register_handler(
+    State(_state): State<SharedState>,
+    Json(payload): Json<RegisterRequest>,
+) -> impl IntoResponse {
+    let dashboard_url = payload.server.unwrap_or_else(|| {
+        std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "https://stacker.try.direct".to_string())
+    });
+
+    match crate::agent::registration::register_with_stacker(
+        &dashboard_url,
+        &payload.purchase_token,
+        &payload.stack_id,
+    )
+    .await
+    {
+        Ok(reg) => {
+            // Persist registration to disk
+            let save_path = std::path::Path::new("/etc/status-panel/registration.json");
+            if let Err(e) = crate::agent::registration::save_registration(save_path, &reg) {
+                error!("failed to save registration to disk: {}", e);
+                // Still return success — the registration itself worked
+            }
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "registered",
+                    "agent_id": reg.agent_id,
+                    "deployment_hash": reg.deployment_hash,
+                    "dashboard_url": reg.dashboard_url,
+                })),
+            )
+        }
+        Err(e) => {
+            error!("agent registration failed: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "status": "error",
+                    "message": e.to_string(),
+                })),
+            )
+        }
+    }
 }

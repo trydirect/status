@@ -174,6 +174,18 @@ enum Commands {
         #[command(subcommand)]
         action: UpdateAction,
     },
+    /// Register this agent with Stacker Server using a purchase token
+    Register {
+        /// Purchase token from marketplace
+        #[arg(long)]
+        token: String,
+        /// Stack template ID
+        #[arg(long)]
+        stack_id: String,
+        /// Stacker Server URL (default: from DASHBOARD_URL env or https://stacker.try.direct)
+        #[arg(long)]
+        server: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -346,6 +358,45 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Some(Commands::Register {
+            token,
+            stack_id,
+            server,
+        }) => {
+            let dashboard_url = server.unwrap_or_else(|| {
+                std::env::var("DASHBOARD_URL")
+                    .unwrap_or_else(|_| "https://stacker.try.direct".to_string())
+            });
+            match agent::registration::register_with_stacker(&dashboard_url, &token, &stack_id)
+                .await
+            {
+                Ok(reg) => {
+                    println!("Registered successfully!");
+                    println!("Agent ID:         {}", reg.agent_id);
+                    println!("Deployment Hash:  {}", reg.deployment_hash);
+                    if let Some(url) = &reg.dashboard_url {
+                        println!("Dashboard URL:    {}", url);
+                    }
+                    let save_path = std::path::Path::new("/etc/status-panel/registration.json");
+                    if let Err(e) = agent::registration::save_registration(save_path, &reg) {
+                        eprintln!(
+                            "Warning: could not save registration to {}: {}",
+                            save_path.display(),
+                            e
+                        );
+                        eprintln!(
+                            "You may need to run with elevated permissions or save manually."
+                        );
+                    } else {
+                        println!("Config saved to:  {}", save_path.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Registration failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         None => {
             // Default: run the agent daemon
             if args.compose_mode {
