@@ -83,9 +83,9 @@ fn print_banner() {
     };
 
     eprintln!();
-    eprintln!("╔════════════════════════════════════════════════════════════════════════════════════════════╗");
-    eprintln!("║  Status Panel (TryDirect Agent)                                                         ║");
-    eprintln!("╠════════════════════════════════════════════════════════════════════════════════════════════╣");
+    eprintln!("╔═════════════════════════════════════════════════════════════════════════════════════════╗");
+    eprintln!("║  Status Panel                                                                           ║");
+    eprintln!("╠═════════════════════════════════════════════════════════════════════════════════════════╣");
     eprintln!("║  Version:         {:<66}║", VERSION);
     eprintln!("║  Package:         {:<66}║", PKG_NAME);
     eprintln!("║  Rust:            {:<66}║", rust_version);
@@ -99,12 +99,12 @@ fn print_banner() {
     eprintln!("║  Agent ID:        {:<66}║", agent_id);
     eprintln!("║  Stacker/Auth:    {:<66}║", stacker_status);
     eprintln!("║  Debug Mode:      {:<66}║", debug_mode);
-    eprintln!("╚════════════════════════════════════════════════════════════════════════════════════════════╝");
+    eprintln!("╚═════════════════════════════════════════════════════════════════════════════════════════╝");
     eprintln!();
 }
 
 #[derive(Parser)]
-#[command(name = "status", version, about = "Status Panel (TryDirect Agent)")]
+#[command(name = "status", version, about = "Status Panel")]
 struct AppCli {
     /// Run in daemon mode (background)
     #[arg(long)]
