@@ -1558,4 +1558,3 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
     axum::serve(listener, app).into_future().await?;
     Ok(())
 }
-
