@@ -83,28 +83,27 @@ fn print_banner() {
     };
 
     eprintln!();
-    eprintln!("╔═════════════════════════════════════════════════════════════════════════════════════════╗");
-    eprintln!("║  Status Panel                                                                           ║");
-    eprintln!("╠═════════════════════════════════════════════════════════════════════════════════════════╣");
-    eprintln!("║  Version:         {:<66}║", VERSION);
-    eprintln!("║  Package:         {:<66}║", PKG_NAME);
-    eprintln!("║  Rust:            {:<66}║", rust_version);
-    eprintln!("║  Build:           {:<66}║", build_profile);
-    eprintln!("║  Docker:          {:<66}║", docker_feature);
-    eprintln!("║  PID:             {:<66}║", std::process::id());
-    eprintln!("║  Mode:            {:<66}║", mode);
-    eprintln!("║  Dashboard URL:   {:<66}║", dashboard_url);
-    eprintln!("║  Base URL:        {:<66}║", base_url);
-    eprintln!("║  Vault URL:       {:<66}║", vault_url);
-    eprintln!("║  Agent ID:        {:<66}║", agent_id);
-    eprintln!("║  Stacker/Auth:    {:<66}║", stacker_status);
-    eprintln!("║  Debug Mode:      {:<66}║", debug_mode);
-    eprintln!("╚═════════════════════════════════════════════════════════════════════════════════════════╝");
+    eprintln!("  Status Panel                                                                            ");
+    eprintln!("═══════════════════════════════════════════════════════════");
+    eprintln!("  Version:         {}", VERSION);
+    eprintln!("  Package:         {}", PKG_NAME);
+    eprintln!("  Rust:            {}", rust_version);
+    eprintln!("  Build:           {}", build_profile);
+    eprintln!("  Docker:          {}", docker_feature);
+    eprintln!("  PID:             {}", std::process::id());
+    eprintln!("  Mode:            {}", mode);
+    eprintln!("  Dashboard URL:   {}", dashboard_url);
+    eprintln!("  Base URL:        {}", base_url);
+    eprintln!("  Vault URL:       {}", vault_url);
+    eprintln!("  Agent ID:        {}", agent_id);
+    eprintln!("  Stacker/Auth:    {}", stacker_status);
+    eprintln!("  Debug Mode:      {}", debug_mode);
+    eprintln!("═══════════════════════════════════════════════════════════");
     eprintln!();
 }
 
 #[derive(Parser)]
-#[command(name = "status", version, about = "Status Panel")]
+#[command(name = "status", version, about = "")]
 struct AppCli {
     /// Run in daemon mode (background)
     #[arg(long)]
