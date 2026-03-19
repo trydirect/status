@@ -366,8 +366,12 @@ async fn main() -> Result<()> {
                 std::env::var("DASHBOARD_URL")
                     .unwrap_or_else(|_| "https://stacker.try.direct".to_string())
             });
-            match agent::registration::register_with_stacker(&dashboard_url, &purchase_token, &stack_id)
-                .await
+            match agent::registration::register_with_stacker(
+                &dashboard_url,
+                &purchase_token,
+                &stack_id,
+            )
+            .await
             {
                 Ok(reg) => {
                     println!("Registered successfully!");

@@ -272,15 +272,19 @@ pub struct MarketplaceDeployResponse {
 // ---- Dashboard linking types ----
 
 #[derive(Debug, Deserialize)]
-pub struct LinkRequest {
+pub struct LinkLoginRequest {
     pub email: String,
-    #[serde(default)]
-    pub purchase_token: Option<String>,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LinkSelectRequest {
+    pub session_token: String,
+    pub deployment_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UnlinkRequest {}
-
 
 async fn health(State(state): State<SharedState>) -> impl IntoResponse {
     let token_age_seconds = if let Some(cache) = &state.token_cache {
@@ -971,12 +975,11 @@ async fn marketplace_page(State(state): State<SharedState>) -> impl IntoResponse
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => {
-            resp.json::<MarketplaceResponse>()
-                .await
-                .map(|r| r.stacks)
-                .unwrap_or_default()
-        }
+        Ok(resp) if resp.status().is_success() => resp
+            .json::<MarketplaceResponse>()
+            .await
+            .map(|r| r.stacks)
+            .unwrap_or_default(),
         _ => {
             debug!("marketplace API unreachable, showing empty state");
             Vec::new()
@@ -1000,7 +1003,10 @@ async fn marketplace_stacks_api(State(_state): State<SharedState>) -> impl IntoR
         .await
     {
         Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp.json().await.unwrap_or(json!({"stacks": [], "total": 0}));
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .unwrap_or(json!({"stacks": [], "total": 0}));
             Json(body).into_response()
         }
         Ok(resp) => {
@@ -1028,7 +1034,11 @@ async fn marketplace_deploy(
     tokio::spawn(async move {
         info!(stack_id = %stack_id, deploy_id = %spawn_deploy_id, "starting local stacker deploy");
         let result = tokio::process::Command::new("stacker")
-            .args(["deploy", "--from", &format!("/opt/stacker/stacks/{}/", stack_id)])
+            .args([
+                "deploy",
+                "--from",
+                &format!("/opt/stacker/stacks/{}/", stack_id),
+            ])
             .output()
             .await;
         match result {
@@ -1070,34 +1080,94 @@ async fn link_page(State(state): State<SharedState>) -> impl IntoResponse {
         if let Ok(data) = std::fs::read_to_string(reg_path) {
             if let Ok(reg) = serde_json::from_str::<serde_json::Value>(&data) {
                 context.insert("linked", &true);
-                context.insert("agent_id", &reg.get("agent_id").and_then(|v| v.as_str()).unwrap_or("unknown"));
-                context.insert("dashboard_url", &reg.get("dashboard_url").and_then(|v| v.as_str()).unwrap_or(""));
+                context.insert(
+                    "agent_id",
+                    &reg.get("agent_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown"),
+                );
+                context.insert(
+                    "dashboard_url",
+                    &reg.get("dashboard_url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                );
                 return render_template(&state, "link.html", &context).into_response();
             }
         }
     }
 
     context.insert("linked", &false);
+    context.insert("step", &"login");
     context.insert("link_error", &Option::<String>::None);
     render_template(&state, "link.html", &context).into_response()
 }
 
-async fn link_handler(
+/// Step 1: User submits email + password → Stacker validates → returns deployments list
+async fn link_login_handler(
     State(state): State<SharedState>,
-    Form(req): Form<LinkRequest>,
+    Form(req): Form<LinkLoginRequest>,
 ) -> impl IntoResponse {
-    info!(email = %req.email, "dashboard link requested");
+    info!(email = %req.email, "dashboard link login requested");
 
-    let dashboard_url = std::env::var("DASHBOARD_URL")
-        .unwrap_or_else(|_| "https://stacker.try.direct".to_string());
+    let stacker_url =
+        std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "https://stacker.try.direct".to_string());
 
-    // Attempt to link via registration API
-    let purchase_token = req.purchase_token.unwrap_or_default();
-    let stack_id = std::env::var("STACK_ID").unwrap_or_else(|_| "standalone".to_string());
+    match crate::agent::registration::login_to_stacker(&stacker_url, &req.email, &req.password)
+        .await
+    {
+        Ok(login_resp) => {
+            if state.with_ui {
+                let mut context = tera::Context::new();
+                context.insert("panel_version", &env!("CARGO_PKG_VERSION"));
+                context.insert("linked", &false);
+                context.insert("step", &"select");
+                context.insert("session_token", &login_resp.session_token);
+                context.insert("deployments", &login_resp.deployments);
+                context.insert("link_error", &Option::<String>::None);
+                render_template(&state, "link.html", &context).into_response()
+            } else {
+                Json(json!({
+                    "session_token": login_resp.session_token,
+                    "deployments": login_resp.deployments
+                }))
+                .into_response()
+            }
+        }
+        Err(e) => {
+            error!("dashboard link login failed: {}", e);
+            if state.with_ui {
+                let mut context = tera::Context::new();
+                context.insert("panel_version", &env!("CARGO_PKG_VERSION"));
+                context.insert("linked", &false);
+                context.insert("step", &"login");
+                context.insert("link_error", &Some(format!("Login failed: {}", e)));
+                render_template(&state, "link.html", &context).into_response()
+            } else {
+                Json(json!({"error": format!("Login failed: {}", e)})).into_response()
+            }
+        }
+    }
+}
 
-    match crate::agent::registration::register_with_stacker(&dashboard_url, &purchase_token, &stack_id).await {
+/// Step 2: User selects a deployment → agent links to it via Stacker
+async fn link_select_handler(
+    State(state): State<SharedState>,
+    Form(req): Form<LinkSelectRequest>,
+) -> impl IntoResponse {
+    info!(deployment_id = %req.deployment_id, "linking agent to deployment");
+
+    let stacker_url =
+        std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "https://stacker.try.direct".to_string());
+
+    match crate::agent::registration::link_agent_to_deployment(
+        &stacker_url,
+        &req.session_token,
+        &req.deployment_id,
+    )
+    .await
+    {
         Ok(reg) => {
-            // Save registration
             let save_path = std::path::Path::new("/etc/status-panel/registration.json");
             if let Err(e) = crate::agent::registration::save_registration(save_path, &reg) {
                 error!("could not save registration: {}", e);
@@ -1109,15 +1179,19 @@ async fn link_handler(
             }
         }
         Err(e) => {
-            error!("dashboard link failed: {}", e);
+            error!("agent linking failed: {}", e);
             if state.with_ui {
                 let mut context = tera::Context::new();
                 context.insert("panel_version", &env!("CARGO_PKG_VERSION"));
                 context.insert("linked", &false);
-                context.insert("link_error", &Some(format!("Link failed: {}", e)));
+                context.insert("step", &"login");
+                context.insert(
+                    "link_error",
+                    &Some(format!("Linking failed: {}. Please login again.", e)),
+                );
                 render_template(&state, "link.html", &context).into_response()
             } else {
-                Json(json!({"error": format!("Link failed: {}", e)})).into_response()
+                Json(json!({"error": format!("Linking failed: {}", e)})).into_response()
             }
         }
     }
@@ -1168,7 +1242,8 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/marketplace", get(marketplace_page))
         .route("/api/v1/marketplace/stacks", get(marketplace_stacks_api))
         .route("/api/v1/marketplace/deploy", post(marketplace_deploy))
-        .route("/link", get(link_page).post(link_handler))
+        .route("/link", get(link_page).post(link_login_handler))
+        .route("/link/select", post(link_select_handler))
         .route("/link/unlink", post(unlink_handler));
 
     #[cfg(feature = "docker")]

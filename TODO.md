@@ -15,11 +15,16 @@
   - No Install Service involved — fully local execution
 
 ### Dashboard Linking (optional, user-initiated)
-- [ ] Provide web UI page at `http://localhost:{STATUS_PORT}/link` to connect Status Panel to TryDirect dashboard
-  - User enters TryDirect account email or OAuth token
-  - Status Panel calls Stacker Server to associate agent with user account
-  - Show confirmation: "Server linked to your TryDirect dashboard"
-- [ ] Support unlinking from dashboard (agent continues to work standalone)
+- [x] Provide web UI page at `http://localhost:{STATUS_PORT}/link` to connect Status Panel to TryDirect dashboard
+- [x] Support unlinking from dashboard (agent continues to work standalone)
+- [ ] **Login-based linking flow (Entry Point C):**
+  - User logs in with TryDirect email + password from Status Panel UI
+  - Status Panel calls Stacker: `POST /api/v1/auth/login { email, password }` → returns `session_token` + user's deployments
+  - User selects a deployment from the list → Status Panel calls Stacker: `POST /api/v1/agents/link { session_token, deployment_id, server_fingerprint }`
+  - Stacker validates session, checks user owns the deployment, issues `agent_id` + `agent_token`
+  - No purchase_token needed — user's identity is the trust anchor
+  - `purchase_token` flow retained only for headless Entry Point B (curl one-liner)
+- [ ] Add "Use Standalone" option for users without TryDirect account (skip linking entirely)
 
 ### Standalone Status Panel Entry Point (Phase 2)
 - [ ] **"Deploy a Stack" page** in Status Panel web UI
