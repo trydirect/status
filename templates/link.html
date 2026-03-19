@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Link Dashboard — Status Panel{% endblock %}
+{% block nav_link %}active{% endblock %}
+{% block page_title %}Link to TryDirect Dashboard{% endblock %}
+
+{% block content %}
+<div class="link-card card">
+    <div class="card-header">
+        <span class="material-icons-outlined">link</span>
+        <h3>Connect to TryDirect</h3>
+    </div>
+    <div class="card-body">
+        {% if linked %}
+            <div class="info-box success" style="margin-bottom:20px;">
+                <span class="material-icons-outlined">check_circle</span>
+                <div>
+                    This server is linked to your TryDirect dashboard.<br/>
+                    <strong>Agent ID:</strong> {{ agent_id }}<br/>
+                    {% if dashboard_url %}
+                        <a href="{{ dashboard_url }}" target="_blank" style="color:var(--color-success-text);text-decoration:underline;">Open Dashboard</a>
+                    {% endif %}
+                </div>
+            </div>
+            <form method="post" action="/link/unlink">
+                <button class="btn btn-secondary" type="submit">
+                    <span class="material-icons-outlined" style="font-size:16px;">link_off</span>
+                    Unlink from Dashboard
+                </button>
+            </form>
+        {% else %}
+            <p style="margin-bottom:20px;color:var(--color-text-light);">
+                Link this Status Panel to your TryDirect account to manage your server from the dashboard,
+                receive update notifications, and browse the marketplace.
+            </p>
+
+            {% if link_error %}
+            <div class="form-error" style="margin-bottom:16px;">{{ link_error }}</div>
+            {% endif %}
+
+            <form method="post" action="/link">
+                <div class="form-group">
+                    <label class="form-label" for="email">TryDirect Account Email</label>
+                    <input class="form-input" id="email" type="email" name="email" placeholder="you@example.com" required/>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="token">Purchase Token <span style="color:var(--color-text-muted);font-weight:400;">(optional)</span></label>
+                    <input class="form-input" id="token" type="text" name="purchase_token" placeholder="From marketplace purchase email"/>
+                </div>
+                <button class="btn btn-primary" type="submit" style="margin-top:8px;">
+                    <span class="material-icons-outlined" style="font-size:16px;">link</span>
+                    Link Dashboard
+                </button>
+            </form>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

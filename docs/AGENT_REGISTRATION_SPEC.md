@@ -734,9 +734,9 @@ Stacker Server      Vault              Agent
       |              |                  |
       | <- register()-----> [201 OK]    |
       |              |                  |
-      | token <------|               |
-      |              | <- store()        |
-      |              |    [200 OK]       |
+      | token <------|                  |
+      |              | <- store()       |
+      |              |    [200 OK]      |
       |              |                  |
       | .env file <---------------------|
       |  AGENT_TOKEN=token              |
@@ -764,7 +764,7 @@ Result:
 
 ```
 ┌─────────────────────────────────┐
-│ Every 60s (+ 5-10s jitter)     │
+│  Every 60s (+ 5-10s jitter)     │
 ├─────────────────────────────────┤
 │ VaultClient::fetch_token()      │
 │ → GET /v1/.../deployment-.../token
@@ -788,7 +788,7 @@ Result:
 ```
 Client          Agent (TokenCache)       Stacker
   |                |                      |
-  | request -----> | get() → fresh_token |
+  | request -----> | get() → fresh_token  |
   |                |                      |
   |                | POST ...signature... |
   |                |---request+token----->|
@@ -803,10 +803,10 @@ Client                 Agent                 Stacker
   |                     |                      |
   | request (old token) |                      |
   |---token-valid----->--rotation happens----->|
-  |                     | swap() in cache       |
-  |                     | (old token still OK)  |
-  |                     |<----response----------|
-  |<---response--------|                      |
+  |                     | swap() in cache      |
+  |                     | (old token still OK) |
+  |                     |<----response---------|
+  |<---response---------|                      |
      ✓ No 401, completes successfully
 ```
 

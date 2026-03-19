@@ -1,216 +1,193 @@
-<html lang="en">
-<head>
-    <title>Status Panel</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/css/materialize.min.css">
-    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
-    <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.1/jquery.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-beta/js/materialize.min.js"></script>
-    <link rel="stylesheet" href="/static/css/controls.css">
-    <link rel="stylesheet" href="/static/css/style.css">
-    <script src="/static/js/tab-controller.js"></script>
-</head>
-<body>
-    <div class="container">
-    <!-- NavBar Block -->
-        <a href="/logout" class="nav-buttons">
-            <i class="material-icons btn_icon">logout</i> Logout
-        </a>
-         <div class="nav-title">
-            <a href="/" class="nav-title" target="_blank">
-                <img src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status_90x15.png.png" title="Minimal docker container management panel">
-            </a>
+{% extends "base.html" %}
+{% block title %}Dashboard — Status Panel{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block topbar_actions %}
+    {% if ssl_enabled %}
+        <span class="badge badge-success"><span class="badge-dot"></span> SSL Active</span>
+    {% endif %}
+{% endblock %}
+
+{% block content %}
+<!-- SSL Section -->
+{% if ssl_enabled %}
+    <div class="info-box success" style="margin-bottom:20px;">
+        <span class="material-icons-outlined">lock</span>
+        <div>
+            SSL is enabled for <strong>{{ domain }}</strong>.
+            <a href="https://{{ domain }}" target="_blank" style="color:var(--color-success-text);text-decoration:underline;">Visit</a>
+            &middot;
+            <a href="/disable_ssl" class="btn btn-sm btn-secondary" style="margin-left:8px;">Disable SSL</a>
         </div>
-    <!-- End NavBar block -->
-    <!-- SSL Block -->
-        {% if ssl_enabled %}
-            <h3>SSL is already enabled</h3>
-            <a href="https://{{domain}}" target="_blank">https://{{domain}}</a> <br />
-            <a href="/disable_ssl" class="btn waves-effect waves-light" >
-                <i class="large material-icons btn_icon">lock</i> DISABLE SSL
-            </a>
-        {% else %}
-            <br><br><br>
-
+    </div>
+{% else %}
+    <div class="info-box info" style="margin-bottom:20px;">
+        <span class="material-icons-outlined">lock_open</span>
+        <div>
+            SSL is not enabled.
             {% if can_enable %}
-                <a href="/enable_ssl" class="btn waves-effect waves-light" >
-                    <i class="large material-icons btn_icon" >lock</i> Enable SSL
-                </a>
+                <a href="/enable_ssl" class="btn btn-sm btn-primary" style="margin-left:8px;">Enable SSL</a>
             {% else %}
-                <button disabled class="btn waves-effect waves-light" >
-                    <i class="large material-icons btn_icon" >lock</i> Enable SSL
-                </button> <br />
-                <div class="card horizontal">
-                    <div class="card-content">
-                        You <b>can't enable</b> SSL because the DNS are not propagated yet to this IP
-                        <a title="What is Domain IP?" target="_blank" href="{{ ip_help_link }}">
-                            <i class="material-icons btn_icon">help</i>
-                        </a>
-                        </div>
-                </div>
-                <div class="card horizontal">
-                    <div class="card-content">
-                        {% if ip %}
-                            <p>Server IP: {{ip}}</p>
-                        {% endif %}
-                        {% if domainIp %}
-                            <p>Your domain "A" record is set to: {{domainIp}}
-                                <a title="What is Domain IP address?" target="_blank" href="{{ ip_help_link }}">
-                                    <i class="material-icons btn_icon">help</i>
-                                </a>
-                            </p>
-                        {% endif %}
-                    </div>
-                </div>
+                <span style="margin-left:4px;">DNS not propagated yet.</span>
+                {% if ip %}<br/>Server IP: <strong>{{ ip }}</strong>{% endif %}
+                {% if domainIp %}<br/>Domain A record: <strong>{{ domainIp }}</strong>{% endif %}
             {% endif %}
-        {% endif %}
-        {% if errors %}
-        <div class="card horizontal red accent-4">
-                    <div class="card-content">
-                            <p class="white-text">{{errors}}</p>
-                    </div>
-                </div>
-        {% endif %}
-    <!-- End SSL block -->
-    <!-- Tab Block -->
-        <!-- Tab buttons block -->
-        <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('docker-containers')">
-            <i class="material-icons btn_icon">border_all</i> Running containers</button>
-        <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('self-hosted')">
-            <i class="material-icons btn_icon">pages</i> WEB access</button>
-        <button class="tab-button waves-effect waves-light btn modal-trigger" onclick="displayTab('installed-apps')">
-            <i class="material-icons btn_icon">apps</i> Installed apps</button>
-        <!-- End Tab buttons block -->
+        </div>
+    </div>
+{% endif %}
 
-        {% if container_list %}
-            <!-- Running containers TAB -->
-            <div id="docker-containers" class="tab-content active-tab">
-            <h3 class="tab-title">Running containers</h3>
-            <table width="100%">
-                <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>Status</th>
-                        <th width="70px" style="text-align: right">Logs</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for container in container_list %}
+{% if errors %}
+    <div class="info-box error" style="margin-bottom:20px;">
+        <span class="material-icons-outlined">error</span>
+        <div>{{ errors }}</div>
+    </div>
+{% endif %}
+
+<!-- Tabs -->
+<div class="tab-bar">
+    <button class="tab-btn active" data-tab="tab-containers">
+        <span class="material-icons-outlined">dns</span> Containers
+    </button>
+    <button class="tab-btn" data-tab="tab-web">
+        <span class="material-icons-outlined">language</span> Web Access
+    </button>
+    <button class="tab-btn" data-tab="tab-apps">
+        <span class="material-icons-outlined">apps</span> Installed Apps
+    </button>
+</div>
+
+<!-- Containers Tab -->
+<div id="tab-containers" class="tab-panel active">
+    {% if container_list %}
+    <div class="card">
+        <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Container</th>
+                    <th>Status</th>
+                    <th style="text-align:right;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for container in container_list %}
+                <tr>
+                    <td><strong>{{ container.name }}</strong></td>
+                    <td>
+                        {% if container.status == "running" %}
+                            <span class="badge badge-success"><span class="badge-dot"></span> running</span>
+                        {% elif container.status == "paused" %}
+                            <span class="badge badge-warning"><span class="badge-dot"></span> paused</span>
+                        {% else %}
+                            <span class="badge badge-error"><span class="badge-dot"></span> {{ container.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td style="text-align:right;">
+                        <button class="btn btn-sm btn-secondary" data-modal="modal-{{ container.name }}">
+                            <span class="material-icons-outlined">article</span> Logs
+                        </button>
+                        <div class="dropdown" style="display:inline-block;">
+                            <button class="btn btn-sm btn-secondary">
+                                <span class="material-icons-outlined">more_vert</span>
+                            </button>
+                            <div class="dropdown-menu">
+                                <a href="/restart/{{ container.name }}" class="dropdown-item">
+                                    <span class="material-icons-outlined" style="font-size:16px;">restart_alt</span> Restart
+                                </a>
+                                <a href="/pause/{{ container.name }}" class="dropdown-item">
+                                    <span class="material-icons-outlined" style="font-size:16px;">pause</span> Pause
+                                </a>
+                                <a href="/stop/{{ container.name }}" class="dropdown-item danger">
+                                    <span class="material-icons-outlined" style="font-size:16px;">stop</span> Stop
+                                </a>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </div>
+
+    <!-- Log Modals -->
+    {% for container in container_list %}
+    <div id="modal-{{ container.name }}" class="modal-overlay">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>{{ container.name }} — Logs</h3>
+                <button class="modal-close"><span class="material-icons-outlined">close</span></button>
+            </div>
+            <div class="modal-body">
+                <div class="log-viewer">{{ container.logs }}</div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+
+    {% else %}
+    <div class="empty-state">
+        <span class="material-icons-outlined">dns</span>
+        <p>No containers found</p>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Web Access Tab -->
+<div id="tab-web" class="tab-panel">
+    {% if container_list %}
+    <div class="card">
+        <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Web Page</th><th>Container</th></tr>
+            </thead>
+            <tbody>
+            {% for container in container_list %}
+                {% if container.ports %}
+                    {% for port in container.ports %}
                     <tr>
                         <td>
-                            {{container['name']}}
-                        </td>
-                        <td width="250px">
-                            {% if container['status'] == 'running' %}
-                            <span class='container-status'>
-                                <i class="tiny material-icons active">fiber_manual_record</i> <span>{{container['status']}}</span>
-                            </span>
-                            {% else %}
-                            <span class='container-status'>
-                                <i class="tiny material-icons paused">fiber_manual_record</i> <span>{{container['status']}}</span>
-                            </span>
-                            {% endif %}
-                        <a class="dropdown-trigger btn" href="#" data-target="action_{{ container['name'] }}">Action<i class="material-icons right btn_icon" >arrow_drop_down</i></a>
-
-                          <!-- Dropdown Buttons -->
-                        <ul id="action_{{ container['name'] }}" class="dropdown-content">
-                            <li><a href="/restart/{{ container['name'] }}">Restart</a></li>
-                            <li><a href="/pause/{{ container['name'] }}">Pause</a></li>
-                        </ul>
-                        </td>
-                        <td width="170px" style="text-align: right">
-                            <a class="waves-effect waves-light btn modal-trigger" href="#modal_{{container['name']}}">
-                                <i class="material-icons btn_icon">history</i>
-                                View logs
+                            <a href="http://{{ ip }}:{{ port.port }}/" target="_blank" style="color:var(--color-accent);">
+                                {% if port.title %}{{ port.title }}{% else %}{{ ip }}:{{ port.port }}{% endif %}
                             </a>
                         </td>
+                        <td>{{ container.name }}</td>
                     </tr>
                     {% endfor %}
-                </tbody>
-            </table>
-            </div>
-            <!-- End Running containers TAB -->
-
-            <!-- Self-hosted TAB -->
-            <div id="self-hosted" class="tab-content">
-            <h3 class="tab-title">Available web pages</h3>
-            <table width="100%">
-                <thead>
-                    <tr>
-                        <th>Web page</th>
-                        <th>Container name</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for container in container_list %}
-                        {% if container.ports %}
-                            {% for port in container.ports %}
-                                 <tr>
-                                    <td>
-                                        <a href="http://{{ ip }}:{{port.port}}/">
-                                            {% if port.title %}
-                                                {{ port.title }}
-                                            {% else %}
-                                                {{ ip }}:{{port.port}}
-                                            {% endif %}
-                                            </a><br>
-                                    </td>
-                                    <td>{{container['name']}}</td>
-                                </tr>
-                            {% endfor %}
-                        {% endif %}
-                    {% endfor %}
-                </tbody>
-            </table>
-            </div>
-            <!-- End Self-hosted TAB -->
-            <!-- Modal windows Block -->
-            {% for container in container_list %}
-            <div id="modal_{{container['name']}}" class="modal">
-                <div class="modal-content">
-                  <h4>{{container['name']}}</h4>
-                  <p style="white-space: pre;">{{container['logs']}}</p>
-                </div>
-              </div>
+                {% endif %}
             {% endfor %}
-            <!-- End Modal windows block -->
-        {% endif %}
-        <div id="installed-apps" class="tab-content">
-                <h3 class="tab-title">Installed Applications</h3>
-                <table width="100%">
-                    <thead>
-                        <tr>
-                            <th>Application</th>
-                            <th>Version</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for app_info in apps_info %}
-                             <tr>
-                                <td>{{ app_info['name'] }}<br></td>
-                                <td>{{ app_info['version'] }}</td>
-                            </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-                </div>
-    <!-- End Tab block -->
-    </div>
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        var elems = document.querySelectorAll('.modal');
-        var instances = M.Modal.init(elems);
-    });
-
-    $(document).ready(function(){
-    $('.modal').modal();
-    $('.dropdown-trigger').dropdown();
-    });
-
-    </script>
-    <div class="footer-basic">
-            <footer>
-                <p class="copyright">v{{ panel_version }}</p>
-            </footer>
+            </tbody>
+        </table>
         </div>
-</body>
-</html>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <span class="material-icons-outlined">language</span>
+        <p>No web-accessible services found</p>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Installed Apps Tab -->
+<div id="tab-apps" class="tab-panel">
+    <div class="card">
+        <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Application</th><th>Version</th></tr>
+            </thead>
+            <tbody>
+            {% for app_info in apps_info %}
+            <tr>
+                <td><strong>{{ app_info.name }}</strong></td>
+                <td><span class="stack-card-version">{{ app_info.version }}</span></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

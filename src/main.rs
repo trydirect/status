@@ -177,7 +177,7 @@ enum Commands {
     Register {
         /// Purchase token from marketplace
         #[arg(long)]
-        token: String,
+        purchase_token: String,
         /// Stack template ID
         #[arg(long)]
         stack_id: String,
@@ -358,7 +358,7 @@ async fn main() -> Result<()> {
             }
         },
         Some(Commands::Register {
-            token,
+            purchase_token,
             stack_id,
             server,
         }) => {
@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
                 std::env::var("DASHBOARD_URL")
                     .unwrap_or_else(|_| "https://stacker.try.direct".to_string())
             });
-            match agent::registration::register_with_stacker(&dashboard_url, &token, &stack_id)
+            match agent::registration::register_with_stacker(&dashboard_url, &purchase_token, &stack_id)
                 .await
             {
                 Ok(reg) => {
