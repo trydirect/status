@@ -299,17 +299,12 @@ fn validate_source_cidr(source: &str) -> Result<()> {
         let prefix: u8 = prefix_part
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid prefix length in source CIDR: {}", source))?;
-        match ip {
-            IpAddr::V4(_) => {
-                if prefix > 32 {
-                    bail!("invalid IPv4 CIDR prefix length: {}", prefix);
-                }
-            }
-            IpAddr::V6(_) => {
-                if prefix > 128 {
-                    bail!("invalid IPv6 CIDR prefix length: {}", prefix);
-                }
-            }
+        let (max_prefix, ip_family) = match ip {
+            IpAddr::V4(_) => (32, "IPv4"),
+            IpAddr::V6(_) => (128, "IPv6"),
+        };
+        if prefix > max_prefix {
+            bail!("invalid {} CIDR prefix length: {}", ip_family, prefix);
         }
     } else {
         // Plain IP address
@@ -534,6 +529,17 @@ async fn handle_add(result: &mut CommandResult, data: &ConfigureFirewallCommand,
                     "DOCKER-USER rule failed; INPUT rule was applied"
                 );
             }
+            if !docker_ok {
+                let msg = "INPUT rule applied but DOCKER-USER rule failed".to_string();
+                rule_results.push(FirewallRuleResult {
+                    port: rule.port,
+                    protocol: rule.protocol.clone(),
+                    source: rule.source.clone(),
+                    applied: false,
+                    message: Some(msg),
+                });
+                continue;
+            }
         }
 
         let msg = if input_already_exists {
@@ -562,7 +568,7 @@ async fn handle_add(result: &mut CommandResult, data: &ConfigureFirewallCommand,
     }
 
     let status = determine_status(&rule_results, &errors);
-    result.status = status.clone();
+    result.status = map_command_status(status.as_str());
     if !errors.is_empty() {
         result.errors = Some(errors.clone());
     }
@@ -657,7 +663,7 @@ async fn handle_remove(
     }
 
     let status = determine_status(&rule_results, &errors);
-    result.status = status.clone();
+    result.status = map_command_status(status.as_str());
     if !errors.is_empty() {
         result.errors = Some(errors.clone());
     }
@@ -821,7 +827,7 @@ async fn handle_flush(result: &mut CommandResult, data: &ConfigureFirewallComman
         "failed"
     };
 
-    result.status = status.to_string();
+    result.status = map_command_status(status);
     if !errors.is_empty() {
         result.errors = Some(errors.clone());
     }
@@ -1048,9 +1054,31 @@ async fn docker_user_chain_exists() -> bool {
     run_iptables(&["-L", DOCKER_USER_CHAIN, "-n"]).await.is_ok()
 }
 
+/// Find the line number of the default RETURN rule in DOCKER-USER, if present.
+async fn docker_user_return_line() -> Result<Option<u32>> {
+    let output = run_iptables(&["-L", DOCKER_USER_CHAIN, "-n", "--line-numbers"]).await?;
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        let num_str = match parts.next() {
+            Some(value) => value,
+            None => continue,
+        };
+        let line_num = match num_str.parse::<u32>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(target) = parts.next() {
+            if target == "RETURN" {
+                return Ok(Some(line_num));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Add DOCKER-USER rules for a private port:
 ///   1. ACCEPT from the allowed source  (inserted at top)
-///   2. DROP   from all others          (appended, acts as default-deny for this port)
+///   2. DROP   from all others          (inserted before RETURN, acts as default-deny)
 ///
 /// Both rules carry the stacker comment so flush can find them.
 async fn add_docker_user_rules(
@@ -1089,25 +1117,47 @@ async fn add_docker_user_rules(
         .await
         .unwrap_or(false);
     if !drop_exists {
-        // Use -A (append) for the DROP so it comes after the ACCEPT
         let port_string = rule.port.to_string();
-        let args: Vec<&str> = vec![
-            "-A",
-            DOCKER_USER_CHAIN,
-            "-p",
-            &rule.protocol,
-            "--dport",
-            &port_string,
-            "-j",
-            "DROP",
-            "-m",
-            "comment",
-            "--comment",
-            &drop_comment,
-        ]
-        .into_iter()
-        .collect();
-        if let Err(e) = run_iptables(&args).await {
+        let return_line = match docker_user_return_line().await {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to locate DOCKER-USER RETURN rule; appending DROP"
+                );
+                None
+            }
+        };
+        let mut args = Vec::new();
+        match return_line {
+            Some(line_num) => {
+                args.push("-I".to_string());
+                args.push(DOCKER_USER_CHAIN.to_string());
+                args.push(line_num.to_string());
+            }
+            None => {
+                args.push("-A".to_string());
+                args.push(DOCKER_USER_CHAIN.to_string());
+            }
+        }
+        args.extend(
+            vec![
+                "-p",
+                rule.protocol.as_str(),
+                "--dport",
+                port_string.as_str(),
+                "-j",
+                "DROP",
+                "-m",
+                "comment",
+                "--comment",
+                drop_comment.as_str(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+        let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+        if let Err(e) = run_iptables(&args_ref).await {
             errors.push(CommandError {
                 code: "docker_user_drop_failed".into(),
                 message: format!(
@@ -1452,6 +1502,14 @@ fn determine_status(rules: &[FirewallRuleResult], errors: &[CommandError]) -> St
     }
 }
 
+fn map_command_status(detailed_status: &str) -> String {
+    if detailed_status == "failed" {
+        "failed".to_string()
+    } else {
+        "success".to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1611,6 +1669,9 @@ mod tests {
         assert!(validate_source_cidr("10.0.0.0/8").is_ok());
         assert!(validate_source_cidr("192.168.1.1").is_ok());
         assert!(validate_source_cidr("192.168.1.0/24").is_ok());
+        assert!(validate_source_cidr("10.0.0.0/64").is_err());
+        assert!(validate_source_cidr("2001:db8::/64").is_ok());
+        assert!(validate_source_cidr("2001:db8::/129").is_err());
         assert!(validate_source_cidr("not_an_ip").is_err());
         assert!(validate_source_cidr("999.999.999.999").is_err());
     }

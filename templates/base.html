@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>{% block title %}Status Panel{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet"/>
+    <link rel="stylesheet" href="/static/css/style.css"/>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    {% block body %}
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <a href="/" class="sidebar-logo">
+                    <img src="/static/img/logo.webp" alt="Status Panel" class="sidebar-logo-icon"/>
+                </a>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/" class="sidebar-link {% block nav_dashboard %}{% endblock %}">
+                    <span class="material-icons-outlined">dashboard</span>
+                    <span>Dashboard</span>
+                </a>
+                <a href="/marketplace" class="sidebar-link {% block nav_marketplace %}{% endblock %}">
+                    <span class="material-icons-outlined">store</span>
+                    <span>Marketplace</span>
+                </a>
+                <a href="/link" class="sidebar-link {% block nav_link %}{% endblock %}">
+                    <span class="material-icons-outlined">link</span>
+                    <span>Link Dashboard</span>
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <a href="/logout" class="sidebar-link">
+                    <span class="material-icons-outlined">logout</span>
+                    <span>Logout</span>
+                </a>
+                <div class="sidebar-version">v{{ panel_version }}</div>
+            </div>
+        </aside>
+
+        <!-- Main content -->
+        <div class="main-wrapper">
+            <header class="topbar">
+                <button class="topbar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar">
+                    <span class="material-icons-outlined">menu</span>
+                </button>
+                <h1 class="topbar-title">{% block page_title %}Dashboard{% endblock %}</h1>
+                <div class="topbar-actions">
+                    {% block topbar_actions %}{% endblock %}
+                </div>
+            </header>
+            <main class="main-content">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    {% block scripts %}{% endblock %}
+    {% endblock %}
+</body>
+</html>
