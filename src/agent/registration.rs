@@ -9,6 +9,39 @@ pub struct RegistrationRequest {
     pub stack_id: String,
 }
 
+// ---- Login-based linking types (Entry Point C) ----
+
+#[derive(Debug, Serialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoginResponse {
+    pub session_token: String,
+    pub user_id: String,
+    pub deployments: Vec<DeploymentInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeploymentInfo {
+    pub deployment_id: String,
+    pub stack_name: String,
+    pub status: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub server_ip: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LinkAgentRequest {
+    pub session_token: String,
+    pub deployment_id: String,
+    pub server_fingerprint: ServerFingerprint,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ServerFingerprint {
     pub hostname: String,
@@ -147,6 +180,78 @@ pub fn save_registration(
     std::fs::write(path, serde_json::to_string_pretty(&content)?)?;
     info!(path = %path.display(), "registration saved to disk");
     Ok(())
+}
+
+/// Login to TryDirect via Stacker Server proxy. Returns session token and user's deployments.
+pub async fn login_to_stacker(
+    stacker_url: &str,
+    email: &str,
+    password: &str,
+) -> Result<LoginResponse, Box<dyn std::error::Error>> {
+    let body = LoginRequest {
+        email: email.to_string(),
+        password: password.to_string(),
+    };
+
+    let url = format!("{}/api/v1/auth/login", stacker_url);
+    info!(url = %url, email = %email, "sending login request to Stacker");
+
+    let client = reqwest::Client::new();
+    let resp = client.post(&url).json(&body).send().await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("Login failed ({}): {}", status, err_body).into());
+    }
+
+    let login: LoginResponse = resp.json().await?;
+    info!(
+        user_id = %login.user_id,
+        deployments = login.deployments.len(),
+        "login successful, fetched deployments"
+    );
+    Ok(login)
+}
+
+/// Link this agent to a specific deployment using a session token (user already authenticated).
+pub async fn link_agent_to_deployment(
+    stacker_url: &str,
+    session_token: &str,
+    deployment_id: &str,
+) -> Result<RegistrationResponse, Box<dyn std::error::Error>> {
+    let fingerprint = collect_fingerprint();
+    debug!(
+        hostname = %fingerprint.hostname,
+        deployment_id = %deployment_id,
+        "linking agent to deployment"
+    );
+
+    let body = LinkAgentRequest {
+        session_token: session_token.to_string(),
+        deployment_id: deployment_id.to_string(),
+        server_fingerprint: fingerprint,
+    };
+
+    let url = format!("{}/api/v1/agents/link", stacker_url);
+    info!(url = %url, deployment_id = %deployment_id, "sending link request to Stacker");
+
+    let client = reqwest::Client::new();
+    let resp = client.post(&url).json(&body).send().await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("Agent linking failed ({}): {}", status, err_body).into());
+    }
+
+    let reg: RegistrationResponse = resp.json().await?;
+    info!(
+        agent_id = %reg.agent_id,
+        deployment_hash = %reg.deployment_hash,
+        "agent linked to deployment"
+    );
+    Ok(reg)
 }
 
 #[cfg(test)]
