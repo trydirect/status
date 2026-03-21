@@ -1486,18 +1486,20 @@ fn is_docker_rule(line: &str) -> bool {
 
 fn determine_status(rules: &[FirewallRuleResult], errors: &[CommandError]) -> String {
     if errors.is_empty() && rules.iter().all(|r| r.applied) {
-        // All rules applied successfully, no errors: overall command is a success.
-        "success".to_string()
+        // All rules applied, no errors: full success.
+        // map_command_status() maps this to outer "success" → Stacker: Completed.
+        "ok".to_string()
     } else if rules.iter().any(|r| r.applied) {
-        // At least one rule applied, but not all or there were errors: still report
-        // a successful command execution at the outer level (`CommandResult.status`),
-        // while callers can encode "partial" details inside the payload.
-        "success".to_string()
+        // At least one rule applied but not all, or there were errors.
+        // Stored in result.result payload for display; outer status remains "success"
+        // but Stacker will mark the command Failed due to has_errors being true.
+        "partial_success".to_string()
     } else if rules.is_empty() && errors.is_empty() {
         // Nothing to do and no errors: treat as a successful no-op.
-        "success".to_string()
+        "ok".to_string()
     } else {
         // No rules applied and there were errors: overall failure.
+        // map_command_status() maps this to outer "failed" → Stacker: Failed.
         "failed".to_string()
     }
 }
