@@ -6,7 +6,7 @@ use regex::Regex;
 use serde::Deserialize;
 #[cfg(any(feature = "docker", test))]
 use serde_json::json;
-#[cfg(feature = "docker")]
+#[cfg(any(feature = "docker", test))]
 use serde_json::Value;
 #[cfg(feature = "docker")]
 use std::collections::{HashMap, HashSet};
@@ -19,100 +19,6 @@ use crate::transport::{Command as AgentCommand, CommandResult};
 
 #[cfg(feature = "docker")]
 use crate::agent::docker;
-
-#[cfg(any(feature = "docker", test))]
-fn aggregate_app_all_status(
-    has_running: bool,
-    has_starting: bool,
-    has_exited: bool,
-    has_failed: bool,
-    has_unknown: bool,
-    has_any_containers: bool,
-) -> (&'static str, &'static str) {
-    if !has_any_containers {
-        ("unknown", "unknown")
-    } else if has_failed {
-        ("failed", "unhealthy")
-    } else if has_exited {
-        ("exited", "unhealthy")
-    } else if has_starting {
-        ("starting", "unhealthy")
-    } else if has_unknown {
-        ("unknown", "unknown")
-    } else if has_running {
-        ("running", "ok")
-    } else {
-        ("unknown", "unknown")
-    }
-}
-
-#[cfg(test)]
-mod tests_aggregate_app_all {
-    use super::aggregate_app_all_status;
-
-    #[test]
-    fn no_containers_is_unknown() {
-        let (state, status) = aggregate_app_all_status(false, false, false, false, false, false);
-        assert_eq!(state, "unknown");
-        assert_eq!(status, "unknown");
-    }
-
-    #[test]
-    fn running_only_is_ok() {
-        let (state, status) = aggregate_app_all_status(true, false, false, false, false, true);
-        assert_eq!(state, "running");
-        assert_eq!(status, "ok");
-    }
-
-    #[test]
-    fn starting_only_is_unhealthy_starting() {
-        let (state, status) = aggregate_app_all_status(false, true, false, false, false, true);
-        assert_eq!(state, "starting");
-        assert_eq!(status, "unhealthy");
-    }
-
-    #[test]
-    fn exited_only_is_unhealthy_exited() {
-        let (state, status) = aggregate_app_all_status(false, false, true, false, false, true);
-        assert_eq!(state, "exited");
-        assert_eq!(status, "unhealthy");
-    }
-
-    #[test]
-    fn failed_only_is_unhealthy_failed() {
-        let (state, status) = aggregate_app_all_status(false, false, false, true, false, true);
-        assert_eq!(state, "failed");
-        assert_eq!(status, "unhealthy");
-    }
-
-    #[test]
-    fn unknown_only_is_unknown() {
-        let (state, status) = aggregate_app_all_status(false, false, false, false, true, true);
-        assert_eq!(state, "unknown");
-        assert_eq!(status, "unknown");
-    }
-
-    #[test]
-    fn failed_takes_precedence_over_running() {
-        let (state, status) = aggregate_app_all_status(true, false, false, true, false, true);
-        assert_eq!(state, "failed");
-        assert_eq!(status, "unhealthy");
-    }
-
-    #[test]
-    fn exited_takes_precedence_over_running() {
-        let (state, status) = aggregate_app_all_status(true, false, true, false, false, true);
-        assert_eq!(state, "exited");
-        assert_eq!(status, "unhealthy");
-    }
-
-    #[test]
-    fn starting_takes_precedence_over_running() {
-        let (state, status) = aggregate_app_all_status(true, true, false, false, false, true);
-        assert_eq!(state, "starting");
-        assert_eq!(status, "unhealthy");
-    }
-}
 
 use super::firewall::{self, ConfigureFirewallCommand};
 
@@ -139,6 +45,7 @@ pub enum StackerCommand {
     ServerResources(ServerResourcesCommand),
     ListContainers(ListContainersCommand),
     ConfigureFirewall(ConfigureFirewallCommand),
+    ProbeEndpoints(ProbeEndpointsCommand),
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -462,6 +369,32 @@ pub struct AppContainerMap {
     container_map: Vec<ContainerMapEntry>,
 }
 
+/// Command to probe a containerized app for connectable API endpoints
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProbeEndpointsCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    #[serde(default)]
+    app_code: String,
+    #[serde(default)]
+    container: Option<String>,
+    /// Protocols to probe: "openapi", "html_forms", "graphql", "mcp", "rest"
+    #[serde(default = "default_probe_protocols")]
+    protocols: Vec<String>,
+    /// Timeout per probe request in seconds
+    #[serde(default = "default_probe_timeout")]
+    probe_timeout: u32,
+}
+
+fn default_probe_protocols() -> Vec<String> {
+    vec!["openapi".to_string(), "rest".to_string()]
+}
+
+fn default_probe_timeout() -> u32 {
+    5
+}
+
 fn default_exec_timeout() -> u32 {
     30
 }
@@ -606,6 +539,13 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             let payload = payload.normalize().with_command_context(cmd);
             payload.validate()?;
             Ok(Some(StackerCommand::ConfigureFirewall(payload)))
+        }
+        "probe_endpoints" | "stacker.probe_endpoints" => {
+            let payload: ProbeEndpointsCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid probe_endpoints payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::ProbeEndpoints(payload)))
         }
         _ => Ok(None),
     }
@@ -1277,6 +1217,60 @@ impl ListContainersCommand {
     }
 }
 
+impl ProbeEndpointsCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.app_code = trimmed(&self.app_code);
+        if let Some(value) = self.container.take() {
+            let trimmed_value = trimmed(&value);
+            if !trimmed_value.is_empty() {
+                self.container = Some(trimmed_value);
+            }
+        }
+        // Normalize protocol names to lowercase
+        self.protocols = self
+            .protocols
+            .iter()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if self.protocols.is_empty() {
+            self.protocols = default_probe_protocols();
+        }
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        if self.app_code.is_empty() {
+            if let Some(code) = &agent_cmd.app_code {
+                self.app_code = code.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.app_code.is_empty() {
+            bail!("app_code is required");
+        }
+        let valid_protocols = ["openapi", "html_forms", "graphql", "mcp", "rest"];
+        for p in &self.protocols {
+            if !valid_protocols.contains(&p.as_str()) {
+                bail!("unsupported protocol: {}. Valid: {:?}", p, valid_protocols);
+            }
+        }
+        Ok(())
+    }
+}
+
 fn trimmed(value: &str) -> String {
     value.trim().to_string()
 }
@@ -1448,6 +1442,7 @@ async fn execute_with_docker(
         StackerCommand::Exec(data) => handle_exec(agent_cmd, data).await,
         StackerCommand::ServerResources(data) => handle_server_resources(agent_cmd, data).await,
         StackerCommand::ListContainers(data) => handle_list_containers(agent_cmd, data).await,
+        StackerCommand::ProbeEndpoints(data) => handle_probe_endpoints(agent_cmd, data).await,
         StackerCommand::ConfigureFirewall(data) => {
             firewall::handle_configure_firewall(agent_cmd, data, firewall_policy).await
         }
@@ -1481,59 +1476,6 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
             return Ok(result);
         }
     };
-
-    if data.app_code == "all" {
-        let mut container_items: Vec<Value> = Vec::new();
-        let mut has_running = false;
-        let mut has_starting = false;
-        let mut has_exited = false;
-        let mut has_failed = false;
-        let mut has_unknown = false;
-
-        for entry in &containers {
-            let container_state = map_container_state(&entry.status).to_string();
-            match container_state.as_str() {
-                "running" => has_running = true,
-                "starting" => has_starting = true,
-                "exited" => has_exited = true,
-                "failed" => has_failed = true,
-                _ => has_unknown = true,
-            }
-
-            let mut item = json!({
-                "app_code": entry.name.trim_start_matches('/'),
-                "container_name": entry.name.trim_start_matches('/'),
-                "container_state": container_state,
-                "status": derive_health_status(&container_state, false),
-            });
-
-            if data.include_metrics {
-                item["metrics"] = build_metrics(entry);
-            }
-            container_items.push(item);
-        }
-
-        let (container_state, status) = aggregate_app_all_status(
-            has_running,
-            has_starting,
-            has_exited,
-            has_failed,
-            has_unknown,
-            !container_items.is_empty(),
-        );
-
-        let body = json!({
-            "type": "health",
-            "deployment_hash": data.deployment_hash.clone(),
-            "app_code": data.app_code.clone(),
-            "status": status,
-            "container_state": container_state,
-            "last_heartbeat_at": now_timestamp(),
-            "containers": container_items,
-        });
-        result.result = Some(body);
-        return Ok(result);
-    }
 
     let target_name = resolve_container_name(&data.app_code, &data.container);
 
@@ -4256,6 +4198,410 @@ fn derive_health_status(container_state: &str, has_errors: bool) -> &'static str
     }
 }
 
+#[cfg(feature = "docker")]
+async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
+    use tokio::process::Command;
+
+    let output = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{json .Config.ExposedPorts}}",
+            container_name,
+        ])
+        .output()
+        .await
+        .context("docker inspect for ports")?;
+
+    let mut ports = Vec::new();
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed_output = stdout.trim();
+        // Parse JSON like {"80/tcp":{},"8080/tcp":{}}
+        if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(trimmed_output) {
+            for port_str in map.keys() {
+                if let Some(port_num) = port_str.split('/').next() {
+                    if let Ok(port) = port_num.parse::<u16>() {
+                        if !ports.contains(&port) {
+                            ports.push(port);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check network settings port bindings
+    let output2 = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Ports}}",
+            container_name,
+        ])
+        .output()
+        .await;
+
+    if let Ok(output2) = output2 {
+        if output2.status.success() {
+            let stdout = String::from_utf8_lossy(&output2.stdout);
+            let trimmed_output = stdout.trim();
+            if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(trimmed_output)
+            {
+                for port_str in map.keys() {
+                    if let Some(port_num) = port_str.split('/').next() {
+                        if let Ok(port) = port_num.parse::<u16>() {
+                            if !ports.contains(&port) {
+                                ports.push(port);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if ports.is_empty() {
+        // Fallback: common ports
+        ports.push(80);
+        ports.push(8080);
+    }
+
+    ports.sort();
+    Ok(ports)
+}
+
+#[cfg(any(feature = "docker", test))]
+fn extract_openapi_operations(spec: &Value) -> Vec<Value> {
+    let mut operations = Vec::new();
+
+    if let Some(paths) = spec.get("paths").and_then(|p| p.as_object()) {
+        for (path, methods) in paths {
+            if let Some(methods_obj) = methods.as_object() {
+                for (method, details) in methods_obj {
+                    let method_upper = method.to_uppercase();
+                    // Skip non-HTTP methods (e.g., "parameters", "summary")
+                    if !["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+                        .contains(&method_upper.as_str())
+                    {
+                        continue;
+                    }
+
+                    let summary = details
+                        .get("summary")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Extract field names from request body schema
+                    let fields = extract_request_fields(spec, details);
+
+                    operations.push(json!({
+                        "path": path,
+                        "method": method_upper,
+                        "summary": summary,
+                        "fields": fields,
+                    }));
+                }
+            }
+        }
+    }
+
+    operations
+}
+
+#[cfg(any(feature = "docker", test))]
+fn extract_request_fields(spec: &Value, operation: &Value) -> Vec<String> {
+    let mut fields = Vec::new();
+
+    // OpenAPI 3.x: requestBody -> content -> application/json -> schema -> properties
+    if let Some(request_body) = operation.get("requestBody") {
+        if let Some(content) = request_body.get("content") {
+            if let Some(json_content) = content.get("application/json") {
+                if let Some(schema) = json_content.get("schema") {
+                    collect_schema_fields(spec, schema, &mut fields);
+                }
+            }
+        }
+    }
+
+    // Swagger 2.x: parameters with in=body
+    if let Some(parameters) = operation.get("parameters").and_then(|p| p.as_array()) {
+        for param in parameters {
+            if param.get("in").and_then(|v| v.as_str()) == Some("body") {
+                if let Some(schema) = param.get("schema") {
+                    collect_schema_fields(spec, schema, &mut fields);
+                }
+            } else if param.get("in").and_then(|v| v.as_str()) == Some("query")
+                || param.get("in").and_then(|v| v.as_str()) == Some("formData")
+            {
+                if let Some(name) = param.get("name").and_then(|v| v.as_str()) {
+                    fields.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    fields
+}
+
+#[cfg(any(feature = "docker", test))]
+fn collect_schema_fields(spec: &Value, schema: &Value, fields: &mut Vec<String>) {
+    // Handle $ref
+    if let Some(ref_path) = schema.get("$ref").and_then(|r| r.as_str()) {
+        if let Some(resolved) = resolve_ref(spec, ref_path) {
+            collect_schema_fields(spec, resolved, fields);
+        }
+        return;
+    }
+
+    // Handle allOf
+    if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+        for sub_schema in all_of {
+            collect_schema_fields(spec, sub_schema, fields);
+        }
+        return;
+    }
+
+    // Direct properties
+    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        for key in properties.keys() {
+            if !fields.contains(key) {
+                fields.push(key.clone());
+            }
+        }
+    }
+}
+
+#[cfg(any(feature = "docker", test))]
+fn resolve_ref<'a>(spec: &'a Value, ref_path: &str) -> Option<&'a Value> {
+    // Handle "#/definitions/Foo" (Swagger 2) or "#/components/schemas/Foo" (OpenAPI 3)
+    let path = ref_path.trim_start_matches("#/");
+    let mut current = spec;
+    for segment in path.split('/') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+#[cfg(any(feature = "docker", test))]
+fn extract_html_forms(html: &str, page_path: &str) -> Vec<Value> {
+    let mut forms = Vec::new();
+
+    // Simple regex-based form extraction (not a full HTML parser)
+    let form_re = regex::Regex::new(r"(?is)<form([^>]*)>(.*?)</form>").unwrap();
+    let attr_re =
+        regex::Regex::new(r#"(?i)(id|name|action|method)\s*=\s*["']([^"']*)["']"#).unwrap();
+    let input_re = regex::Regex::new(
+        r#"(?i)<(?:input|textarea|select)[^>]*name\s*=\s*["']([^"']*)["'][^>]*>"#,
+    )
+    .unwrap();
+
+    for form_match in form_re.captures_iter(html) {
+        let attrs_str = &form_match[1];
+        let body_str = &form_match[2];
+
+        let mut id = String::new();
+        let mut action = String::new();
+        let mut method = "GET".to_string();
+
+        for attr_cap in attr_re.captures_iter(attrs_str) {
+            match attr_cap[1].to_lowercase().as_str() {
+                "id" => id = attr_cap[2].to_string(),
+                "name" => {
+                    if id.is_empty() {
+                        id = attr_cap[2].to_string();
+                    }
+                }
+                "action" => action = attr_cap[2].to_string(),
+                "method" => method = attr_cap[2].to_uppercase(),
+                _ => {}
+            }
+        }
+
+        let mut field_names: Vec<String> = Vec::new();
+        for input_cap in input_re.captures_iter(body_str) {
+            let name = input_cap[1].to_string();
+            if !field_names.contains(&name) {
+                field_names.push(name);
+            }
+        }
+
+        if id.is_empty() {
+            id = format!("form_{}", page_path.trim_start_matches('/'));
+        }
+
+        if !field_names.is_empty() || method == "POST" {
+            forms.push(json!({
+                "id": id,
+                "action": action,
+                "method": method,
+                "fields": field_names,
+            }));
+        }
+    }
+
+    forms
+}
+
+#[cfg(feature = "docker")]
+async fn handle_probe_endpoints(
+    agent_cmd: &AgentCommand,
+    data: &ProbeEndpointsCommand,
+) -> Result<CommandResult> {
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "probe_endpoints",
+    );
+    let target_name = resolve_container_name(&data.app_code, &data.container);
+
+    let mut protocols_detected: Vec<String> = Vec::new();
+    let mut endpoints: Vec<Value> = Vec::new();
+    let mut forms: Vec<Value> = Vec::new();
+
+    // Get container ports via docker inspect
+    let ports = match get_container_ports(&target_name).await {
+        Ok(ports) => ports,
+        Err(e) => {
+            let error = make_error(
+                "probe_failed",
+                format!("Failed to inspect container ports: {}", e),
+                Some(e.to_string()),
+            );
+            result.status = "error".to_string();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
+    // Probe OpenAPI/Swagger endpoints
+    if data.protocols.contains(&"openapi".to_string()) {
+        let openapi_paths = [
+            "/openapi.json",
+            "/swagger.json",
+            "/api-docs",
+            "/v2/api-docs",
+            "/v3/api-docs",
+            "/api/swagger.json",
+            "/api/openapi.json",
+        ];
+
+        for port in &ports {
+            for path in &openapi_paths {
+                let probe_cmd = format!(
+                    "curl -sf -m {} http://localhost:{}{} 2>/dev/null || true",
+                    data.probe_timeout, port, path
+                );
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
+                    docker::exec_in_container_with_output(&target_name, &probe_cmd),
+                )
+                .await
+                {
+                    Ok(Ok((0, stdout, _))) if !stdout.trim().is_empty() => {
+                        if let Ok(spec) = serde_json::from_str::<Value>(&stdout) {
+                            if spec.get("openapi").is_some() || spec.get("swagger").is_some() {
+                                if !protocols_detected.contains(&"openapi".to_string()) {
+                                    protocols_detected.push("openapi".to_string());
+                                }
+                                let operations = extract_openapi_operations(&spec);
+                                endpoints.push(json!({
+                                    "protocol": "openapi",
+                                    "base_url": format!("http://{}:{}", data.app_code, port),
+                                    "spec_url": path,
+                                    "operations": operations,
+                                }));
+                            }
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    }
+
+    // Probe HTML forms
+    if data.protocols.contains(&"html_forms".to_string()) {
+        let form_paths = ["/", "/contact", "/register", "/login", "/signup"];
+        for port in &ports {
+            for path in &form_paths {
+                let probe_cmd = format!(
+                    "curl -sf -m {} http://localhost:{}{} 2>/dev/null || true",
+                    data.probe_timeout, port, path
+                );
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
+                    docker::exec_in_container_with_output(&target_name, &probe_cmd),
+                )
+                .await
+                {
+                    Ok(Ok((0, stdout, _))) if !stdout.trim().is_empty() => {
+                        let found_forms = extract_html_forms(&stdout, path);
+                        if !found_forms.is_empty() {
+                            if !protocols_detected.contains(&"html_forms".to_string()) {
+                                protocols_detected.push("html_forms".to_string());
+                            }
+                            forms.extend(found_forms);
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    }
+
+    // Probe REST heuristic
+    if data.protocols.contains(&"rest".to_string()) {
+        let rest_paths = ["/api", "/api/v1", "/api/v2"];
+        for port in &ports {
+            for path in &rest_paths {
+                let probe_cmd = format!(
+                    "curl -sf -m {} -o /dev/null -w '%{{http_code}}' http://localhost:{}{} 2>/dev/null || echo 000",
+                    data.probe_timeout, port, path
+                );
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
+                    docker::exec_in_container_with_output(&target_name, &probe_cmd),
+                )
+                .await
+                {
+                    Ok(Ok((0, stdout, _))) => {
+                        let code = stdout.trim();
+                        if code == "200" || code == "401" || code == "403" {
+                            if !protocols_detected.contains(&"rest".to_string()) {
+                                protocols_detected.push("rest".to_string());
+                            }
+                            endpoints.push(json!({
+                                "protocol": "rest",
+                                "base_url": format!("http://{}:{}", data.app_code, port),
+                                "spec_url": path,
+                                "operations": [],
+                            }));
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    }
+
+    result.result = Some(json!({
+        "type": "probe_endpoints",
+        "deployment_hash": data.deployment_hash,
+        "app_code": data.app_code,
+        "protocols_detected": protocols_detected,
+        "endpoints": endpoints,
+        "forms": forms,
+        "probed_at": now_timestamp(),
+    }));
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4888,5 +5234,817 @@ mod list_containers_command_tests {
         };
         cmd = cmd.normalize();
         assert_eq!(cmd.log_lines, 1); // Should be clamped to 1
+    }
+}
+
+/// Tests for ProbeEndpointsCommand
+#[cfg(test)]
+mod probe_endpoints_command_tests {
+    use super::*;
+    use serde_json::json;
+
+    // ==================== PARSING TESTS ====================
+
+    #[test]
+    fn parses_probe_endpoints_with_defaults() {
+        let agent_cmd = AgentCommand {
+            id: "test-id".into(),
+            command_id: "test-cmd".into(),
+            name: "probe_endpoints".into(),
+            params: json!({
+                "params": {
+                    "app_code": "crm"
+                }
+            }),
+            deployment_hash: Some("abc123".into()),
+            app_code: Some("crm".into()),
+        };
+        let parsed = parse_stacker_command(&agent_cmd).unwrap();
+        if let Some(StackerCommand::ProbeEndpoints(cmd)) = parsed {
+            assert_eq!(cmd.app_code, "crm");
+            assert_eq!(cmd.deployment_hash, "abc123");
+            assert_eq!(cmd.protocols, vec!["openapi", "rest"]);
+            assert_eq!(cmd.probe_timeout, 5);
+            assert!(cmd.container.is_none());
+        } else {
+            panic!("Expected ProbeEndpoints command");
+        }
+    }
+
+    #[test]
+    fn parses_with_stacker_prefix() {
+        let agent_cmd = AgentCommand {
+            id: "test-id".into(),
+            command_id: "test-cmd".into(),
+            name: "stacker.probe_endpoints".into(),
+            params: json!({
+                "params": {
+                    "app_code": "crm",
+                    "deployment_hash": "def456"
+                }
+            }),
+            deployment_hash: None,
+            app_code: None,
+        };
+        let parsed = parse_stacker_command(&agent_cmd).unwrap();
+        assert!(matches!(parsed, Some(StackerCommand::ProbeEndpoints(_))));
+    }
+
+    #[test]
+    fn parses_with_custom_protocols() {
+        let agent_cmd = AgentCommand {
+            id: "test-id".into(),
+            command_id: "test-cmd".into(),
+            name: "probe_endpoints".into(),
+            params: json!({
+                "params": {
+                    "app_code": "crm",
+                    "protocols": ["openapi", "html_forms", "graphql"]
+                }
+            }),
+            deployment_hash: Some("abc123".into()),
+            app_code: Some("crm".into()),
+        };
+        let parsed = parse_stacker_command(&agent_cmd).unwrap();
+        if let Some(StackerCommand::ProbeEndpoints(cmd)) = parsed {
+            assert_eq!(cmd.protocols, vec!["openapi", "html_forms", "graphql"]);
+        } else {
+            panic!("Expected ProbeEndpoints command");
+        }
+    }
+
+    #[test]
+    fn parses_with_custom_timeout() {
+        let agent_cmd = AgentCommand {
+            id: "test-id".into(),
+            command_id: "test-cmd".into(),
+            name: "probe_endpoints".into(),
+            params: json!({
+                "params": {
+                    "app_code": "crm",
+                    "probe_timeout": 10
+                }
+            }),
+            deployment_hash: Some("abc123".into()),
+            app_code: Some("crm".into()),
+        };
+        let parsed = parse_stacker_command(&agent_cmd).unwrap();
+        if let Some(StackerCommand::ProbeEndpoints(cmd)) = parsed {
+            assert_eq!(cmd.probe_timeout, 10);
+        } else {
+            panic!("Expected ProbeEndpoints command");
+        }
+    }
+
+    #[test]
+    fn parses_with_explicit_container() {
+        let agent_cmd = AgentCommand {
+            id: "test-id".into(),
+            command_id: "test-cmd".into(),
+            name: "probe_endpoints".into(),
+            params: json!({
+                "params": {
+                    "app_code": "crm",
+                    "container": "crm-web-1"
+                }
+            }),
+            deployment_hash: Some("abc123".into()),
+            app_code: Some("crm".into()),
+        };
+        let parsed = parse_stacker_command(&agent_cmd).unwrap();
+        if let Some(StackerCommand::ProbeEndpoints(cmd)) = parsed {
+            assert_eq!(cmd.container, Some("crm-web-1".to_string()));
+        } else {
+            panic!("Expected ProbeEndpoints command");
+        }
+    }
+
+    // ==================== NORMALIZE TESTS ====================
+
+    #[test]
+    fn normalize_trims_whitespace() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "  abc123  ".to_string(),
+            app_code: "  crm  ".to_string(),
+            container: Some("  crm-web  ".to_string()),
+            protocols: vec!["  OpenAPI  ".to_string(), " REST ".to_string()],
+            probe_timeout: 5,
+        };
+        let normalized = cmd.normalize();
+        assert_eq!(normalized.deployment_hash, "abc123");
+        assert_eq!(normalized.app_code, "crm");
+        assert_eq!(normalized.container, Some("crm-web".to_string()));
+        assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
+    }
+
+    #[test]
+    fn normalize_empty_protocols_gets_defaults() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "crm".to_string(),
+            container: None,
+            protocols: vec![],
+            probe_timeout: 5,
+        };
+        let normalized = cmd.normalize();
+        assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
+    }
+
+    #[test]
+    fn normalize_filters_empty_protocol_strings() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "crm".to_string(),
+            container: None,
+            protocols: vec!["openapi".to_string(), "  ".to_string(), "".to_string()],
+            probe_timeout: 5,
+        };
+        let normalized = cmd.normalize();
+        assert_eq!(normalized.protocols, vec!["openapi"]);
+    }
+
+    #[test]
+    fn normalize_all_empty_protocols_gets_defaults() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "crm".to_string(),
+            container: None,
+            protocols: vec!["  ".to_string(), "".to_string()],
+            probe_timeout: 5,
+        };
+        let normalized = cmd.normalize();
+        assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
+    }
+
+    #[test]
+    fn normalize_empty_container_becomes_none() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "crm".to_string(),
+            container: Some("   ".to_string()),
+            protocols: vec!["openapi".to_string()],
+            probe_timeout: 5,
+        };
+        let normalized = cmd.normalize();
+        assert!(normalized.container.is_none());
+    }
+
+    // ==================== WITH_COMMAND_CONTEXT TESTS ====================
+
+    #[test]
+    fn inherits_deployment_hash_from_context() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "".to_string(),
+            app_code: "crm".to_string(),
+            container: None,
+            protocols: vec!["openapi".to_string()],
+            probe_timeout: 5,
+        };
+        let agent_cmd = AgentCommand {
+            id: "test-id".into(),
+            command_id: "test-cmd".into(),
+            name: "probe_endpoints".into(),
+            params: json!({}),
+            deployment_hash: Some("context-hash".into()),
+            app_code: Some("crm".into()),
+        };
+        let cmd = cmd.with_command_context(&agent_cmd);
+        assert_eq!(cmd.deployment_hash, "context-hash");
+    }
+
+    #[test]
+    fn inherits_app_code_from_context() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "".to_string(),
+            container: None,
+            protocols: vec!["openapi".to_string()],
+            probe_timeout: 5,
+        };
+        let agent_cmd = AgentCommand {
+            id: "test-id".into(),
+            command_id: "test-cmd".into(),
+            name: "probe_endpoints".into(),
+            params: json!({}),
+            deployment_hash: None,
+            app_code: Some("context-app".into()),
+        };
+        let cmd = cmd.with_command_context(&agent_cmd);
+        assert_eq!(cmd.app_code, "context-app");
+    }
+
+    #[test]
+    fn does_not_override_existing_values_from_context() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "my-hash".to_string(),
+            app_code: "my-app".to_string(),
+            container: None,
+            protocols: vec!["openapi".to_string()],
+            probe_timeout: 5,
+        };
+        let agent_cmd = AgentCommand {
+            id: "test-id".into(),
+            command_id: "test-cmd".into(),
+            name: "probe_endpoints".into(),
+            params: json!({}),
+            deployment_hash: Some("context-hash".into()),
+            app_code: Some("context-app".into()),
+        };
+        let cmd = cmd.with_command_context(&agent_cmd);
+        assert_eq!(cmd.deployment_hash, "my-hash");
+        assert_eq!(cmd.app_code, "my-app");
+    }
+
+    // ==================== VALIDATE TESTS ====================
+
+    #[test]
+    fn validate_rejects_missing_deployment_hash() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "".to_string(),
+            app_code: "crm".to_string(),
+            container: None,
+            protocols: vec!["openapi".to_string()],
+            probe_timeout: 5,
+        };
+        let result = cmd.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("deployment_hash"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_app_code() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "".to_string(),
+            container: None,
+            protocols: vec!["openapi".to_string()],
+            probe_timeout: 5,
+        };
+        let result = cmd.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("app_code"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_protocol() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "crm".to_string(),
+            container: None,
+            protocols: vec!["openapi".to_string(), "invalid_proto".to_string()],
+            probe_timeout: 5,
+        };
+        let result = cmd.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported protocol"));
+    }
+
+    #[test]
+    fn validate_accepts_all_valid_protocols() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "crm".to_string(),
+            container: None,
+            protocols: vec![
+                "openapi".to_string(),
+                "html_forms".to_string(),
+                "graphql".to_string(),
+                "mcp".to_string(),
+                "rest".to_string(),
+            ],
+            probe_timeout: 5,
+        };
+        assert!(cmd.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_valid_command() {
+        let cmd = ProbeEndpointsCommand {
+            deployment_hash: "abc123".to_string(),
+            app_code: "crm".to_string(),
+            container: None,
+            protocols: vec!["openapi".to_string()],
+            probe_timeout: 5,
+        };
+        assert!(cmd.validate().is_ok());
+    }
+
+    // ==================== EXTRACT_OPENAPI_OPERATIONS TESTS ====================
+
+    #[test]
+    fn extract_openapi_operations_parses_basic_spec() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/v1/contacts": {
+                    "get": {
+                        "summary": "List contacts"
+                    },
+                    "post": {
+                        "summary": "Create contact",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "properties": {
+                                            "name": { "type": "string" },
+                                            "email": { "type": "string" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec);
+        assert_eq!(ops.len(), 2);
+
+        // Find the GET operation
+        let get_op = ops.iter().find(|o| o["method"] == "GET").unwrap();
+        assert_eq!(get_op["path"], "/api/v1/contacts");
+        assert_eq!(get_op["summary"], "List contacts");
+        assert!(get_op["fields"].as_array().unwrap().is_empty());
+
+        // Find the POST operation
+        let post_op = ops.iter().find(|o| o["method"] == "POST").unwrap();
+        assert_eq!(post_op["path"], "/api/v1/contacts");
+        assert_eq!(post_op["summary"], "Create contact");
+        let fields = post_op["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(fields.contains(&"name".to_string()));
+        assert!(fields.contains(&"email".to_string()));
+    }
+
+    #[test]
+    fn extract_openapi_operations_skips_non_http_keys() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/items": {
+                    "parameters": [{ "name": "id", "in": "path" }],
+                    "summary": "Items endpoint",
+                    "get": { "summary": "List items" }
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0]["method"], "GET");
+    }
+
+    #[test]
+    fn extract_openapi_operations_empty_paths() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {}
+        });
+
+        let ops = extract_openapi_operations(&spec);
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn extract_openapi_operations_no_paths_key() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": { "title": "test" }
+        });
+
+        let ops = extract_openapi_operations(&spec);
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn extract_openapi_operations_missing_summary() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/items": {
+                    "get": {}
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0]["summary"], "");
+    }
+
+    // ==================== EXTRACT_REQUEST_FIELDS TESTS ====================
+
+    #[test]
+    fn extract_fields_openapi3_request_body() {
+        let spec = json!({});
+        let operation = json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "properties": {
+                                "name": { "type": "string" },
+                                "email": { "type": "string" },
+                                "age": { "type": "integer" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let fields = extract_request_fields(&spec, &operation);
+        assert_eq!(fields.len(), 3);
+        assert!(fields.contains(&"name".to_string()));
+        assert!(fields.contains(&"email".to_string()));
+        assert!(fields.contains(&"age".to_string()));
+    }
+
+    #[test]
+    fn extract_fields_swagger2_body_param_with_ref() {
+        let spec = json!({
+            "definitions": {
+                "Contact": {
+                    "properties": {
+                        "last_name": { "type": "string" },
+                        "email1": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }
+            }
+        });
+        let operation = json!({
+            "parameters": [{
+                "in": "body",
+                "name": "body",
+                "schema": {
+                    "$ref": "#/definitions/Contact"
+                }
+            }]
+        });
+
+        let fields = extract_request_fields(&spec, &operation);
+        assert_eq!(fields.len(), 3);
+        assert!(fields.contains(&"last_name".to_string()));
+        assert!(fields.contains(&"email1".to_string()));
+        assert!(fields.contains(&"description".to_string()));
+    }
+
+    #[test]
+    fn extract_fields_swagger2_query_params() {
+        let spec = json!({});
+        let operation = json!({
+            "parameters": [
+                { "in": "query", "name": "page", "type": "integer" },
+                { "in": "query", "name": "limit", "type": "integer" }
+            ]
+        });
+
+        let fields = extract_request_fields(&spec, &operation);
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains(&"page".to_string()));
+        assert!(fields.contains(&"limit".to_string()));
+    }
+
+    #[test]
+    fn extract_fields_swagger2_form_data_params() {
+        let spec = json!({});
+        let operation = json!({
+            "parameters": [
+                { "in": "formData", "name": "file", "type": "file" },
+                { "in": "formData", "name": "description", "type": "string" }
+            ]
+        });
+
+        let fields = extract_request_fields(&spec, &operation);
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains(&"file".to_string()));
+        assert!(fields.contains(&"description".to_string()));
+    }
+
+    #[test]
+    fn extract_fields_openapi3_with_ref() {
+        let spec = json!({
+            "components": {
+                "schemas": {
+                    "User": {
+                        "properties": {
+                            "username": { "type": "string" },
+                            "password": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let operation = json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/User"
+                        }
+                    }
+                }
+            }
+        });
+
+        let fields = extract_request_fields(&spec, &operation);
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains(&"username".to_string()));
+        assert!(fields.contains(&"password".to_string()));
+    }
+
+    #[test]
+    fn extract_fields_allof_schema() {
+        let spec = json!({
+            "components": {
+                "schemas": {
+                    "Base": {
+                        "properties": {
+                            "id": { "type": "integer" }
+                        }
+                    }
+                }
+            }
+        });
+        let operation = json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "allOf": [
+                                { "$ref": "#/components/schemas/Base" },
+                                {
+                                    "properties": {
+                                        "name": { "type": "string" }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let fields = extract_request_fields(&spec, &operation);
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains(&"id".to_string()));
+        assert!(fields.contains(&"name".to_string()));
+    }
+
+    #[test]
+    fn extract_fields_no_request_body() {
+        let spec = json!({});
+        let operation = json!({
+            "summary": "Get items"
+        });
+
+        let fields = extract_request_fields(&spec, &operation);
+        assert!(fields.is_empty());
+    }
+
+    // ==================== EXTRACT_HTML_FORMS TESTS ====================
+
+    #[test]
+    fn extract_html_forms_basic() {
+        let html = r#"
+            <html>
+            <body>
+            <form id="contact-form" action="/submit" method="POST">
+                <input name="name" type="text" />
+                <input name="email" type="email" />
+                <textarea name="message"></textarea>
+                <button type="submit">Send</button>
+            </form>
+            </body>
+            </html>
+        "#;
+
+        let forms = extract_html_forms(html, "/contact");
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0]["id"], "contact-form");
+        assert_eq!(forms[0]["action"], "/submit");
+        assert_eq!(forms[0]["method"], "POST");
+        let fields: Vec<String> = forms[0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(fields, vec!["name", "email", "message"]);
+    }
+
+    #[test]
+    fn extract_html_forms_multiple_forms() {
+        let html = r#"
+            <form id="login" action="/login" method="POST">
+                <input name="username" type="text" />
+                <input name="password" type="password" />
+            </form>
+            <form id="search" action="/search" method="GET">
+                <input name="q" type="text" />
+            </form>
+        "#;
+
+        let forms = extract_html_forms(html, "/");
+        assert_eq!(forms.len(), 2);
+    }
+
+    #[test]
+    fn extract_html_forms_no_forms() {
+        let html = "<html><body><p>Hello</p></body></html>";
+        let forms = extract_html_forms(html, "/");
+        assert!(forms.is_empty());
+    }
+
+    #[test]
+    fn extract_html_forms_uses_name_as_fallback_id() {
+        let html = r#"
+            <form name="myform" action="/submit" method="POST">
+                <input name="field1" type="text" />
+            </form>
+        "#;
+
+        let forms = extract_html_forms(html, "/page");
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0]["id"], "myform");
+    }
+
+    #[test]
+    fn extract_html_forms_generates_id_from_path() {
+        let html = r#"
+            <form action="/submit" method="POST">
+                <input name="field1" type="text" />
+            </form>
+        "#;
+
+        let forms = extract_html_forms(html, "/contact");
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0]["id"], "form_contact");
+    }
+
+    #[test]
+    fn extract_html_forms_deduplicates_field_names() {
+        let html = r#"
+            <form id="test" action="/submit" method="POST">
+                <input name="email" type="email" />
+                <input name="email" type="hidden" />
+                <input name="name" type="text" />
+            </form>
+        "#;
+
+        let forms = extract_html_forms(html, "/");
+        assert_eq!(forms.len(), 1);
+        let fields: Vec<String> = forms[0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(fields, vec!["email", "name"]);
+    }
+
+    #[test]
+    fn extract_html_forms_includes_select_and_textarea() {
+        let html = r#"
+            <form id="test" action="/submit" method="POST">
+                <input name="name" type="text" />
+                <select name="country"><option>US</option></select>
+                <textarea name="bio"></textarea>
+            </form>
+        "#;
+
+        let forms = extract_html_forms(html, "/");
+        let fields: Vec<String> = forms[0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(fields.len(), 3);
+        assert!(fields.contains(&"name".to_string()));
+        assert!(fields.contains(&"country".to_string()));
+        assert!(fields.contains(&"bio".to_string()));
+    }
+
+    #[test]
+    fn extract_html_forms_post_with_no_fields_included() {
+        let html = r#"
+            <form id="empty-post" action="/action" method="POST">
+                <button type="submit">Go</button>
+            </form>
+        "#;
+
+        let forms = extract_html_forms(html, "/");
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0]["method"], "POST");
+        assert!(forms[0]["fields"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extract_html_forms_get_with_no_fields_excluded() {
+        let html = r#"
+            <form action="/noop" method="GET">
+            </form>
+        "#;
+
+        let forms = extract_html_forms(html, "/");
+        assert!(forms.is_empty());
+    }
+
+    // ==================== RESOLVE_REF TESTS ====================
+
+    #[test]
+    fn resolve_ref_swagger2_definitions() {
+        let spec = json!({
+            "definitions": {
+                "Pet": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                }
+            }
+        });
+
+        let resolved = resolve_ref(&spec, "#/definitions/Pet");
+        assert!(resolved.is_some());
+        assert!(resolved.unwrap().get("properties").is_some());
+    }
+
+    #[test]
+    fn resolve_ref_openapi3_components() {
+        let spec = json!({
+            "components": {
+                "schemas": {
+                    "User": {
+                        "type": "object",
+                        "properties": {
+                            "email": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+
+        let resolved = resolve_ref(&spec, "#/components/schemas/User");
+        assert!(resolved.is_some());
+        assert!(resolved.unwrap().get("properties").is_some());
+    }
+
+    #[test]
+    fn resolve_ref_invalid_path_returns_none() {
+        let spec = json!({ "definitions": {} });
+        let resolved = resolve_ref(&spec, "#/definitions/NonExistent");
+        assert!(resolved.is_none());
     }
 }
