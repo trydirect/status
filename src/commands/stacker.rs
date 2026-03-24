@@ -4934,6 +4934,65 @@ mod tests {
         let parsed = parse_stacker_command(&cmd).unwrap();
         assert!(parsed.is_none());
     }
+
+    // ── check_connections ────────────────────────────
+    stacker_test!(
+        parses_check_connections_command_no_ports,
+        "check_connections",
+        json!({}),
+        StackerCommand::CheckConnections
+    );
+    stacker_test!(
+        parses_check_connections_command_with_ports,
+        "check_connections",
+        json!({ "ports": [80, 443, 8080] }),
+        StackerCommand::CheckConnections
+    );
+    stacker_test!(
+        parses_stacker_check_connections_command,
+        "stacker.check_connections",
+        json!({}),
+        StackerCommand::CheckConnections
+    );
+
+    #[test]
+    fn check_connections_ports_are_deserialized() {
+        let cmd = AgentCommand {
+            id: "cmd-cc".into(),
+            command_id: "cmd-cc".into(),
+            name: "check_connections".into(),
+            params: json!({ "ports": [80, 443] }),
+            deployment_hash: Some("hash-cc".into()),
+            app_code: None,
+        };
+        let parsed = parse_stacker_command(&cmd).unwrap().unwrap();
+        match parsed {
+            StackerCommand::CheckConnections(c) => {
+                assert_eq!(c.ports, Some(vec![80u16, 443u16]));
+                assert_eq!(c.deployment_hash, "hash-cc");
+            }
+            _ => panic!("expected CheckConnections variant"),
+        }
+    }
+
+    #[test]
+    fn check_connections_defaults_to_no_ports() {
+        let cmd = AgentCommand {
+            id: "cmd-cc2".into(),
+            command_id: "cmd-cc2".into(),
+            name: "check_connections".into(),
+            params: json!({}),
+            deployment_hash: Some("hash-cc2".into()),
+            app_code: None,
+        };
+        let parsed = parse_stacker_command(&cmd).unwrap().unwrap();
+        match parsed {
+            StackerCommand::CheckConnections(c) => {
+                assert!(c.ports.is_none(), "ports should be None when omitted");
+            }
+            _ => panic!("expected CheckConnections variant"),
+        }
+    }
 }
 
 #[cfg(all(test, feature = "docker"))]
