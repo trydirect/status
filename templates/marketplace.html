@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Marketplace — Status Panel{% endblock %}
+{% block nav_marketplace %}active{% endblock %}
+{% block page_title %}Marketplace{% endblock %}
+
+{% block topbar_actions %}
+    <div class="search-bar" style="width:300px;">
+        <span class="material-icons-outlined">search</span>
+        <input type="text" id="stack-search" placeholder="Search stacks..." oninput="filterStacks(this.value)"/>
+    </div>
+{% endblock %}
+
+{% block content %}
+<div class="filter-row" id="filter-row">
+    <button class="filter-pill active" data-category="all">All</button>
+    <button class="filter-pill" data-category="ai">AI &amp; Automation</button>
+    <button class="filter-pill" data-category="data">Data &amp; Analytics</button>
+    <button class="filter-pill" data-category="saas">SaaS Starters</button>
+    <button class="filter-pill" data-category="devtools">Dev Tools</button>
+</div>
+
+<div class="grid grid-3" id="stacks-grid">
+    <!-- Stacks loaded via JS or server-side -->
+    {% if stacks %}
+        {% for stack in stacks %}
+        <div class="stack-card" data-category="{{ stack.category }}" data-name="{{ stack.name | lower }}">
+            <div class="stack-card-img">
+                {% if stack.icon_url %}
+                    <img src="{{ stack.icon_url }}" alt="{{ stack.name }}"/>
+                {% else %}
+                    <span class="material-icons-outlined" style="font-size:48px;color:var(--color-accent);">widgets</span>
+                {% endif %}
+            </div>
+            <div class="stack-card-body">
+                <div class="stack-card-title">{{ stack.name }}</div>
+                <div class="stack-card-desc">{{ stack.description }}</div>
+                <div class="stack-card-meta">
+                    <span>{{ stack.author }}</span>
+                    <span class="stack-card-version">v{{ stack.version }}</span>
+                </div>
+            </div>
+            <div class="stack-card-footer">
+                <button class="btn btn-sm btn-primary" onclick="deployStack('{{ stack.id }}')">
+                    <span class="material-icons-outlined" style="font-size:16px;">rocket_launch</span>
+                    Deploy
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+    <div class="empty-state" style="grid-column: 1 / -1;">
+        <span class="material-icons-outlined">store</span>
+        <p>No stacks available yet.<br/>Connect to the TryDirect marketplace to browse deployable stacks.</p>
+        <a href="/link" class="btn btn-primary">
+            <span class="material-icons-outlined" style="font-size:16px;">link</span>
+            Link Dashboard
+        </a>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Deploy confirmation modal -->
+<div id="deploy-modal" class="modal-overlay">
+    <div class="modal-dialog" style="max-width:500px;">
+        <div class="modal-header">
+            <h3>Deploy Stack</h3>
+            <button class="modal-close"><span class="material-icons-outlined">close</span></button>
+        </div>
+        <div class="modal-body" style="padding:24px;">
+            <p style="margin-bottom:16px;">You are about to deploy <strong id="deploy-stack-name"></strong> on this server.</p>
+            <div class="info-box info" style="margin-bottom:16px;">
+                <span class="material-icons-outlined">info</span>
+                <div>This will download the stack archive and run <code>stacker deploy</code> locally.</div>
+            </div>
+            <div id="deploy-progress" style="display:none;">
+                <div class="info-box success">
+                    <span class="material-icons-outlined">hourglass_top</span>
+                    <div id="deploy-status">Deploying...</div>
+                </div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+                <button class="btn btn-secondary modal-close">Cancel</button>
+                <button class="btn btn-primary" id="deploy-confirm" onclick="confirmDeploy()">
+                    <span class="material-icons-outlined" style="font-size:16px;">rocket_launch</span>
+                    Deploy Now
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentDeployId = null;
+
+function filterStacks(query) {
+    const q = query.toLowerCase();
+    document.querySelectorAll('.stack-card').forEach(card => {
+        const name = card.dataset.name || '';
+        card.style.display = name.includes(q) ? '' : 'none';
+    });
+}
+
+document.querySelectorAll('.filter-pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+        document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        const cat = pill.dataset.category;
+        document.querySelectorAll('.stack-card').forEach(card => {
+            card.style.display = (cat === 'all' || card.dataset.category === cat) ? '' : 'none';
+        });
+    });
+});
+
+function deployStack(stackId) {
+    currentDeployId = stackId;
+    const card = document.querySelector(`[data-name]`);
+    document.getElementById('deploy-stack-name').textContent = stackId;
+    document.getElementById('deploy-progress').style.display = 'none';
+    document.getElementById('deploy-confirm').disabled = false;
+    document.getElementById('deploy-modal').classList.add('open');
+}
+
+async function confirmDeploy() {
+    if (!currentDeployId) return;
+    const btn = document.getElementById('deploy-confirm');
+    btn.disabled = true;
+    document.getElementById('deploy-progress').style.display = 'block';
+    document.getElementById('deploy-status').textContent = 'Deploying...';
+    try {
+        const resp = await fetch('/api/v1/marketplace/deploy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stack_id: currentDeployId })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            document.getElementById('deploy-status').textContent = 'Deploy started! ' + (data.message || '');
+        } else {
+            document.getElementById('deploy-status').textContent = 'Error: ' + (data.error || 'Unknown error');
+        }
+    } catch (err) {
+        document.getElementById('deploy-status').textContent = 'Network error: ' + err.message;
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Link Dashboard — Status Panel{% endblock %}
+{% block nav_link %}active{% endblock %}
+{% block page_title %}Link to TryDirect Dashboard{% endblock %}
+
+{% block content %}
+<div class="link-card card">
+    <div class="card-header">
+        <span class="material-icons-outlined">link</span>
+        <h3>Connect to TryDirect</h3>
+    </div>
+    <div class="card-body">
+        {% if linked %}
+            <div class="info-box success" style="margin-bottom:20px;">
+                <span class="material-icons-outlined">check_circle</span>
+                <div>
+                    This server is linked to your TryDirect dashboard.<br/>
+                    <strong>Agent ID:</strong> {{ agent_id }}<br/>
+                    {% if dashboard_url %}
+                        <a href="{{ dashboard_url }}" target="_blank" style="color:var(--color-success-text);text-decoration:underline;">Open Dashboard</a>
+                    {% endif %}
+                </div>
+            </div>
+            <form method="post" action="/link/unlink">
+                <button class="btn btn-secondary" type="submit">
+                    <span class="material-icons-outlined" style="font-size:16px;">link_off</span>
+                    Unlink from Dashboard
+                </button>
+            </form>
+
+        {% elif step == "select" %}
+            {# Step 2: User authenticated — select a deployment to link #}
+            <p style="margin-bottom:20px;color:var(--color-text-light);">
+                Login successful. Select the deployment to link this agent to:
+            </p>
+
+            {% if link_error %}
+            <div class="form-error" style="margin-bottom:16px;">{{ link_error }}</div>
+            {% endif %}
+
+            {% if deployments | length > 0 %}
+                <div class="deployment-list">
+                    {% for dep in deployments %}
+                    <form method="post" action="/link/select" class="deployment-item">
+                        <input type="hidden" name="session_token" value="{{ session_token }}"/>
+                        <input type="hidden" name="deployment_id" value="{{ dep.deployment_id }}"/>
+                        <div class="deployment-info">
+                            <strong>{{ dep.stack_name }}</strong>
+                            <span class="badge badge-{{ dep.status }}">{{ dep.status }}</span>
+                            {% if dep.server_ip %}
+                                <span class="deployment-meta">{{ dep.server_ip }}</span>
+                            {% endif %}
+                            {% if dep.created_at %}
+                                <span class="deployment-meta">{{ dep.created_at }}</span>
+                            {% endif %}
+                        </div>
+                        <button class="btn btn-primary btn-sm" type="submit">
+                            <span class="material-icons-outlined" style="font-size:16px;">link</span>
+                            Link
+                        </button>
+                    </form>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <div class="info-box" style="margin-bottom:20px;">
+                    <span class="material-icons-outlined">info</span>
+                    <div>
+                        No deployments found for your account. Deploy a stack from the
+                        <a href="/marketplace" style="color:var(--color-primary);text-decoration:underline;">Marketplace</a>
+                        first, then come back to link it.
+                    </div>
+                </div>
+            {% endif %}
+
+            <div style="margin-top:16px;">
+                <a href="/link" class="btn btn-secondary btn-sm">
+                    <span class="material-icons-outlined" style="font-size:16px;">arrow_back</span>
+                    Back to Login
+                </a>
+            </div>
+
+        {% else %}
+            {# Step 1: Login form #}
+            <p style="margin-bottom:20px;color:var(--color-text-light);">
+                Log in with your TryDirect account to link this server to your dashboard,
+                receive update notifications, and browse the marketplace.
+            </p>
+
+            {% if link_error %}
+            <div class="form-error" style="margin-bottom:16px;">{{ link_error }}</div>
+            {% endif %}
+
+            <form method="post" action="/link">
+                <div class="form-group">
+                    <label class="form-label" for="email">Email</label>
+                    <input class="form-input" id="email" type="email" name="email" placeholder="you@example.com" required/>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="password">Password</label>
+                    <input class="form-input" id="password" type="password" name="password" placeholder="Your TryDirect password" required/>
+                </div>
+                <button class="btn btn-primary" type="submit" style="margin-top:8px;">
+                    <span class="material-icons-outlined" style="font-size:16px;">login</span>
+                    Log In &amp; Link
+                </button>
+            </form>
+
+            <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--color-border);">
+                <p style="color:var(--color-text-muted);font-size:0.85rem;margin-bottom:8px;">
+                    Don't have a TryDirect account? You can continue using Status Panel in standalone mode.
+                </p>
+                <a href="https://try.direct/register" target="_blank" class="btn btn-secondary btn-sm" style="margin-right:8px;">
+                    Create Account
+                </a>
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+<style>
+.deployment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.deployment-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px;
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+    transition: border-color 0.2s;
+}
+.deployment-item:hover {
+    border-color: var(--color-primary);
+}
+.deployment-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.deployment-meta {
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+}
+.btn-sm {
+    padding: 6px 14px;
+    font-size: 0.85rem;
+}
+</style>
+{% endblock %}

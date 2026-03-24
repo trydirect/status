@@ -83,28 +83,27 @@ fn print_banner() {
     };
 
     eprintln!();
-    eprintln!("╔════════════════════════════════════════════════════════════════════════════════════════════╗");
-    eprintln!("║  Status Panel (TryDirect Agent)                                                         ║");
-    eprintln!("╠════════════════════════════════════════════════════════════════════════════════════════════╣");
-    eprintln!("║  Version:         {:<66}║", VERSION);
-    eprintln!("║  Package:         {:<66}║", PKG_NAME);
-    eprintln!("║  Rust:            {:<66}║", rust_version);
-    eprintln!("║  Build:           {:<66}║", build_profile);
-    eprintln!("║  Docker:          {:<66}║", docker_feature);
-    eprintln!("║  PID:             {:<66}║", std::process::id());
-    eprintln!("║  Mode:            {:<66}║", mode);
-    eprintln!("║  Dashboard URL:   {:<66}║", dashboard_url);
-    eprintln!("║  Base URL:        {:<66}║", base_url);
-    eprintln!("║  Vault URL:       {:<66}║", vault_url);
-    eprintln!("║  Agent ID:        {:<66}║", agent_id);
-    eprintln!("║  Stacker/Auth:    {:<66}║", stacker_status);
-    eprintln!("║  Debug Mode:      {:<66}║", debug_mode);
-    eprintln!("╚════════════════════════════════════════════════════════════════════════════════════════════╝");
+    eprintln!("  Status Panel                                                                            ");
+    eprintln!("═══════════════════════════════════════════════════════════");
+    eprintln!("  Version:         {}", VERSION);
+    eprintln!("  Package:         {}", PKG_NAME);
+    eprintln!("  Rust:            {}", rust_version);
+    eprintln!("  Build:           {}", build_profile);
+    eprintln!("  Docker:          {}", docker_feature);
+    eprintln!("  PID:             {}", std::process::id());
+    eprintln!("  Mode:            {}", mode);
+    eprintln!("  Dashboard URL:   {}", dashboard_url);
+    eprintln!("  Base URL:        {}", base_url);
+    eprintln!("  Vault URL:       {}", vault_url);
+    eprintln!("  Agent ID:        {}", agent_id);
+    eprintln!("  Stacker/Auth:    {}", stacker_status);
+    eprintln!("  Debug Mode:      {}", debug_mode);
+    eprintln!("═══════════════════════════════════════════════════════════");
     eprintln!();
 }
 
 #[derive(Parser)]
-#[command(name = "status", version, about = "Status Panel (TryDirect Agent)")]
+#[command(name = "status", version, about = "")]
 struct AppCli {
     /// Run in daemon mode (background)
     #[arg(long)]
@@ -173,6 +172,18 @@ enum Commands {
     Update {
         #[command(subcommand)]
         action: UpdateAction,
+    },
+    /// Register this agent with Stacker Server using a purchase token
+    Register {
+        /// Purchase token from marketplace
+        #[arg(long)]
+        purchase_token: String,
+        /// Stack template ID
+        #[arg(long)]
+        stack_id: String,
+        /// Stacker Server URL (default: from DASHBOARD_URL env or https://stacker.try.direct)
+        #[arg(long)]
+        server: Option<String>,
     },
 }
 
@@ -346,6 +357,49 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Some(Commands::Register {
+            purchase_token,
+            stack_id,
+            server,
+        }) => {
+            let dashboard_url = server.unwrap_or_else(|| {
+                std::env::var("DASHBOARD_URL")
+                    .unwrap_or_else(|_| "https://stacker.try.direct".to_string())
+            });
+            match agent::registration::register_with_stacker(
+                &dashboard_url,
+                &purchase_token,
+                &stack_id,
+            )
+            .await
+            {
+                Ok(reg) => {
+                    println!("Registered successfully!");
+                    println!("Agent ID:         {}", reg.agent_id);
+                    println!("Deployment Hash:  {}", reg.deployment_hash);
+                    if let Some(url) = &reg.dashboard_url {
+                        println!("Dashboard URL:    {}", url);
+                    }
+                    let save_path = std::path::Path::new("/etc/status-panel/registration.json");
+                    if let Err(e) = agent::registration::save_registration(save_path, &reg) {
+                        eprintln!(
+                            "Warning: could not save registration to {}: {}",
+                            save_path.display(),
+                            e
+                        );
+                        eprintln!(
+                            "You may need to run with elevated permissions or save manually."
+                        );
+                    } else {
+                        println!("Config saved to:  {}", save_path.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Registration failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         None => {
             // Default: run the agent daemon
             if args.compose_mode {
