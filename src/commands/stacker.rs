@@ -46,6 +46,7 @@ pub enum StackerCommand {
     ListContainers(ListContainersCommand),
     ConfigureFirewall(ConfigureFirewallCommand),
     ProbeEndpoints(ProbeEndpointsCommand),
+    CheckConnections(CheckConnectionsCommand),
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -407,6 +408,22 @@ fn default_create_action() -> String {
     "create".to_string()
 }
 
+/// Default HTTP/HTTPS ports checked when none are specified in `check_connections`.
+fn default_check_ports() -> Vec<u16> {
+    vec![80, 443, 8080, 3000, 8443]
+}
+
+/// Command to count active HTTP/HTTPS connections on the host.
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckConnectionsCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    /// Specific TCP ports to inspect. Defaults to common HTTP/HTTPS ports when omitted.
+    #[serde(default)]
+    ports: Option<Vec<u16>>,
+}
+
 pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand>> {
     let normalized = cmd.name.trim().to_lowercase();
     match normalized.as_str() {
@@ -547,6 +564,14 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             payload.validate()?;
             Ok(Some(StackerCommand::ProbeEndpoints(payload)))
         }
+        "check_connections" | "stacker.check_connections" => {
+            let payload: CheckConnectionsCommand =
+                serde_json::from_value(unwrap_params(&cmd.params))
+                    .context("invalid check_connections payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::CheckConnections(payload)))
+        }
         _ => Ok(None),
     }
 }
@@ -559,6 +584,12 @@ pub async fn execute_stacker_command(
     // Firewall commands don't require Docker
     if let StackerCommand::ConfigureFirewall(data) = command {
         return firewall::handle_configure_firewall(agent_cmd, data, firewall_policy).await;
+    }
+
+    // Connection check doesn't require Docker either
+    #[cfg(feature = "docker")]
+    if let StackerCommand::CheckConnections(data) = command {
+        return handle_check_connections(agent_cmd, data).await;
     }
 
     #[cfg(feature = "docker")]
@@ -1271,6 +1302,26 @@ impl ProbeEndpointsCommand {
     }
 }
 
+impl CheckConnectionsCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 fn trimmed(value: &str) -> String {
     value.trim().to_string()
 }
@@ -1446,6 +1497,7 @@ async fn execute_with_docker(
         StackerCommand::ConfigureFirewall(data) => {
             firewall::handle_configure_firewall(agent_cmd, data, firewall_policy).await
         }
+        StackerCommand::CheckConnections(data) => handle_check_connections(agent_cmd, data).await,
     }
 }
 
@@ -4602,6 +4654,88 @@ async fn handle_probe_endpoints(
     Ok(result)
 }
 
+#[cfg(feature = "docker")]
+async fn handle_check_connections(
+    agent_cmd: &AgentCommand,
+    data: &CheckConnectionsCommand,
+) -> Result<CommandResult> {
+    let mut result = base_result(agent_cmd, &data.deployment_hash, "", "check_connections");
+
+    let ports = data.ports.clone().unwrap_or_else(default_check_ports);
+
+    // Run `ss -Htn state established` to list established TCP connections.
+    // Output lines look like: "ESTAB  0  0  10.0.0.1:80  10.0.0.2:54321"
+    let output = tokio::process::Command::new("ss")
+        .args(["-Htn", "state", "established"])
+        .output()
+        .await;
+
+    let raw_lines = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            let error = make_error("ss_failed", "Failed to run ss command", Some(stderr));
+            result.status = "error".to_string();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+        Err(e) => {
+            let error = make_error(
+                "ss_unavailable",
+                "ss command not available on this host",
+                Some(e.to_string()),
+            );
+            result.status = "error".to_string();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
+    // Count connections per port.
+    let mut per_port: std::collections::HashMap<u16, u32> = ports.iter().map(|&p| (p, 0)).collect();
+    for line in raw_lines.lines() {
+        // Each token at position 3 (local addr:port) or 4 (peer addr:port) — we look at local.
+        // Columns: State Recv-Q Send-Q Local-Address:Port Peer-Address:Port
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let local = parts[3];
+        // Local may be "0.0.0.0:80" or "[::]:443" or "127.0.0.1:8080"
+        if let Some(port_str) = local.rsplit(':').next() {
+            if let Ok(port) = port_str.parse::<u16>() {
+                if let Some(count) = per_port.get_mut(&port) {
+                    *count += 1;
+                }
+            }
+        }
+    }
+
+    let port_details: Vec<serde_json::Value> = per_port
+        .iter()
+        .map(|(&port, &connections)| json!({ "port": port, "connections": connections }))
+        .collect();
+
+    let active_connections: u32 = per_port.values().sum();
+
+    result.result = Some(json!({
+        "type": "check_connections",
+        "active_connections": active_connections,
+        "ports": port_details,
+        "ports_checked": ports,
+        "method": "ss",
+        "summary": format!(
+            "{} active HTTP connection(s) on {} port(s)",
+            active_connections,
+            ports.len()
+        ),
+    }));
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4799,6 +4933,65 @@ mod tests {
 
         let parsed = parse_stacker_command(&cmd).unwrap();
         assert!(parsed.is_none());
+    }
+
+    // ── check_connections ────────────────────────────
+    stacker_test!(
+        parses_check_connections_command_no_ports,
+        "check_connections",
+        json!({}),
+        StackerCommand::CheckConnections
+    );
+    stacker_test!(
+        parses_check_connections_command_with_ports,
+        "check_connections",
+        json!({ "ports": [80, 443, 8080] }),
+        StackerCommand::CheckConnections
+    );
+    stacker_test!(
+        parses_stacker_check_connections_command,
+        "stacker.check_connections",
+        json!({}),
+        StackerCommand::CheckConnections
+    );
+
+    #[test]
+    fn check_connections_ports_are_deserialized() {
+        let cmd = AgentCommand {
+            id: "cmd-cc".into(),
+            command_id: "cmd-cc".into(),
+            name: "check_connections".into(),
+            params: json!({ "ports": [80, 443] }),
+            deployment_hash: Some("hash-cc".into()),
+            app_code: None,
+        };
+        let parsed = parse_stacker_command(&cmd).unwrap().unwrap();
+        match parsed {
+            StackerCommand::CheckConnections(c) => {
+                assert_eq!(c.ports, Some(vec![80u16, 443u16]));
+                assert_eq!(c.deployment_hash, "hash-cc");
+            }
+            _ => panic!("expected CheckConnections variant"),
+        }
+    }
+
+    #[test]
+    fn check_connections_defaults_to_no_ports() {
+        let cmd = AgentCommand {
+            id: "cmd-cc2".into(),
+            command_id: "cmd-cc2".into(),
+            name: "check_connections".into(),
+            params: json!({}),
+            deployment_hash: Some("hash-cc2".into()),
+            app_code: None,
+        };
+        let parsed = parse_stacker_command(&cmd).unwrap().unwrap();
+        match parsed {
+            StackerCommand::CheckConnections(c) => {
+                assert!(c.ports.is_none(), "ports should be None when omitted");
+            }
+            _ => panic!("expected CheckConnections variant"),
+        }
     }
 }
 
