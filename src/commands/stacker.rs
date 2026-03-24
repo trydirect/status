@@ -409,6 +409,7 @@ fn default_create_action() -> String {
 }
 
 /// Default HTTP/HTTPS ports checked when none are specified in `check_connections`.
+#[cfg(feature = "docker")]
 fn default_check_ports() -> Vec<u16> {
     vec![80, 443, 8080, 3000, 8443]
 }
