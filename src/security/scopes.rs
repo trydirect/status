@@ -32,6 +32,7 @@ impl Scopes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -62,52 +63,48 @@ mod tests {
 
     #[test]
     fn scopes_from_env_parses_comma_separated() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::set_var("AGENT_SCOPES", "docker:restart,docker:logs,admin");
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _env = EnvGuard::set("AGENT_SCOPES", "docker:restart,docker:logs,admin");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("docker:restart"));
         assert!(scopes.is_allowed("docker:logs"));
         assert!(scopes.is_allowed("admin"));
         assert!(!scopes.is_allowed("docker:stop"));
-        std::env::remove_var("AGENT_SCOPES");
     }
 
     #[test]
     fn scopes_from_env_trims_whitespace() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::set_var("AGENT_SCOPES", " docker:restart , admin ");
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _env = EnvGuard::set("AGENT_SCOPES", " docker:restart , admin ");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("docker:restart"));
         assert!(scopes.is_allowed("admin"));
-        std::env::remove_var("AGENT_SCOPES");
     }
 
     #[test]
     fn scopes_from_env_skips_empty_items() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::set_var("AGENT_SCOPES", "docker:restart,,, ,admin");
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _env = EnvGuard::set("AGENT_SCOPES", "docker:restart,,, ,admin");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("docker:restart"));
         assert!(scopes.is_allowed("admin"));
         // The empty strings should NOT be in the set
         assert!(!scopes.is_allowed(""));
-        std::env::remove_var("AGENT_SCOPES");
     }
 
     #[test]
     fn scopes_from_env_missing_var_allows_all() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::remove_var("AGENT_SCOPES");
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _env = EnvGuard::remove("AGENT_SCOPES");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("anything"));
     }
 
     #[test]
     fn scopes_from_env_empty_string_allows_all() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::set_var("AGENT_SCOPES", "");
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _env = EnvGuard::set("AGENT_SCOPES", "");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("anything"));
-        std::env::remove_var("AGENT_SCOPES");
     }
 }

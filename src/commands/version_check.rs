@@ -38,6 +38,7 @@ pub async fn check_remote_version() -> Result<Option<RemoteVersion>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -78,18 +79,17 @@ mod tests {
 
     #[tokio::test]
     async fn check_remote_version_no_env_returns_none() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::remove_var("UPDATE_SERVER_URL");
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _env = EnvGuard::remove("UPDATE_SERVER_URL");
         let result = check_remote_version().await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn check_remote_version_empty_env_returns_none() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::set_var("UPDATE_SERVER_URL", "");
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _env = EnvGuard::set("UPDATE_SERVER_URL", "");
         let result = check_remote_version().await.unwrap();
         assert!(result.is_none());
-        std::env::remove_var("UPDATE_SERVER_URL");
     }
 }
