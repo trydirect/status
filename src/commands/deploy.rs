@@ -117,6 +117,7 @@ pub async fn rollback_latest() -> Result<Option<RollbackEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -172,18 +173,18 @@ mod tests {
 
     #[tokio::test]
     async fn load_manifest_nonexistent_returns_default() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        std::env::set_var("UPDATE_STORAGE_PATH", "/tmp/status-test-nonexistent-path");
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
         let manifest = load_manifest().await.unwrap();
         assert!(manifest.entries.is_empty());
-        std::env::remove_var("UPDATE_STORAGE_PATH");
     }
 
     #[tokio::test]
     async fn save_and_load_manifest_roundtrip() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock().lock().expect("env lock poisoned");
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
 
         let manifest = RollbackManifest {
             entries: vec![RollbackEntry {
@@ -198,15 +199,13 @@ mod tests {
         let loaded = load_manifest().await.unwrap();
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(loaded.entries[0].job_id, "test-job");
-
-        std::env::remove_var("UPDATE_STORAGE_PATH");
     }
 
     #[tokio::test]
     async fn record_rollback_appends_entry() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock().lock().expect("env lock poisoned");
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
 
         // Save an initial empty manifest
         save_manifest(&RollbackManifest::default()).await.unwrap();
@@ -222,15 +221,13 @@ mod tests {
         assert_eq!(loaded.entries.len(), 2);
         assert_eq!(loaded.entries[0].job_id, "job-1");
         assert_eq!(loaded.entries[1].job_id, "job-2");
-
-        std::env::remove_var("UPDATE_STORAGE_PATH");
     }
 
     #[tokio::test]
     async fn backup_current_binary_creates_file() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock().lock().expect("env lock poisoned");
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
 
         // Create a fake binary to back up
         let src = dir.path().join("status");
@@ -243,20 +240,16 @@ mod tests {
 
         let content = tokio::fs::read(&backup_path).await.unwrap();
         assert_eq!(content, b"fake binary content");
-
-        std::env::remove_var("UPDATE_STORAGE_PATH");
     }
 
     #[tokio::test]
     async fn rollback_latest_with_empty_manifest_returns_none() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
+        let _lock = env_lock().lock().expect("env lock poisoned");
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
 
         save_manifest(&RollbackManifest::default()).await.unwrap();
         let result = rollback_latest().await.unwrap();
         assert!(result.is_none());
-
-        std::env::remove_var("UPDATE_STORAGE_PATH");
     }
 }
