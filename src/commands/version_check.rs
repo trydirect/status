@@ -34,3 +34,54 @@ pub async fn check_remote_version() -> Result<Option<RemoteVersion>> {
         .context("parsing remote version response")?;
     Ok(Some(rv))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_version_deserialize_with_checksum() {
+        let json = r#"{"version": "1.2.3", "checksum": "abc123"}"#;
+        let rv: RemoteVersion = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.version, "1.2.3");
+        assert_eq!(rv.checksum, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn remote_version_deserialize_without_checksum() {
+        let json = r#"{"version": "1.2.3"}"#;
+        let rv: RemoteVersion = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.version, "1.2.3");
+        assert_eq!(rv.checksum, None);
+    }
+
+    #[test]
+    fn remote_version_deserialize_null_checksum() {
+        let json = r#"{"version": "0.1.0", "checksum": null}"#;
+        let rv: RemoteVersion = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.version, "0.1.0");
+        assert_eq!(rv.checksum, None);
+    }
+
+    #[test]
+    fn remote_version_deserialize_missing_version_fails() {
+        let json = r#"{"checksum": "abc"}"#;
+        let result: std::result::Result<RemoteVersion, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn check_remote_version_no_env_returns_none() {
+        std::env::remove_var("UPDATE_SERVER_URL");
+        let result = check_remote_version().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn check_remote_version_empty_env_returns_none() {
+        std::env::set_var("UPDATE_SERVER_URL", "");
+        let result = check_remote_version().await.unwrap();
+        assert!(result.is_none());
+        std::env::remove_var("UPDATE_SERVER_URL");
+    }
+}
