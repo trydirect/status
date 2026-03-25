@@ -32,6 +32,12 @@ impl Scopes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn empty_scopes_allow_everything() {
@@ -56,6 +62,7 @@ mod tests {
 
     #[test]
     fn scopes_from_env_parses_comma_separated() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         std::env::set_var("AGENT_SCOPES", "docker:restart,docker:logs,admin");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("docker:restart"));
@@ -67,6 +74,7 @@ mod tests {
 
     #[test]
     fn scopes_from_env_trims_whitespace() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         std::env::set_var("AGENT_SCOPES", " docker:restart , admin ");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("docker:restart"));
@@ -76,6 +84,7 @@ mod tests {
 
     #[test]
     fn scopes_from_env_skips_empty_items() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         std::env::set_var("AGENT_SCOPES", "docker:restart,,, ,admin");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("docker:restart"));
@@ -87,6 +96,7 @@ mod tests {
 
     #[test]
     fn scopes_from_env_missing_var_allows_all() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         std::env::remove_var("AGENT_SCOPES");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("anything"));
@@ -94,6 +104,7 @@ mod tests {
 
     #[test]
     fn scopes_from_env_empty_string_allows_all() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
         std::env::set_var("AGENT_SCOPES", "");
         let scopes = Scopes::from_env();
         assert!(scopes.is_allowed("anything"));
