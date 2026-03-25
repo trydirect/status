@@ -7,5 +7,8 @@ pub mod security;
 pub mod transport;
 pub mod utils;
 
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 // Crate version exposed for runtime queries
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
