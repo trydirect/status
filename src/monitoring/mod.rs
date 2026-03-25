@@ -295,10 +295,7 @@ mod tests {
         assert_eq!(metrics.status_panel_count, 1);
         assert_eq!(metrics.compose_agent_count, 0);
         assert_eq!(metrics.total_count, 1);
-        assert_eq!(
-            metrics.last_control_plane,
-            Some("status_panel".to_string())
-        );
+        assert_eq!(metrics.last_control_plane, Some("status_panel".to_string()));
         assert!(metrics.last_command_timestamp_ms > 0);
     }
 

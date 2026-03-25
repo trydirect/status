@@ -137,7 +137,10 @@ mod tests {
         // Odd-length string that's not valid base64 and not valid hex
         let result = decode_signature("xyz");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid signature encoding"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid signature encoding"));
     }
 
     #[test]
@@ -161,7 +164,10 @@ mod tests {
 
         let result = verify_signature(&headers, b"body", "key", 60);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing X-Timestamp"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing X-Timestamp"));
     }
 
     #[test]
@@ -172,7 +178,10 @@ mod tests {
 
         let result = verify_signature(&headers, b"body", "key", 60);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid X-Timestamp"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid X-Timestamp"));
     }
 
     #[test]
@@ -199,7 +208,10 @@ mod tests {
 
         let result = verify_signature(&headers, b"body", "key", 60);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing X-Agent-Signature"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing X-Agent-Signature"));
     }
 
     #[test]
@@ -214,7 +226,10 @@ mod tests {
 
         let result = verify_signature(&headers, body, "wrong-key", 60);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("signature mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("signature mismatch"));
     }
 
     #[test]
@@ -231,7 +246,10 @@ mod tests {
         // Verify with a different body
         let result = verify_signature(&headers, b"tampered body", key, 60);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("signature mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("signature mismatch"));
     }
 
     #[test]

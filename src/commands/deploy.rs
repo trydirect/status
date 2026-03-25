@@ -231,7 +231,9 @@ mod tests {
 
         // Create a fake binary to back up
         let src = dir.path().join("status");
-        tokio::fs::write(&src, b"fake binary content").await.unwrap();
+        tokio::fs::write(&src, b"fake binary content")
+            .await
+            .unwrap();
 
         let backup_path = backup_current_binary(src.to_str().unwrap(), "test-job")
             .await
