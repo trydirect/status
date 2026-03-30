@@ -602,4 +602,179 @@ mod tests {
         assert!(result.command.is_none());
         mock.assert();
     }
+
+    #[test]
+    fn build_wait_command_url_with_priority() {
+        let url = build_wait_command_url("https://example.com", "dep-1", 30, Some("high"));
+        assert_eq!(
+            url,
+            "https://example.com/api/v1/agent/commands/wait/dep-1?timeout=30&priority=high"
+        );
+    }
+
+    #[test]
+    fn build_wait_command_url_default_priority() {
+        let url = build_wait_command_url("https://example.com", "dep-1", 60, None);
+        assert_eq!(
+            url,
+            "https://example.com/api/v1/agent/commands/wait/dep-1?timeout=60&priority=normal"
+        );
+    }
+
+    #[test]
+    fn extract_next_poll_secs_from_numeric() {
+        let json = json!({"meta": {"next_poll_secs": 30}});
+        assert_eq!(extract_next_poll_secs(&json), Some(30));
+    }
+
+    #[test]
+    fn extract_next_poll_secs_from_string() {
+        let json = json!({"meta": {"next_poll_secs": "45"}});
+        assert_eq!(extract_next_poll_secs(&json), Some(45));
+    }
+
+    #[test]
+    fn extract_next_poll_secs_missing_meta() {
+        let json = json!({"data": "something"});
+        assert_eq!(extract_next_poll_secs(&json), None);
+    }
+
+    #[test]
+    fn extract_next_poll_secs_missing_field() {
+        let json = json!({"meta": {"other": 1}});
+        assert_eq!(extract_next_poll_secs(&json), None);
+    }
+
+    #[test]
+    fn extract_field_or_default_present() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".to_string(), json!("restart"));
+        assert_eq!(extract_field_or_default(&obj, "type", "unknown"), "restart");
+    }
+
+    #[test]
+    fn extract_field_or_default_missing() {
+        let obj = serde_json::Map::new();
+        assert_eq!(extract_field_or_default(&obj, "type", "unknown"), "unknown");
+    }
+
+    #[test]
+    fn extract_parameters_present() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("parameters".to_string(), json!({"key": "value"}));
+        let params = extract_parameters(&obj);
+        assert_eq!(params["key"], "value");
+    }
+
+    #[test]
+    fn extract_parameters_missing() {
+        let obj = serde_json::Map::new();
+        let params = extract_parameters(&obj);
+        assert!(params.is_object());
+        assert!(params.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extract_optional_string_present() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("field".to_string(), json!("value"));
+        assert_eq!(
+            extract_optional_string(&obj, "field"),
+            Some("value".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_optional_string_missing() {
+        let obj = serde_json::Map::new();
+        assert_eq!(extract_optional_string(&obj, "field"), None);
+    }
+
+    #[test]
+    fn extract_optional_string_non_string() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("field".to_string(), json!(42));
+        assert_eq!(extract_optional_string(&obj, "field"), None);
+    }
+
+    #[test]
+    fn extract_app_code_from_params() {
+        let params = json!({"app_code": "myapp", "other": "data"});
+        assert_eq!(extract_app_code(&params), Some("myapp".to_string()));
+    }
+
+    #[test]
+    fn extract_app_code_missing() {
+        let params = json!({"other": "data"});
+        assert_eq!(extract_app_code(&params), None);
+    }
+
+    #[test]
+    fn extract_command_from_json_valid() {
+        let json = json!({
+            "item": {
+                "command_id": "cmd-1",
+                "type": "restart",
+                "parameters": {"container": "nginx"},
+                "deployment_hash": "dep-1",
+            },
+            "meta": {"next_poll_secs": 10}
+        });
+        let body = serde_json::to_string(&json).unwrap();
+        let result = extract_command_from_json(json, &body).unwrap();
+
+        assert!(result.command.is_some());
+        let cmd = result.command.unwrap();
+        assert_eq!(cmd.command_id, "cmd-1");
+        assert_eq!(cmd.name, "restart");
+        assert_eq!(cmd.deployment_hash, Some("dep-1".to_string()));
+        assert_eq!(result.next_poll_secs, Some(10));
+    }
+
+    #[test]
+    fn extract_command_from_json_null_item() {
+        let json = json!({"item": null});
+        let body = serde_json::to_string(&json).unwrap();
+        let result = extract_command_from_json(json, &body).unwrap();
+
+        assert!(result.command.is_none());
+    }
+
+    #[test]
+    fn extract_command_from_json_empty_item() {
+        let json = json!({"item": {}});
+        let body = serde_json::to_string(&json).unwrap();
+        let result = extract_command_from_json(json, &body).unwrap();
+
+        assert!(result.command.is_none());
+    }
+
+    #[test]
+    fn extract_command_from_json_missing_command_id() {
+        let json = json!({
+            "item": {
+                "type": "restart",
+                "parameters": {}
+            }
+        });
+        let body = serde_json::to_string(&json).unwrap();
+        let result = extract_command_from_json(json, &body);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_command_id_present() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("command_id".to_string(), json!("cmd-1"));
+        let result = validate_command_id(&obj, "body");
+        assert_eq!(result.unwrap(), "cmd-1");
+    }
+
+    #[test]
+    fn validate_command_id_missing() {
+        let obj = serde_json::Map::new();
+        let result = validate_command_id(&obj, "body");
+        assert!(result.is_err());
+    }
 }

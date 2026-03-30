@@ -77,3 +77,194 @@ pub fn verify_signature(
         Err(anyhow!("signature mismatch"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_signature_deterministic() {
+        let sig1 = compute_signature_base64("secret", b"hello");
+        let sig2 = compute_signature_base64("secret", b"hello");
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn compute_signature_different_keys() {
+        let sig1 = compute_signature_base64("key1", b"body");
+        let sig2 = compute_signature_base64("key2", b"body");
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn compute_signature_different_bodies() {
+        let sig1 = compute_signature_base64("key", b"body1");
+        let sig2 = compute_signature_base64("key", b"body2");
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn compute_signature_empty_body() {
+        let sig = compute_signature_base64("key", b"");
+        assert!(!sig.is_empty());
+        // Verify it's valid base64
+        assert!(general_purpose::STANDARD.decode(&sig).is_ok());
+    }
+
+    #[test]
+    fn decode_signature_base64() {
+        let original = b"test data for signature";
+        let encoded = general_purpose::STANDARD.encode(original);
+        let decoded = decode_signature(&encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn decode_signature_hex_fallback() {
+        // "hello" in hex
+        let decoded = decode_signature("68656c6c6f").unwrap();
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn decode_signature_hex_uppercase() {
+        let decoded = decode_signature("48454C4C4F").unwrap();
+        assert_eq!(decoded, b"HELLO");
+    }
+
+    #[test]
+    fn decode_signature_invalid_encoding() {
+        // Odd-length string that's not valid base64 and not valid hex
+        let result = decode_signature("xyz");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid signature encoding"));
+    }
+
+    #[test]
+    fn verify_signature_valid() {
+        let key = "test-secret";
+        let body = b"request body";
+        let sig = compute_signature_base64(key, body);
+        let ts = Utc::now().timestamp().to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Timestamp", ts.parse().unwrap());
+        headers.insert("X-Agent-Signature", sig.parse().unwrap());
+
+        assert!(verify_signature(&headers, body, key, 60).is_ok());
+    }
+
+    #[test]
+    fn verify_signature_missing_timestamp() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Agent-Signature", "sig".parse().unwrap());
+
+        let result = verify_signature(&headers, b"body", "key", 60);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing X-Timestamp"));
+    }
+
+    #[test]
+    fn verify_signature_invalid_timestamp() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Timestamp", "not-a-number".parse().unwrap());
+        headers.insert("X-Agent-Signature", "sig".parse().unwrap());
+
+        let result = verify_signature(&headers, b"body", "key", 60);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid X-Timestamp"));
+    }
+
+    #[test]
+    fn verify_signature_stale_timestamp() {
+        let key = "test-secret";
+        let body = b"body";
+        let sig = compute_signature_base64(key, body);
+        let old_ts = (Utc::now().timestamp() - 120).to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Timestamp", old_ts.parse().unwrap());
+        headers.insert("X-Agent-Signature", sig.parse().unwrap());
+
+        let result = verify_signature(&headers, body, key, 60);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("stale request"));
+    }
+
+    #[test]
+    fn verify_signature_missing_signature_header() {
+        let ts = Utc::now().timestamp().to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Timestamp", ts.parse().unwrap());
+
+        let result = verify_signature(&headers, b"body", "key", 60);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing X-Agent-Signature"));
+    }
+
+    #[test]
+    fn verify_signature_wrong_key() {
+        let body = b"body";
+        let sig = compute_signature_base64("correct-key", body);
+        let ts = Utc::now().timestamp().to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Timestamp", ts.parse().unwrap());
+        headers.insert("X-Agent-Signature", sig.parse().unwrap());
+
+        let result = verify_signature(&headers, body, "wrong-key", 60);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("signature mismatch"));
+    }
+
+    #[test]
+    fn verify_signature_tampered_body() {
+        let key = "test-secret";
+        let body = b"original body";
+        let sig = compute_signature_base64(key, body);
+        let ts = Utc::now().timestamp().to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Timestamp", ts.parse().unwrap());
+        headers.insert("X-Agent-Signature", sig.parse().unwrap());
+
+        // Verify with a different body
+        let result = verify_signature(&headers, b"tampered body", key, 60);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("signature mismatch"));
+    }
+
+    #[test]
+    fn verify_signature_large_skew_allowed() {
+        let key = "test-secret";
+        let body = b"body";
+        let sig = compute_signature_base64(key, body);
+        // Timestamp 30 seconds in the past
+        let ts = (Utc::now().timestamp() - 30).to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Timestamp", ts.parse().unwrap());
+        headers.insert("X-Agent-Signature", sig.parse().unwrap());
+
+        // 60 second skew allows 30 second old request
+        assert!(verify_signature(&headers, body, key, 60).is_ok());
+    }
+}

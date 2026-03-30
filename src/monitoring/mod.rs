@@ -222,3 +222,143 @@ pub fn spawn_heartbeat(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_snapshot_default() {
+        let snapshot = MetricsSnapshot::default();
+        assert_eq!(snapshot.timestamp_ms, 0);
+        assert_eq!(snapshot.cpu_usage_pct, 0.0);
+        assert_eq!(snapshot.memory_total_bytes, 0);
+        assert_eq!(snapshot.memory_used_bytes, 0);
+        assert_eq!(snapshot.memory_used_pct, 0.0);
+        assert_eq!(snapshot.disk_total_bytes, 0);
+        assert_eq!(snapshot.disk_used_bytes, 0);
+        assert_eq!(snapshot.disk_used_pct, 0.0);
+    }
+
+    #[test]
+    fn metrics_snapshot_serialization() {
+        let snapshot = MetricsSnapshot {
+            timestamp_ms: 1700000000000,
+            cpu_usage_pct: 45.5,
+            memory_total_bytes: 16_000_000_000,
+            memory_used_bytes: 8_000_000_000,
+            memory_used_pct: 50.0,
+            disk_total_bytes: 500_000_000_000,
+            disk_used_bytes: 250_000_000_000,
+            disk_used_pct: 50.0,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("\"cpu_usage_pct\":45.5"));
+        assert!(json.contains("\"memory_total_bytes\":16000000000"));
+    }
+
+    #[test]
+    fn control_plane_display() {
+        assert_eq!(ControlPlane::StatusPanel.to_string(), "status_panel");
+        assert_eq!(ControlPlane::ComposeAgent.to_string(), "compose_agent");
+    }
+
+    #[test]
+    fn control_plane_serialization() {
+        let json = serde_json::to_string(&ControlPlane::StatusPanel).unwrap();
+        assert_eq!(json, "\"status_panel\"");
+        let json = serde_json::to_string(&ControlPlane::ComposeAgent).unwrap();
+        assert_eq!(json, "\"compose_agent\"");
+    }
+
+    #[test]
+    fn control_plane_equality() {
+        assert_eq!(ControlPlane::StatusPanel, ControlPlane::StatusPanel);
+        assert_ne!(ControlPlane::StatusPanel, ControlPlane::ComposeAgent);
+    }
+
+    #[test]
+    fn command_execution_metrics_default() {
+        let metrics = CommandExecutionMetrics::default();
+        assert_eq!(metrics.status_panel_count, 0);
+        assert_eq!(metrics.compose_agent_count, 0);
+        assert_eq!(metrics.total_count, 0);
+        assert!(metrics.last_control_plane.is_none());
+        assert_eq!(metrics.last_command_timestamp_ms, 0);
+    }
+
+    #[test]
+    fn record_status_panel_execution() {
+        let mut metrics = CommandExecutionMetrics::default();
+        metrics.record_execution(ControlPlane::StatusPanel);
+
+        assert_eq!(metrics.status_panel_count, 1);
+        assert_eq!(metrics.compose_agent_count, 0);
+        assert_eq!(metrics.total_count, 1);
+        assert_eq!(metrics.last_control_plane, Some("status_panel".to_string()));
+        assert!(metrics.last_command_timestamp_ms > 0);
+    }
+
+    #[test]
+    fn record_compose_agent_execution() {
+        let mut metrics = CommandExecutionMetrics::default();
+        metrics.record_execution(ControlPlane::ComposeAgent);
+
+        assert_eq!(metrics.status_panel_count, 0);
+        assert_eq!(metrics.compose_agent_count, 1);
+        assert_eq!(metrics.total_count, 1);
+        assert_eq!(
+            metrics.last_control_plane,
+            Some("compose_agent".to_string())
+        );
+    }
+
+    #[test]
+    fn record_multiple_executions() {
+        let mut metrics = CommandExecutionMetrics::default();
+        metrics.record_execution(ControlPlane::StatusPanel);
+        metrics.record_execution(ControlPlane::StatusPanel);
+        metrics.record_execution(ControlPlane::ComposeAgent);
+
+        assert_eq!(metrics.status_panel_count, 2);
+        assert_eq!(metrics.compose_agent_count, 1);
+        assert_eq!(metrics.total_count, 3);
+        assert_eq!(
+            metrics.last_control_plane,
+            Some("compose_agent".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_collector_snapshot_returns_valid_data() {
+        let collector = MetricsCollector::new();
+        let snapshot = collector.snapshot().await;
+
+        assert!(snapshot.timestamp_ms > 0);
+        // On any machine, total memory should be > 0
+        assert!(snapshot.memory_total_bytes > 0);
+        // Used memory should not exceed total
+        assert!(snapshot.memory_used_bytes <= snapshot.memory_total_bytes);
+        // Percentages should be 0-100 range
+        assert!(snapshot.memory_used_pct >= 0.0 && snapshot.memory_used_pct <= 100.0);
+        assert!(snapshot.disk_used_pct >= 0.0 && snapshot.disk_used_pct <= 100.0);
+    }
+
+    #[test]
+    fn command_execution_metrics_serialization() {
+        let mut metrics = CommandExecutionMetrics::default();
+        metrics.record_execution(ControlPlane::StatusPanel);
+
+        let json = serde_json::to_string(&metrics).unwrap();
+        assert!(json.contains("\"status_panel_count\":1"));
+        assert!(json.contains("\"compose_agent_count\":0"));
+        assert!(json.contains("\"total_count\":1"));
+    }
+
+    #[test]
+    fn metrics_collector_default() {
+        // Verify Default trait works
+        let collector = MetricsCollector::default();
+        let _ = format!("{:?}", collector);
+    }
+}
