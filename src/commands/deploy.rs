@@ -113,3 +113,145 @@ pub async fn rollback_latest() -> Result<Option<RollbackEntry>> {
     save_manifest(&m).await?;
     Ok(Some(entry))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::EnvGuard;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn rollback_entry_serialization() {
+        let entry = RollbackEntry {
+            job_id: "job-1".to_string(),
+            backup_path: "/backups/status.bak".to_string(),
+            install_path: "/usr/bin/status".to_string(),
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: RollbackEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.job_id, "job-1");
+        assert_eq!(deserialized.backup_path, "/backups/status.bak");
+        assert_eq!(deserialized.install_path, "/usr/bin/status");
+    }
+
+    #[test]
+    fn rollback_manifest_default_is_empty() {
+        let manifest = RollbackManifest::default();
+        assert!(manifest.entries.is_empty());
+    }
+
+    #[test]
+    fn rollback_manifest_serialization_roundtrip() {
+        let manifest = RollbackManifest {
+            entries: vec![
+                RollbackEntry {
+                    job_id: "job-1".to_string(),
+                    backup_path: "/backups/a.bak".to_string(),
+                    install_path: "/usr/bin/status".to_string(),
+                    timestamp: Utc::now(),
+                },
+                RollbackEntry {
+                    job_id: "job-2".to_string(),
+                    backup_path: "/backups/b.bak".to_string(),
+                    install_path: "/usr/bin/status".to_string(),
+                    timestamp: Utc::now(),
+                },
+            ],
+        };
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let deserialized: RollbackManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.entries.len(), 2);
+        assert_eq!(deserialized.entries[0].job_id, "job-1");
+        assert_eq!(deserialized.entries[1].job_id, "job-2");
+    }
+
+    #[tokio::test]
+    async fn load_manifest_nonexistent_returns_default() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+        let manifest = load_manifest().await.unwrap();
+        assert!(manifest.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_and_load_manifest_roundtrip() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+
+        let manifest = RollbackManifest {
+            entries: vec![RollbackEntry {
+                job_id: "test-job".to_string(),
+                backup_path: "/backup/test.bak".to_string(),
+                install_path: "/usr/bin/status".to_string(),
+                timestamp: Utc::now(),
+            }],
+        };
+        save_manifest(&manifest).await.unwrap();
+
+        let loaded = load_manifest().await.unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].job_id, "test-job");
+    }
+
+    #[tokio::test]
+    async fn record_rollback_appends_entry() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+
+        // Save an initial empty manifest
+        save_manifest(&RollbackManifest::default()).await.unwrap();
+
+        record_rollback("job-1", "/backup/1.bak", "/usr/bin/status")
+            .await
+            .unwrap();
+        record_rollback("job-2", "/backup/2.bak", "/usr/bin/status")
+            .await
+            .unwrap();
+
+        let loaded = load_manifest().await.unwrap();
+        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.entries[0].job_id, "job-1");
+        assert_eq!(loaded.entries[1].job_id, "job-2");
+    }
+
+    #[tokio::test]
+    async fn backup_current_binary_creates_file() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+
+        // Create a fake binary to back up
+        let src = dir.path().join("status");
+        tokio::fs::write(&src, b"fake binary content")
+            .await
+            .unwrap();
+
+        let backup_path = backup_current_binary(src.to_str().unwrap(), "test-job")
+            .await
+            .unwrap();
+        assert!(Path::new(&backup_path).exists());
+
+        let content = tokio::fs::read(&backup_path).await.unwrap();
+        assert_eq!(content, b"fake binary content");
+    }
+
+    #[tokio::test]
+    async fn rollback_latest_with_empty_manifest_returns_none() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("UPDATE_STORAGE_PATH", dir.path().to_str().unwrap());
+
+        save_manifest(&RollbackManifest::default()).await.unwrap();
+        let result = rollback_latest().await.unwrap();
+        assert!(result.is_none());
+    }
+}
