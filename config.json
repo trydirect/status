@@ -12,7 +12,7 @@
 	},
 	"project":"status",
   	"container":"nginx",
-	"apps_info": "phpMyAdmin-5,MySQL-5,PHP-7,Apache-2,Redis-5",
+	"apps_info": "",
 	"subdomains": {"dev": "dev.example.com", "prod": "example.com"},
 	"compose_agent_enabled": false,
 	"control_plane": "status_panel"
