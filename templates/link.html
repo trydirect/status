@@ -17,7 +17,7 @@
                     This server is linked to your TryDirect dashboard.<br/>
                     <strong>Agent ID:</strong> {{ agent_id }}<br/>
                     {% if dashboard_url %}
-                        <a href="{{ dashboard_url }}" target="_blank" style="color:var(--color-success-text);text-decoration:underline;">Open Dashboard</a>
+                        <a href="{{ dashboard_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--color-success-text);text-decoration:underline;">Open Dashboard</a>
                     {% endif %}
                 </div>
             </div>
@@ -109,7 +109,7 @@
                 <p style="color:var(--color-text-muted);font-size:0.85rem;margin-bottom:8px;">
                     Don't have a TryDirect account? You can continue using Status Panel in standalone mode.
                 </p>
-                <a href="https://try.direct/sign-up" target="_blank" class="btn btn-secondary btn-sm" style="margin-right:8px;">
+                <a href="https://try.direct/sign-up" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm" style="margin-right:8px;">
                     Create Account
                 </a>
             </div>
