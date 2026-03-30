@@ -35,7 +35,7 @@ services:
     env_file:
       - .env
     environment:
-      - DASHBOARD_URL=https://stacker.try.direct
+      - DASHBOARD_URL=${DASHBOARD_URL:-https://stacker.try.direct}
       - DEPLOYMENT_HASH=$DEPLOYMENT_HASH # from .env , deployment identifier
       - POLL_TIMEOUT_SECS=30
       - POLL_BACKOFF_SECS=5
@@ -58,7 +58,7 @@ services:
     env_file:
       - .env
     environment:
-      - DASHBOARD_URL=https://stacker.try.direct
+      - DASHBOARD_URL=${DASHBOARD_URL:-https://stacker.try.direct}
       - DEPLOYMENT_HASH=$DEPLOYMENT_HASH
       - POLL_TIMEOUT_SECS=30
       - POLL_BACKOFF_SECS=5
