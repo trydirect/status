@@ -29,17 +29,12 @@ const LOGS_MAX_LIMIT: usize = 1000;
 /// Container runtime selection for hardware-level isolation.
 /// Defaults to `Runc` (standard Linux containers). `Kata` provides microVM-based isolation
 /// via Kata Containers, giving each workload its own lightweight VM with a dedicated kernel.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ContainerRuntime {
+    #[default]
     Runc,
     Kata,
-}
-
-impl Default for ContainerRuntime {
-    fn default() -> Self {
-        ContainerRuntime::Runc
-    }
 }
 
 impl std::fmt::Display for ContainerRuntime {
@@ -85,10 +80,7 @@ pub async fn detect_kata_runtime() -> bool {
 /// Inject a `runtime` field into every service definition of a docker-compose YAML string.
 /// Returns the modified YAML. If parsing fails, returns the original content unchanged.
 #[cfg(feature = "docker")]
-pub fn inject_runtime_into_compose(
-    compose_content: &str,
-    runtime: &ContainerRuntime,
-) -> String {
+pub fn inject_runtime_into_compose(compose_content: &str, runtime: &ContainerRuntime) -> String {
     let mut doc: serde_yaml::Value = match serde_yaml::from_str(compose_content) {
         Ok(v) => v,
         Err(_) => return compose_content.to_string(),
@@ -96,10 +88,7 @@ pub fn inject_runtime_into_compose(
 
     let runtime_name = runtime.docker_runtime_name();
 
-    if let Some(services) = doc
-        .get_mut("services")
-        .and_then(|s| s.as_mapping_mut())
-    {
+    if let Some(services) = doc.get_mut("services").and_then(|s| s.as_mapping_mut()) {
         for (_name, service_def) in services.iter_mut() {
             if let Some(mapping) = service_def.as_mapping_mut() {
                 mapping.insert(
@@ -2729,35 +2718,33 @@ async fn handle_deploy_app(
         );
     } else if let Some(runtime) = &data.runtime {
         // Compose content not in payload — modify existing file on disk if runtime is requested
-        if *runtime == ContainerRuntime::Kata {
-            if std::path::Path::new(&compose_file).exists() {
-                let kata_available = detect_kata_runtime().await;
-                if kata_available {
-                    if let Ok(existing) = tokio::fs::read_to_string(&compose_file).await {
-                        let injected = inject_runtime_into_compose(&existing, runtime);
-                        if let Err(e) = tokio::fs::write(&compose_file, &injected).await {
-                            errors.push(make_error(
-                                "runtime_inject_warning",
-                                format!("Failed to inject Kata runtime into compose file: {}", e),
-                                None,
-                            ));
-                        } else {
-                            tracing::info!(
-                                compose_file = %compose_file,
-                                "Injected Kata runtime into existing compose file"
-                            );
-                        }
+        if *runtime == ContainerRuntime::Kata && std::path::Path::new(&compose_file).exists() {
+            let kata_available = detect_kata_runtime().await;
+            if kata_available {
+                if let Ok(existing) = tokio::fs::read_to_string(&compose_file).await {
+                    let injected = inject_runtime_into_compose(&existing, runtime);
+                    if let Err(e) = tokio::fs::write(&compose_file, &injected).await {
+                        errors.push(make_error(
+                            "runtime_inject_warning",
+                            format!("Failed to inject Kata runtime into compose file: {}", e),
+                            None,
+                        ));
+                    } else {
+                        tracing::info!(
+                            compose_file = %compose_file,
+                            "Injected Kata runtime into existing compose file"
+                        );
                     }
-                } else {
-                    tracing::warn!(
-                        "Kata runtime requested but not available on this host — falling back to runc"
-                    );
-                    errors.push(make_error(
-                        "kata_fallback",
-                        "Kata runtime requested but not available on this host; deploying with runc",
-                        None,
-                    ));
                 }
+            } else {
+                tracing::warn!(
+                    "Kata runtime requested but not available on this host — falling back to runc"
+                );
+                errors.push(make_error(
+                    "kata_fallback",
+                    "Kata runtime requested but not available on this host; deploying with runc",
+                    None,
+                ));
             }
         }
     }
@@ -3071,8 +3058,7 @@ async fn handle_deploy_app(
                     "starting".to_string()
                 };
 
-                let effective_runtime = data.runtime.as_ref()
-                    .unwrap_or(&ContainerRuntime::Runc);
+                let effective_runtime = data.runtime.as_ref().unwrap_or(&ContainerRuntime::Runc);
 
                 let body = json!({
                     "type": "deploy_app",
