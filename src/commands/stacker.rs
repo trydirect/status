@@ -4,6 +4,7 @@ use chrono::{SecondsFormat, Utc};
 #[cfg(feature = "docker")]
 use regex::Regex;
 use serde::Deserialize;
+use serde::Serialize;
 #[cfg(any(feature = "docker", test))]
 use serde_json::json;
 #[cfg(any(feature = "docker", test))]
@@ -24,6 +25,93 @@ use super::firewall::{self, ConfigureFirewallCommand};
 
 const LOGS_DEFAULT_LIMIT: usize = 400;
 const LOGS_MAX_LIMIT: usize = 1000;
+
+/// Container runtime selection for hardware-level isolation.
+/// Defaults to `Runc` (standard Linux containers). `Kata` provides microVM-based isolation
+/// via Kata Containers, giving each workload its own lightweight VM with a dedicated kernel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainerRuntime {
+    Runc,
+    Kata,
+}
+
+impl Default for ContainerRuntime {
+    fn default() -> Self {
+        ContainerRuntime::Runc
+    }
+}
+
+impl std::fmt::Display for ContainerRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContainerRuntime::Runc => write!(f, "runc"),
+            ContainerRuntime::Kata => write!(f, "kata"),
+        }
+    }
+}
+
+impl ContainerRuntime {
+    /// Returns the Docker runtime identifier string for compose YAML injection.
+    pub fn docker_runtime_name(&self) -> &'static str {
+        match self {
+            ContainerRuntime::Runc => "runc",
+            ContainerRuntime::Kata => "io.containerd.kata.v2",
+        }
+    }
+}
+
+/// Detect whether the Kata Containers runtime is available on this host.
+/// Checks `docker info` output for a registered kata runtime.
+#[cfg(feature = "docker")]
+pub async fn detect_kata_runtime() -> bool {
+    use tokio::process::Command;
+
+    let output = Command::new("docker")
+        .args(["info", "--format", "{{json .Runtimes}}"])
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let lower = stdout.to_lowercase();
+            lower.contains("kata") || lower.contains("io.containerd.kata")
+        }
+        _ => false,
+    }
+}
+
+/// Inject a `runtime` field into every service definition of a docker-compose YAML string.
+/// Returns the modified YAML. If parsing fails, returns the original content unchanged.
+#[cfg(feature = "docker")]
+pub fn inject_runtime_into_compose(
+    compose_content: &str,
+    runtime: &ContainerRuntime,
+) -> String {
+    let mut doc: serde_yaml::Value = match serde_yaml::from_str(compose_content) {
+        Ok(v) => v,
+        Err(_) => return compose_content.to_string(),
+    };
+
+    let runtime_name = runtime.docker_runtime_name();
+
+    if let Some(services) = doc
+        .get_mut("services")
+        .and_then(|s| s.as_mapping_mut())
+    {
+        for (_name, service_def) in services.iter_mut() {
+            if let Some(mapping) = service_def.as_mapping_mut() {
+                mapping.insert(
+                    serde_yaml::Value::String("runtime".into()),
+                    serde_yaml::Value::String(runtime_name.into()),
+                );
+            }
+        }
+    }
+
+    serde_yaml::to_string(&doc).unwrap_or_else(|_| compose_content.to_string())
+}
 
 #[derive(Debug, Clone)]
 pub enum StackerCommand {
@@ -191,6 +279,9 @@ pub struct DeployAppCommand {
     /// Optional: config files to write before deploying (uses existing AppConfig struct)
     #[serde(default)]
     config_files: Option<Vec<crate::security::vault_client::AppConfig>>,
+    /// Container runtime to use: "runc" (default) or "kata" for microVM isolation
+    #[serde(default)]
+    runtime: Option<ContainerRuntime>,
 }
 
 /// Command to remove an app container and associated config
@@ -243,6 +334,9 @@ pub struct DeployWithConfigsCommand {
     /// Whether to apply all project configs before deploying
     #[serde(default = "default_true")]
     apply_configs: bool,
+    /// Container runtime to use: "runc" (default) or "kata" for microVM isolation
+    #[serde(default)]
+    runtime: Option<ContainerRuntime>,
 }
 
 /// Command to detect configuration drift between Vault and deployed files
@@ -2575,6 +2669,34 @@ async fn handle_deploy_app(
             "Writing docker-compose.yml from command payload"
         );
 
+        // Inject container runtime (kata/runc) into compose services if requested
+        let final_compose = if let Some(runtime) = &data.runtime {
+            if *runtime == ContainerRuntime::Kata {
+                let kata_available = detect_kata_runtime().await;
+                if kata_available {
+                    tracing::info!(
+                        runtime = %runtime,
+                        "Injecting Kata runtime into compose services"
+                    );
+                    inject_runtime_into_compose(compose_content, runtime)
+                } else {
+                    tracing::warn!(
+                        "Kata runtime requested but not available on this host — falling back to runc"
+                    );
+                    errors.push(make_error(
+                        "kata_fallback",
+                        "Kata runtime requested but not available on this host; deploying with runc",
+                        None,
+                    ));
+                    compose_content.clone()
+                }
+            } else {
+                compose_content.clone()
+            }
+        } else {
+            compose_content.clone()
+        };
+
         // Create the directory if it doesn't exist
         if let Err(e) = tokio::fs::create_dir_all(&compose_dir).await {
             let error = make_error(
@@ -2589,7 +2711,7 @@ async fn handle_deploy_app(
         }
 
         // Write the compose file
-        if let Err(e) = tokio::fs::write(&compose_file, compose_content).await {
+        if let Err(e) = tokio::fs::write(&compose_file, &final_compose).await {
             let error = make_error(
                 "compose_write_failed",
                 format!("Failed to write docker-compose.yml: {}", e),
@@ -2605,6 +2727,39 @@ async fn handle_deploy_app(
             compose_file = %compose_file,
             "docker-compose.yml written successfully"
         );
+    } else if let Some(runtime) = &data.runtime {
+        // Compose content not in payload — modify existing file on disk if runtime is requested
+        if *runtime == ContainerRuntime::Kata {
+            if std::path::Path::new(&compose_file).exists() {
+                let kata_available = detect_kata_runtime().await;
+                if kata_available {
+                    if let Ok(existing) = tokio::fs::read_to_string(&compose_file).await {
+                        let injected = inject_runtime_into_compose(&existing, runtime);
+                        if let Err(e) = tokio::fs::write(&compose_file, &injected).await {
+                            errors.push(make_error(
+                                "runtime_inject_warning",
+                                format!("Failed to inject Kata runtime into compose file: {}", e),
+                                None,
+                            ));
+                        } else {
+                            tracing::info!(
+                                compose_file = %compose_file,
+                                "Injected Kata runtime into existing compose file"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "Kata runtime requested but not available on this host — falling back to runc"
+                    );
+                    errors.push(make_error(
+                        "kata_fallback",
+                        "Kata runtime requested but not available on this host; deploying with runc",
+                        None,
+                    ));
+                }
+            }
+        }
     }
 
     // Write config files if provided (e.g., telegraf.conf, nginx.conf, etc.)
@@ -2916,12 +3071,16 @@ async fn handle_deploy_app(
                     "starting".to_string()
                 };
 
+                let effective_runtime = data.runtime.as_ref()
+                    .unwrap_or(&ContainerRuntime::Runc);
+
                 let body = json!({
                     "type": "deploy_app",
                     "deployment_hash": data.deployment_hash.clone(),
                     "app_code": data.app_code.clone(),
                     "status": "deployed",
                     "container_state": container_state,
+                    "runtime": effective_runtime.to_string(),
                     "deployed_at": now_timestamp(),
                     "output": stdout.trim(),
                     "warnings": if errors.is_empty() { json!(null) } else { errors_value(&errors) },
@@ -3516,6 +3675,7 @@ async fn handle_deploy_with_configs(
         pull: data.pull,
         force_recreate: data.force_recreate,
         config_files: None, // Configs already written in step 1 from Vault
+        runtime: data.runtime.clone(),
     };
 
     let deploy_result = handle_deploy_app(agent_cmd, &deploy_cmd).await?;
@@ -4799,6 +4959,165 @@ mod tests {
 
         let parsed = parse_stacker_command(&cmd).unwrap();
         assert!(parsed.is_none());
+    }
+
+    // --- ContainerRuntime tests ---
+
+    #[test]
+    fn container_runtime_default_is_runc() {
+        let rt = ContainerRuntime::default();
+        assert_eq!(rt, ContainerRuntime::Runc);
+        assert_eq!(rt.to_string(), "runc");
+    }
+
+    #[test]
+    fn container_runtime_kata_display() {
+        let rt = ContainerRuntime::Kata;
+        assert_eq!(rt.to_string(), "kata");
+        assert_eq!(rt.docker_runtime_name(), "io.containerd.kata.v2");
+    }
+
+    #[test]
+    fn container_runtime_runc_docker_name() {
+        assert_eq!(ContainerRuntime::Runc.docker_runtime_name(), "runc");
+    }
+
+    #[test]
+    fn container_runtime_deserializes_from_json() {
+        let kata: ContainerRuntime = serde_json::from_str(r#""kata""#).unwrap();
+        assert_eq!(kata, ContainerRuntime::Kata);
+
+        let runc: ContainerRuntime = serde_json::from_str(r#""runc""#).unwrap();
+        assert_eq!(runc, ContainerRuntime::Runc);
+    }
+
+    #[test]
+    fn container_runtime_rejects_unknown() {
+        let result: Result<ContainerRuntime, _> = serde_json::from_str(r#""gvisor""#);
+        assert!(result.is_err());
+    }
+
+    stacker_test!(
+        parses_deploy_app_with_kata_runtime,
+        "deploy_app",
+        json!({
+            "deployment_hash": "testhash",
+            "app_code": "testapp",
+            "image": "wordpress:latest",
+            "runtime": "kata"
+        }),
+        StackerCommand::DeployApp
+    );
+
+    stacker_test!(
+        parses_deploy_app_with_runc_runtime,
+        "deploy_app",
+        json!({
+            "deployment_hash": "testhash",
+            "app_code": "testapp",
+            "runtime": "runc"
+        }),
+        StackerCommand::DeployApp
+    );
+
+    stacker_test!(
+        parses_deploy_app_without_runtime,
+        "deploy_app",
+        json!({
+            "deployment_hash": "testhash",
+            "app_code": "testapp"
+        }),
+        StackerCommand::DeployApp
+    );
+
+    stacker_test!(
+        parses_deploy_with_configs_with_kata,
+        "deploy_with_configs",
+        json!({
+            "deployment_hash": "testhash",
+            "app_code": "testapp",
+            "runtime": "kata"
+        }),
+        StackerCommand::DeployWithConfigs
+    );
+}
+
+#[cfg(test)]
+mod runtime_compose_tests {
+    use super::*;
+
+    #[test]
+    fn inject_runtime_into_compose_adds_kata() {
+        let compose = r#"
+services:
+  web:
+    image: wordpress:latest
+    ports:
+      - "8080:80"
+  db:
+    image: mysql:8
+"#;
+        let result = inject_runtime_into_compose(compose, &ContainerRuntime::Kata);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+
+        for (_name, svc) in services {
+            let rt = svc.get("runtime").unwrap().as_str().unwrap();
+            assert_eq!(rt, "io.containerd.kata.v2");
+        }
+    }
+
+    #[test]
+    fn inject_runtime_runc_sets_runc() {
+        let compose = r#"
+services:
+  app:
+    image: nginx:latest
+"#;
+        let result = inject_runtime_into_compose(compose, &ContainerRuntime::Runc);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+        let svc = doc.get("services").unwrap().get("app").unwrap();
+        assert_eq!(svc.get("runtime").unwrap().as_str().unwrap(), "runc");
+    }
+
+    #[test]
+    fn inject_runtime_preserves_existing_fields() {
+        let compose = r#"
+services:
+  web:
+    image: wordpress:latest
+    environment:
+      WORDPRESS_DB_HOST: db
+    ports:
+      - "8080:80"
+"#;
+        let result = inject_runtime_into_compose(compose, &ContainerRuntime::Kata);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+        let web = doc.get("services").unwrap().get("web").unwrap();
+
+        assert!(web.get("image").is_some());
+        assert!(web.get("environment").is_some());
+        assert!(web.get("ports").is_some());
+        assert_eq!(
+            web.get("runtime").unwrap().as_str().unwrap(),
+            "io.containerd.kata.v2"
+        );
+    }
+
+    #[test]
+    fn inject_runtime_invalid_yaml_returns_original() {
+        let bad_yaml = "this: is: not: valid: yaml: {{{}}}";
+        let result = inject_runtime_into_compose(bad_yaml, &ContainerRuntime::Kata);
+        assert_eq!(result, bad_yaml);
+    }
+
+    #[test]
+    fn inject_runtime_no_services_key_returns_unchanged() {
+        let compose = "version: '3'\n";
+        let result = inject_runtime_into_compose(compose, &ContainerRuntime::Kata);
+        // Should not crash; YAML is valid but has no services
+        let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+        assert!(doc.get("services").is_none());
     }
 }
 

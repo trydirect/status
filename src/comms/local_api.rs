@@ -934,6 +934,14 @@ async fn capabilities_handler(State(state): State<SharedState>) -> impl IntoResp
         features.push("compose_agent".to_string());
     }
 
+    // Detect Kata Containers runtime availability
+    #[cfg(feature = "docker")]
+    {
+        if crate::commands::stacker::detect_kata_runtime().await {
+            features.push("kata".to_string());
+        }
+    }
+
     let resp = CapabilitiesResponse {
         compose_agent,
         control_plane,
