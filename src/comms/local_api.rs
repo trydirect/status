@@ -1234,11 +1234,19 @@ async fn link_select_handler(
 
 async fn unlink_handler(State(state): State<SharedState>) -> impl IntoResponse {
     let reg_path = "/etc/status-panel/registration.json";
-    if tokio::fs::try_exists(reg_path).await.unwrap_or(false) {
-        if let Err(e) = tokio::fs::remove_file(reg_path).await {
-            error!("failed to remove registration: {}", e);
-        } else {
-            info!("dashboard unlinked, registration removed");
+    match tokio::fs::try_exists(reg_path).await {
+        Ok(true) => {
+            if let Err(e) = tokio::fs::remove_file(reg_path).await {
+                error!("failed to remove registration: {}", e);
+            } else {
+                info!("dashboard unlinked, registration removed");
+            }
+        }
+        Ok(false) => {
+            info!("unlink requested but no registration file found");
+        }
+        Err(e) => {
+            error!("failed to check registration file at {}: {}", reg_path, e);
         }
     }
     if state.with_ui {
