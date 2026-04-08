@@ -1,13 +1,71 @@
 use dotenvy::dotenv;
 use status_panel::{agent, commands, comms, monitoring, utils};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
 /// Application version from Cargo.toml
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
+
+/// Check that `path` points to a readable file. Prints a friendly error and
+/// exits if the file is missing, is not a regular file, or is not readable.
+fn ensure_config_file(path: &str) {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            // Verify readability
+            if let Err(err) = std::fs::File::open(path) {
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    eprintln!();
+                    eprintln!("  Config file is not readable: {path}");
+                    eprintln!();
+                    eprintln!("  Check the file permissions and try again.");
+                    eprintln!();
+                    std::process::exit(1);
+                }
+                eprintln!();
+                eprintln!("  Cannot open config file: {path}");
+                eprintln!("  Error: {err}");
+                eprintln!();
+                std::process::exit(1);
+            }
+        }
+        Ok(_) => {
+            eprintln!();
+            eprintln!("  Config path is not a regular file: {path}");
+            eprintln!();
+            eprintln!("  Run 'status init' to generate a default configuration,");
+            eprintln!("  or specify a valid file with --config <path>");
+            eprintln!();
+            std::process::exit(1);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!();
+            eprintln!("  Config file not found: {path}");
+            eprintln!();
+            eprintln!("  Run 'status init' to generate a default configuration,");
+            eprintln!("  or specify a custom path with --config <path>");
+            eprintln!();
+            std::process::exit(1);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!();
+            eprintln!("  Config file is not readable: {path}");
+            eprintln!();
+            eprintln!("  Check the file permissions and try again.");
+            eprintln!();
+            std::process::exit(1);
+        }
+        Err(err) => {
+            eprintln!();
+            eprintln!("  Cannot access config file: {path}");
+            eprintln!("  Error: {err}");
+            eprintln!();
+            std::process::exit(1);
+        }
+    }
+}
 
 /// Print startup banner with version and system info
 fn print_banner() {
@@ -237,15 +295,7 @@ async fn main() -> Result<()> {
 
     match args.command {
         Some(Commands::Serve { port, with_ui }) => {
-            if !std::path::Path::new(&args.config).exists() {
-                eprintln!();
-                eprintln!("  Config file not found: {}", args.config);
-                eprintln!();
-                eprintln!("  Run 'status init' to generate a default configuration,");
-                eprintln!("  or specify a custom path with --config <path>");
-                eprintln!();
-                std::process::exit(1);
-            }
+            ensure_config_file(&args.config);
             if with_ui {
                 info!("Starting local API server with UI on port {port}");
             } else {
@@ -416,8 +466,16 @@ async fn main() -> Result<()> {
             }
         }
         Some(Commands::Init { force }) => {
-            let cwd = std::env::current_dir().context("could not determine current directory")?;
-            let result = agent::init::generate_default_config(&cwd, force)?;
+            // Derive output directory from --config path (defaults to current dir)
+            let config_path = std::path::Path::new(&args.config);
+            let dir = config_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| {
+                    std::env::current_dir().expect("could not determine current directory")
+                });
+            let result = agent::init::generate_default_config(&dir, force)?;
 
             println!();
             if result.config_created {
@@ -450,15 +508,7 @@ async fn main() -> Result<()> {
         }
         None => {
             // Default: run the agent daemon
-            if !std::path::Path::new(&args.config).exists() {
-                eprintln!();
-                eprintln!("  Config file not found: {}", args.config);
-                eprintln!();
-                eprintln!("  Run 'status init' to generate a default configuration,");
-                eprintln!("  or specify a custom path with --config <path>");
-                eprintln!();
-                std::process::exit(1);
-            }
+            ensure_config_file(&args.config);
             if args.compose_mode {
                 info!("Starting compose-agent daemon mode");
                 // Set CONTROL_PLANE environment variable for identification
