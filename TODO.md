@@ -60,3 +60,36 @@
 - [ ] Expose health metrics indicating which control plane executed each command (`status_panel` vs `compose_agent`) so ops can track rollout and fallbacks.
 - [ ] Publish Vault secret schema: `secret/agent/{hash}/status_panel_token` and `secret/agent/{hash}/compose_agent_token`; refresh + cache them independently.
 - [x] Add config flag to disable compose agent (legacy mode) and emit warning log so Blog receives `compose_agent=false` via `/capabilities`.
+
+## Kata Containers Support (Stacker Server)
+**Context**: The Status Panel Agent now supports `runtime` field (`runc`/`kata`) on `deploy_app` and `deploy_with_configs` commands, detects Kata availability via `docker info`, injects `runtime:` per-service into compose YAML, and reports `"kata"` in `/capabilities` features when available.
+
+### Stacker API Changes
+- [ ] Add `runtime` field (string, optional, default `"runc"`) to `POST /api/v1/agent/commands/enqueue` payload for `deploy_app` and `deploy_with_configs` commands.
+- [ ] Add `runtime` field to the deployment model/database so per-deployment runtime preference is persisted across redeploys and restarts.
+- [ ] Validate `runtime` values on the Stacker side (`runc`, `kata`); reject unknown values with 422.
+- [ ] Read agent `/capabilities` response and store `kata` feature flag per agent; use this to prevent scheduling Kata deployments on agents that don't support it.
+
+### CLI / UI Integration
+- [ ] Add `--runtime kata|runc` flag to `stacker deploy` CLI command; pass through to the agent command payload.
+- [ ] Show runtime selection option in the deployment UI (dropdown or toggle); default to `runc`, show `kata` only if agent capabilities include it.
+- [ ] Display effective runtime in deployment detail view (agent reports `"runtime"` in deploy result body).
+- [ ] Show `kata_fallback` warnings from agent result in the UI/CLI output so users know when Kata was unavailable.
+
+### Vault / Config Management
+- [ ] Allow per-deployment runtime preference in Vault (`secret/agent/{hash}/runtime_preference`); agent can read this as a default when no explicit `runtime` is in the command payload.
+- [ ] Support org-level policy: "all deployments must use Kata" — Stacker enforces this before enqueuing commands.
+
+### J2 Template Updates
+- [ ] Update compose J2 templates to optionally include `runtime:` field per-service when Kata is requested (alternative to agent-side YAML injection for new deployments).
+- [ ] Document that `runtime:` in compose YAML and `runtime` in command payload are complementary — agent-side injection is the fallback when templates don't include it.
+
+### Host Provisioning
+- [ ] Create Ansible playbook for Kata setup: install `kata-containers`, configure `daemon.json` with Kata runtime, validate KVM access.
+- [ ] Add Terraform module for provisioning Kata-ready bare-metal hosts (Hetzner, OVH) with KVM enabled.
+- [ ] Document network constraints: Kata containers cannot use `network_mode: host`; advise `bridge` or `macvlan`.
+
+### Monitoring & Observability
+- [ ] Add Prometheus metric `agent_deploy_runtime{runtime="kata|runc"}` counter to track Kata adoption.
+- [ ] Log `kata_fallback` events in agent audit trail for ops visibility.
+- [ ] Add dashboard widget showing Kata vs runc deployment distribution across fleet.

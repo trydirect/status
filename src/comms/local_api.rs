@@ -934,6 +934,14 @@ async fn capabilities_handler(State(state): State<SharedState>) -> impl IntoResp
         features.push("compose_agent".to_string());
     }
 
+    // Detect Kata Containers runtime availability
+    #[cfg(feature = "docker")]
+    {
+        if crate::commands::stacker::detect_kata_runtime().await {
+            features.push("kata".to_string());
+        }
+    }
+
     let resp = CapabilitiesResponse {
         compose_agent,
         control_plane,
@@ -1011,10 +1019,23 @@ async fn marketplace_stacks_api(State(_state): State<SharedState>) -> impl IntoR
         }
         Ok(resp) => {
             let status = resp.status();
-            Json(json!({"error": format!("Marketplace returned {}", status)})).into_response()
+            (
+                status,
+                Json(json!({"error": format!("Marketplace returned {}", status)})),
+            )
+                .into_response()
         }
         Err(e) => {
-            Json(json!({"error": format!("Failed to reach marketplace: {}", e)})).into_response()
+            let status = if e.is_timeout() {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            (
+                status,
+                Json(json!({"error": format!("Failed to reach marketplace: {}", e)})),
+            )
+                .into_response()
         }
     }
 }
@@ -1024,6 +1045,22 @@ async fn marketplace_deploy(
     Json(req): Json<MarketplaceDeployRequest>,
 ) -> impl IntoResponse {
     info!(stack_id = %req.stack_id, "marketplace deploy requested");
+
+    // Validate stack_id to prevent path traversal
+    if req.stack_id.contains("..")
+        || req.stack_id.contains('/')
+        || req.stack_id.contains('\\')
+        || !req
+            .stack_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid stack_id"})),
+        )
+            .into_response();
+    }
 
     let deploy_id = uuid::Uuid::new_v4().to_string();
 
@@ -1075,25 +1112,23 @@ async fn link_page(State(state): State<SharedState>) -> impl IntoResponse {
     context.insert("panel_version", &env!("CARGO_PKG_VERSION"));
 
     // Check if already linked by looking for saved registration
-    let reg_path = std::path::Path::new("/etc/status-panel/registration.json");
-    if reg_path.exists() {
-        if let Ok(data) = std::fs::read_to_string(reg_path) {
-            if let Ok(reg) = serde_json::from_str::<serde_json::Value>(&data) {
-                context.insert("linked", &true);
-                context.insert(
-                    "agent_id",
-                    &reg.get("agent_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown"),
-                );
-                context.insert(
-                    "dashboard_url",
-                    &reg.get("dashboard_url")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(""),
-                );
-                return render_template(&state, "link.html", &context).into_response();
-            }
+    let reg_path = "/etc/status-panel/registration.json";
+    if let Ok(data) = tokio::fs::read_to_string(reg_path).await {
+        if let Ok(reg) = serde_json::from_str::<serde_json::Value>(&data) {
+            context.insert("linked", &true);
+            context.insert(
+                "agent_id",
+                &reg.get("agent_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
+            );
+            context.insert(
+                "dashboard_url",
+                &reg.get("dashboard_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            );
+            return render_template(&state, "link.html", &context).into_response();
         }
     }
 
@@ -1198,12 +1233,20 @@ async fn link_select_handler(
 }
 
 async fn unlink_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    let reg_path = std::path::Path::new("/etc/status-panel/registration.json");
-    if reg_path.exists() {
-        if let Err(e) = std::fs::remove_file(reg_path) {
-            error!("failed to remove registration: {}", e);
-        } else {
-            info!("dashboard unlinked, registration removed");
+    let reg_path = "/etc/status-panel/registration.json";
+    match tokio::fs::try_exists(reg_path).await {
+        Ok(true) => {
+            if let Err(e) = tokio::fs::remove_file(reg_path).await {
+                error!("failed to remove registration: {}", e);
+            } else {
+                info!("dashboard unlinked, registration removed");
+            }
+        }
+        Ok(false) => {
+            info!("unlink requested but no registration file found");
+        }
+        Err(e) => {
+            error!("failed to check registration file at {}: {}", reg_path, e);
         }
     }
     if state.with_ui {
