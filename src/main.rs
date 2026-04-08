@@ -1,7 +1,7 @@
 use dotenvy::dotenv;
 use status_panel::{agent, commands, comms, monitoring, utils};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
@@ -185,6 +185,12 @@ enum Commands {
         #[arg(long)]
         server: Option<String>,
     },
+    /// Generate default config.json and .env files in the current directory
+    Init {
+        /// Overwrite existing files
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -231,6 +237,15 @@ async fn main() -> Result<()> {
 
     match args.command {
         Some(Commands::Serve { port, with_ui }) => {
+            if !std::path::Path::new(&args.config).exists() {
+                eprintln!();
+                eprintln!("  Config file not found: {}", args.config);
+                eprintln!();
+                eprintln!("  Run 'status init' to generate a default configuration,");
+                eprintln!("  or specify a custom path with --config <path>");
+                eprintln!();
+                std::process::exit(1);
+            }
             if with_ui {
                 info!("Starting local API server with UI on port {port}");
             } else {
@@ -400,8 +415,50 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Some(Commands::Init { force }) => {
+            let cwd = std::env::current_dir().context("could not determine current directory")?;
+            let result = agent::init::generate_default_config(&cwd, force)?;
+
+            println!();
+            if result.config_created {
+                println!("  ✔ Created {}", result.config_path);
+            } else {
+                println!(
+                    "  • Skipped {} (already exists, use --force to overwrite)",
+                    result.config_path
+                );
+            }
+            if result.env_created {
+                println!("  ✔ Created {}", result.env_path);
+            } else {
+                println!(
+                    "  • Skipped {} (already exists, use --force to overwrite)",
+                    result.env_path
+                );
+            }
+
+            println!();
+            println!("Next steps:");
+            println!("  1. Edit config.json — set your domain and email");
+            println!("  2. Edit .env       — set AGENT_ID, AGENT_TOKEN, DASHBOARD_URL");
+            println!("  3. Run:  status                    # start daemon");
+            println!("     or:   status serve --port 5000  # start API server");
+            println!();
+            println!("  To register with Stacker:");
+            println!("     status register --purchase-token <TOKEN> --stack-id <ID>");
+            println!();
+        }
         None => {
             // Default: run the agent daemon
+            if !std::path::Path::new(&args.config).exists() {
+                eprintln!();
+                eprintln!("  Config file not found: {}", args.config);
+                eprintln!();
+                eprintln!("  Run 'status init' to generate a default configuration,");
+                eprintln!("  or specify a custom path with --config <path>");
+                eprintln!();
+                std::process::exit(1);
+            }
             if args.compose_mode {
                 info!("Starting compose-agent daemon mode");
                 // Set CONTROL_PLANE environment variable for identification
