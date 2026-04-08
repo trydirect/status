@@ -115,8 +115,9 @@ document.querySelectorAll('.filter-pill').forEach(pill => {
 
 function deployStack(stackId) {
     currentDeployId = stackId;
-    const card = document.querySelector(`[data-name]`);
-    document.getElementById('deploy-stack-name').textContent = stackId;
+    const card = document.querySelector(`.stack-card[data-id="${stackId}"]`);
+    const stackName = card && card.dataset.name ? card.dataset.name : stackId;
+    document.getElementById('deploy-stack-name').textContent = stackName;
     document.getElementById('deploy-progress').style.display = 'none';
     document.getElementById('deploy-confirm').disabled = false;
     document.getElementById('deploy-modal').classList.add('open');

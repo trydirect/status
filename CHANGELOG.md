@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.6 — 2026-04-08
+### Added — Kata Containers Runtime Support
+
+#### Container Runtime Selection (`commands/stacker.rs`)
+- `ContainerRuntime` enum (`runc`/`kata`) with serde support and Docker runtime name mapping
+- `detect_kata_runtime()` — cached detection via `docker info` with 5s timeout and `OnceLock`
+- `inject_runtime_into_compose()` — parses compose YAML and injects `runtime:` per-service
+- `DeployAppCommand` and `DeployWithConfigsCommand` accept optional `runtime` field
+- Graceful fallback: if Kata is requested but unavailable, deploys with runc and emits `kata_fallback` warning
+- Effective runtime reported in deploy result body
+
+#### Capabilities Discovery (`comms/local_api.rs`)
+- `/capabilities` endpoint reports `"kata"` in features list when Kata runtime is detected on the host
+
+#### Code Quality Fixes (PR #84 review)
+- `runtime_compose_tests` gated with `#[cfg(all(test, feature = "docker"))]` for minimal builds
+- Replaced blocking `std::path::Path::exists()` with `tokio::fs::try_exists()` in async deploy path
+- Added proper error logging in `unlink_handler` for `try_exists` failures
+
+#### Tests
+- 14 new tests: enum behavior, serde deserialization, compose YAML injection (including edge cases), command parsing with runtime field
+
+## 0.1.5 — 2026-03-26
+### Added — Long Polling, Vault Integration, Compose Agent Sidecar
+
 ## 0.1.4 — 2026-03-13
 ### Added — CLI Improvements, Install Script & GitHub Releases
 
