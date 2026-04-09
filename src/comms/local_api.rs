@@ -766,6 +766,7 @@ async fn disable_ssl_handler(
 
 /// Extract session_id from cookies and verify against the session store.
 /// Returns None if no valid session found.
+#[cfg(feature = "docker")]
 async fn require_session(state: &SharedState, headers: &HeaderMap) -> Option<String> {
     let session_id = headers
         .get(axum::http::header::COOKIE)
@@ -782,6 +783,7 @@ async fn require_session(state: &SharedState, headers: &HeaderMap) -> Option<Str
         .map(|_| session_id)
 }
 
+#[cfg(feature = "docker")]
 fn unauthorized_response(state: &SharedState) -> axum::http::Response<axum::body::Body> {
     if state.with_ui {
         Redirect::to("/login").into_response()
