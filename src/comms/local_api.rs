@@ -123,6 +123,7 @@ pub struct AppState {
     pub token_cache: Option<TokenCache>,
     pub update_jobs: UpdateJobs,
     pub firewall_policy: FirewallPolicy,
+    pub login_limiter: RateLimiter,
 }
 
 impl AppState {
@@ -186,6 +187,7 @@ impl AppState {
             token_cache,
             update_jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             firewall_policy,
+            login_limiter: RateLimiter::new_per_minute(5),
         }
     }
 }
@@ -333,17 +335,65 @@ async fn login_page(State(state): State<SharedState>) -> impl IntoResponse {
 // Login handler (POST)
 async fn login_handler(
     State(state): State<SharedState>,
+    client_ip: ClientIp,
     Form(req): Form<LoginRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
-    let creds = Credentials::from_env();
-    if req.username == creds.username && req.password == creds.password {
+    if !state.login_limiter.allow(&client_ip.0).await {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: "Too many login attempts. Try again later.".to_string(),
+            })
+            .into_response(),
+        ));
+    }
+    let creds = match Credentials::from_env() {
+        Ok(c) => c,
+        Err(_) => {
+            error!("login attempt but credentials are not configured");
+            if state.with_ui {
+                if let Some(templates) = &state.templates {
+                    let mut context = tera::Context::new();
+                    context.insert("error", &true);
+                    if let Ok(html) = templates.render("login.html", &context) {
+                        return Err((StatusCode::SERVICE_UNAVAILABLE, Html(html).into_response()));
+                    }
+                }
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Html(
+                        "<html><body>Credentials not configured. Run `status init`.</body></html>"
+                            .to_string(),
+                    )
+                    .into_response(),
+                ));
+            } else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: "Credentials not configured. Set STATUS_PANEL_USERNAME and STATUS_PANEL_PASSWORD.".to_string(),
+                    })
+                    .into_response(),
+                ));
+            }
+        }
+    };
+    // Constant-time comparison to prevent timing attacks on credentials
+    let user_match =
+        subtle::ConstantTimeEq::ct_eq(req.username.as_bytes(), creds.username.as_bytes());
+    let pass_match =
+        subtle::ConstantTimeEq::ct_eq(req.password.as_bytes(), creds.password.as_bytes());
+    if (user_match & pass_match).into() {
         let user = SessionUser::new(req.username.clone());
         let session_id = state.session_store.create_session(user).await;
         debug!("user logged in: {}", req.username);
         use axum::http::header::SET_COOKIE;
         if state.with_ui {
             // Set session cookie (HttpOnly, Secure if HTTPS)
-            let cookie = format!("session_id={}; Path=/; HttpOnly", session_id);
+            let cookie = format!(
+                "session_id={}; Path=/; HttpOnly; Secure; SameSite=Strict",
+                session_id
+            );
             let mut resp = Redirect::to("/").into_response();
             resp.headers_mut()
                 .append(SET_COOKIE, cookie.parse().unwrap());
@@ -388,13 +438,35 @@ async fn login_handler(
 }
 
 // Logout handler
-async fn logout_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    // @todo Extract session ID from cookies and delete
+async fn logout_handler(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
+    // Extract session_id from cookie and invalidate
+    if let Some(cookie_header) = headers.get("cookie") {
+        if let Ok(cookies) = cookie_header.to_str() {
+            for pair in cookies.split(';') {
+                let pair = pair.trim();
+                if let Some(session_id) = pair.strip_prefix("session_id=") {
+                    state.session_store.delete_session(session_id).await;
+                    debug!("session invalidated: {}", session_id);
+                    break;
+                }
+            }
+        }
+    }
+
     debug!("user logged out");
+    use axum::http::header::SET_COOKIE;
+    let clear_cookie = "session_id=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
+
     if state.with_ui {
-        Redirect::to("/login").into_response()
+        let mut resp = Redirect::to("/login").into_response();
+        resp.headers_mut()
+            .append(SET_COOKIE, clear_cookie.parse().unwrap());
+        resp
     } else {
-        Json(json!({"status": "logged out"})).into_response()
+        let mut resp = Json(json!({"status": "logged out"})).into_response();
+        resp.headers_mut()
+            .append(SET_COOKIE, clear_cookie.parse().unwrap());
+        resp
     }
 }
 
@@ -480,8 +552,17 @@ async fn home(
 }
 
 // ---- SSL enable/disable (Let’s Encrypt or self-signed) ----
+/// Build certbot argv vectors — each argument is a separate element to avoid
+/// shell interpretation. Passed directly to `exec_in_container_argv`.
 #[cfg(feature = "docker")]
-fn build_certbot_cmds(config: &Config) -> (String, String) {
+fn build_certbot_argv(config: &Config) -> Result<(Vec<String>, Vec<String>), String> {
+    use crate::security::validation::{is_safe_shell_value, is_valid_domain, is_valid_email};
+
+    let email = &config.reqdata.email;
+    if !is_valid_email(email) || !is_safe_shell_value(email) {
+        return Err(format!("Invalid or unsafe email for certbot: {}", email));
+    }
+
     // Domains from subdomains can be object, array, or comma-separated string
     let mut domains: Vec<String> = Vec::new();
     if let Some(ref sd) = config.subdomains {
@@ -512,25 +593,43 @@ fn build_certbot_cmds(config: &Config) -> (String, String) {
         }
     }
 
-    let domains_flags = domains
-        .into_iter()
-        .map(|d| format!("-d {}", d))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Validate every domain
+    for d in &domains {
+        if !is_valid_domain(d) || !is_safe_shell_value(d) {
+            return Err(format!("Invalid or unsafe domain for certbot: {}", d));
+        }
+    }
 
-    let email = config.reqdata.email.clone();
-    let reg_cmd = format!("certbot register --email {} --agree-tos -n", email);
-    let crt_cmd = if domains_flags.is_empty() {
-        "certbot --nginx --redirect".to_string()
-    } else {
-        format!("certbot --nginx --redirect {}", domains_flags)
-    };
+    let reg_argv = vec![
+        "certbot".to_string(),
+        "register".to_string(),
+        "--email".to_string(),
+        email.clone(),
+        "--agree-tos".to_string(),
+        "-n".to_string(),
+    ];
 
-    (reg_cmd, crt_cmd)
+    let mut crt_argv = vec![
+        "certbot".to_string(),
+        "--nginx".to_string(),
+        "--redirect".to_string(),
+    ];
+    for d in domains {
+        crt_argv.push("-d".to_string());
+        crt_argv.push(d);
+    }
+
+    Ok((reg_argv, crt_argv))
 }
 
 #[cfg(feature = "docker")]
-async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoResponse {
+async fn enable_ssl_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     let nginx = std::env::var("NGINX_CONTAINER").unwrap_or_else(|_| "nginx".to_string());
     // Prepare challenge directory
     if let Err(e) = docker::exec_in_container(
@@ -544,13 +643,19 @@ async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoRespon
     }
 
     if state.config.ssl.as_deref() == Some("letsencrypt") {
-        let (reg_cmd, crt_cmd) = build_certbot_cmds(&state.config);
+        let (reg_argv, crt_argv) = match build_certbot_argv(&state.config) {
+            Ok(cmds) => cmds,
+            Err(e) => {
+                error!("certbot command validation failed: {}", e);
+                return Redirect::to("/").into_response();
+            }
+        };
         info!("starting certbot registration and certificate issue");
-        if let Err(e) = docker::exec_in_container(&nginx, &reg_cmd).await {
+        if let Err(e) = docker::exec_in_container_argv(&nginx, reg_argv).await {
             error!("certbot register failed: {}", e);
             return Redirect::to("/").into_response();
         }
-        if let Err(e) = docker::exec_in_container(&nginx, &crt_cmd).await {
+        if let Err(e) = docker::exec_in_container_argv(&nginx, crt_argv).await {
             error!("certbot issue failed: {}", e);
             return Redirect::to("/").into_response();
         }
@@ -599,7 +704,13 @@ async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoRespon
 }
 
 #[cfg(feature = "docker")]
-async fn disable_ssl_handler(State(state): State<SharedState>) -> impl IntoResponse {
+async fn disable_ssl_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     let nginx = std::env::var("NGINX_CONTAINER").unwrap_or_else(|_| "nginx".to_string());
     let mut names: Vec<String> = Vec::new();
     if let Some(ref sd) = state.config.subdomains {
@@ -639,12 +750,46 @@ async fn disable_ssl_handler(State(state): State<SharedState>) -> impl IntoRespo
     Redirect::to("/").into_response()
 }
 
+/// Extract session_id from cookies and verify against the session store.
+/// Returns None if no valid session found.
+async fn require_session(state: &SharedState, headers: &HeaderMap) -> Option<String> {
+    let session_id = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|cookies| {
+            cookies
+                .split(';')
+                .find_map(|c| c.trim().strip_prefix("session_id=").map(|v| v.to_string()))
+        })?;
+    state
+        .session_store
+        .get_session(&session_id)
+        .await
+        .map(|_| session_id)
+}
+
+fn unauthorized_response(state: &SharedState) -> axum::http::Response<axum::body::Body> {
+    if state.with_ui {
+        Redirect::to("/login").into_response()
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "authentication required"})),
+        )
+            .into_response()
+    }
+}
+
 // Restart container
 #[cfg(feature = "docker")]
 async fn restart_container(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     use crate::agent::docker;
     match docker::restart(&name).await {
         Ok(_) => {
@@ -667,8 +812,12 @@ async fn restart_container(
 #[cfg(feature = "docker")]
 async fn stop_container(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     use crate::agent::docker;
     match docker::stop(&name).await {
         Ok(_) => {
@@ -690,8 +839,12 @@ async fn stop_container(
 #[cfg(feature = "docker")]
 async fn pause_container(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     use crate::agent::docker;
     match docker::pause(&name).await {
         Ok(_) => {
@@ -1506,7 +1659,14 @@ fn default_wait_timeout() -> u64 {
 fn validate_agent_id(headers: &HeaderMap) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let expected = std::env::var("AGENT_ID").unwrap_or_default();
     if expected.is_empty() {
-        return Ok(());
+        // When AGENT_ID is not configured, reject all requests to prevent
+        // unauthenticated access to sensitive endpoints.
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "AGENT_ID not configured".to_string(),
+            }),
+        ));
     }
     match headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()) {
         Some(got) if got == expected => Ok(()),
@@ -1887,6 +2047,15 @@ async fn rotate_token(
     (StatusCode::OK, Json(json!({"rotated": true}))).into_response()
 }
 
+/// Return the bind address. Defaults to 127.0.0.1 for security.
+/// Pass `Some("0.0.0.0")` to explicitly listen on all interfaces.
+pub fn default_bind_address(bind: Option<String>) -> std::net::Ipv4Addr {
+    match bind.as_deref() {
+        Some(addr) => addr.parse().unwrap_or(std::net::Ipv4Addr::LOCALHOST),
+        None => std::net::Ipv4Addr::LOCALHOST,
+    }
+}
+
 pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
     let cfg = Arc::new(config);
     let state = Arc::new(AppState::new(cfg, with_ui, Some(port)));
@@ -1917,6 +2086,25 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
         state.metrics_webhook.clone(),
     );
 
+    // Periodic cleanup of rate limiter, login limiter, replay protection, and expired sessions
+    {
+        let state_cleanup = state.clone();
+        let session_ttl = state.session_store.ttl();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                state_cleanup.rate_limiter.cleanup_stale().await;
+                state_cleanup.login_limiter.cleanup_stale().await;
+                state_cleanup.replay.cleanup_expired().await;
+                state_cleanup
+                    .session_store
+                    .cleanup_expired(session_ttl)
+                    .await;
+            }
+        });
+    }
+
     let app = create_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
 
     if with_ui {
@@ -1925,7 +2113,8 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
         info!("HTTP server in API-only mode starting on port {}", port);
     }
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let bind_addr = default_bind_address(None);
+    let addr = SocketAddr::from((bind_addr, port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("HTTP server listening on {}", addr);
     axum::serve(listener, app).into_future().await?;

@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 use crate::agent::config::Config;
 use crate::commands::executor::CommandExecutor;
 use crate::commands::firewall::FirewallPolicy;
+use crate::commands::validator::CommandValidator;
 use crate::commands::TimeoutStrategy;
 use crate::monitoring::{spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore};
 use crate::transport::{http_polling, CommandResult};
@@ -216,36 +217,54 @@ async fn execute_and_report(
             }
         }
         Ok(None) => {
-            // Not a stacker command, fall back to shell execution
-            info!(
-                command_id = %cmd.command_id,
-                command_name = %cmd.name,
-                "executing as shell command"
-            );
-            let strategy = TimeoutStrategy::backup_strategy(ctx.command_timeout);
-            let exec_result = executor.execute(&cmd, strategy).await;
-
-            match exec_result {
-                Ok(output) => CommandResult {
-                    command_id: cmd.command_id.clone(),
-                    status: "success".to_string(),
-                    result: Some(json!({
-                        "stdout": output.stdout,
-                        "stderr": output.stderr,
-                        "exit_code": output.exit_code,
-                    })),
-                    error: None,
-                    completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-                    ..CommandResult::default()
-                },
-                Err(e) => CommandResult {
+            // Not a stacker command — validate before shell execution
+            let validator = CommandValidator::default_secure();
+            if let Err(e) = validator.validate(&cmd) {
+                error!(
+                    command_id = %cmd.command_id,
+                    command_name = %cmd.name,
+                    error = %e,
+                    "shell command rejected by validator"
+                );
+                CommandResult {
                     command_id: cmd.command_id.clone(),
                     status: "failed".to_string(),
                     result: None,
-                    error: Some(e.to_string()),
+                    error: Some(format!("Command validation failed: {}", e)),
                     completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
                     ..CommandResult::default()
-                },
+                }
+            } else {
+                info!(
+                    command_id = %cmd.command_id,
+                    command_name = %cmd.name,
+                    "executing validated shell command"
+                );
+                let strategy = TimeoutStrategy::backup_strategy(ctx.command_timeout);
+                let exec_result = executor.execute(&cmd, strategy).await;
+
+                match exec_result {
+                    Ok(output) => CommandResult {
+                        command_id: cmd.command_id.clone(),
+                        status: "success".to_string(),
+                        result: Some(json!({
+                            "stdout": output.stdout,
+                            "stderr": output.stderr,
+                            "exit_code": output.exit_code,
+                        })),
+                        error: None,
+                        completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        ..CommandResult::default()
+                    },
+                    Err(e) => CommandResult {
+                        command_id: cmd.command_id.clone(),
+                        status: "failed".to_string(),
+                        result: None,
+                        error: Some(e.to_string()),
+                        completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        ..CommandResult::default()
+                    },
+                }
             }
         }
         Err(e) => {

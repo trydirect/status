@@ -6,7 +6,17 @@ use serde_json::Value;
 use status_panel::agent::config::{Config, ReqData};
 use status_panel::comms::local_api::{create_router, AppState};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use tower::ServiceExt;
+
+// Serialize tests that modify env vars
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    match ENV_LOCK.get_or_init(|| Mutex::new(())).lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    }
+}
 
 // Helper to create test config
 fn test_config() -> Arc<Config> {
@@ -97,13 +107,14 @@ async fn test_login_page_get() {
 
 #[tokio::test]
 async fn test_login_post_success() {
-    // Ensure no environment variables interfere
-    std::env::remove_var("STATUS_PANEL_USERNAME");
-    std::env::remove_var("STATUS_PANEL_PASSWORD");
+    let _g = lock_env();
+    // Set credentials explicitly — no defaults exist
+    std::env::set_var("STATUS_PANEL_USERNAME", "admin");
+    std::env::set_var("STATUS_PANEL_PASSWORD", "admin123");
 
     let app = test_router();
 
-    let body = "username=admin&password=admin";
+    let body = "username=admin&password=admin123";
     let response = app
         .oneshot(
             Request::builder()
@@ -122,13 +133,20 @@ async fn test_login_post_success() {
         "Expected 303 (UI) or 200 (API), got {}",
         response.status()
     );
+
+    std::env::remove_var("STATUS_PANEL_USERNAME");
+    std::env::remove_var("STATUS_PANEL_PASSWORD");
 }
 
 #[tokio::test]
 async fn test_login_post_failure() {
+    let _g = lock_env();
+    std::env::set_var("STATUS_PANEL_USERNAME", "admin");
+    std::env::set_var("STATUS_PANEL_PASSWORD", "admin123");
+
     let app = test_router();
 
-    let body = "username=wrong&password=wrong";
+    let body = "username=wrong&password=wrongpwd";
     let response = app
         .oneshot(
             Request::builder()
@@ -142,6 +160,9 @@ async fn test_login_post_failure() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    std::env::remove_var("STATUS_PANEL_USERNAME");
+    std::env::remove_var("STATUS_PANEL_PASSWORD");
 }
 
 #[tokio::test]
@@ -207,6 +228,7 @@ async fn test_home_endpoint() {
 async fn test_restart_endpoint() {
     let app = test_router();
 
+    // Without auth, should get UNAUTHORIZED or redirect to login
     let response = app
         .oneshot(
             Request::builder()
@@ -217,10 +239,10 @@ async fn test_restart_endpoint() {
         .await
         .unwrap();
 
-    // Will fail if container doesn't exist, but route should be valid
     assert!(
-        response.status() == StatusCode::OK
-            || response.status() == StatusCode::INTERNAL_SERVER_ERROR
+        response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::SEE_OTHER,
+        "Expected UNAUTHORIZED or redirect, got {}",
+        response.status()
     );
 }
 

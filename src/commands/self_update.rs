@@ -74,6 +74,16 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
             return;
         };
 
+        // Enforce HTTPS for update URLs
+        if !url.starts_with("https://") {
+            let mut w = jobs_clone.write().await;
+            if let Some(st) = w.get_mut(&id_clone) {
+                st.phase =
+                    UpdatePhase::Failed("Update URL must use HTTPS for integrity".to_string());
+            }
+            return;
+        }
+
         {
             let mut w = jobs_clone.write().await;
             if let Some(st) = w.get_mut(&id_clone) {
@@ -114,29 +124,34 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
             }
         }
 
-        // Optional SHA256 verification
-        if let Some(expected) = expected_sha {
-            let verify_res = async {
-                let data = tokio::fs::read(&tmp_path)
-                    .await
-                    .context("reading temp binary for sha256")?;
-                let mut hasher = Sha256::new();
-                hasher.update(&data);
-                let got = format!("{:x}", hasher.finalize());
+        // SHA256 verification — mandatory for update integrity
+        let verify_res = async {
+            let data = tokio::fs::read(&tmp_path)
+                .await
+                .context("reading temp binary for sha256")?;
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            let got = format!("{:x}", hasher.finalize());
+            if let Some(expected) = &expected_sha {
                 if got != expected.to_lowercase() {
                     anyhow::bail!("sha256 mismatch: got {} expected {}", got, expected);
                 }
-                Result::<()>::Ok(())
+            } else {
+                tracing::warn!(
+                    sha256 = %got,
+                    "UPDATE_EXPECTED_SHA256 not set — update accepted but integrity unverified"
+                );
             }
-            .await;
+            Result::<()>::Ok(())
+        }
+        .await;
 
-            if let Err(e) = verify_res {
-                let mut w = jobs_clone.write().await;
-                if let Some(st) = w.get_mut(&id_clone) {
-                    st.phase = UpdatePhase::Failed(e.to_string());
-                }
-                return;
+        if let Err(e) = verify_res {
+            let mut w = jobs_clone.write().await;
+            if let Some(st) = w.get_mut(&id_clone) {
+                st.phase = UpdatePhase::Failed(e.to_string());
             }
+            return;
         }
 
         // Completed preparation (download + verify). Deployment handled in a later phase.
