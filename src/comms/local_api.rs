@@ -62,7 +62,20 @@ use crate::VERSION;
 
 type SharedState = Arc<AppState>;
 
-// Extract client IP from ConnectInfo, headers, or fallback to 127.0.0.1
+/// Build cookie attributes. Include `Secure` only when STATUS_PANEL_HTTPS=true
+/// (or when behind a TLS-terminating proxy). Without TLS, browsers ignore Secure cookies.
+fn cookie_attributes() -> &'static str {
+    let secure = std::env::var("STATUS_PANEL_HTTPS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if secure {
+        "Path=/; HttpOnly; Secure; SameSite=Strict"
+    } else {
+        "Path=/; HttpOnly; SameSite=Strict"
+    }
+}
+
+// Extract client IP from ConnectInfo or fallback to 127.0.0.1
 #[derive(Debug, Clone)]
 struct ClientIp(pub String);
 
@@ -73,31 +86,17 @@ where
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Prefer SocketAddr inserted by Axum's connect info middleware
-        if let Some(addr) = parts.extensions.get::<SocketAddr>() {
-            return Ok(ClientIp(addr.ip().to_string()));
+        // Use ConnectInfo<SocketAddr> from Axum's connect info middleware.
+        // Do NOT trust proxy headers (X-Forwarded-For, X-Real-Ip) as they are
+        // trivially spoofable and would allow rate-limit bypass.
+        if let Some(connect_info) = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        {
+            return Ok(ClientIp(connect_info.0.ip().to_string()));
         }
 
-        // Check common proxy headers
-        if let Some(forwarded) = parts.headers.get("x-forwarded-for") {
-            if let Ok(s) = forwarded.to_str() {
-                // Take the first IP if multiple
-                let ip = s.split(',').next().unwrap_or(s).trim().to_string();
-                if !ip.is_empty() {
-                    return Ok(ClientIp(ip));
-                }
-            }
-        }
-        if let Some(real_ip) = parts.headers.get("x-real-ip") {
-            if let Ok(s) = real_ip.to_str() {
-                let ip = s.trim().to_string();
-                if !ip.is_empty() {
-                    return Ok(ClientIp(ip));
-                }
-            }
-        }
-
-        // Fallback for tests or when info is unavailable
+        // Fallback for tests (oneshot doesn't populate ConnectInfo)
         Ok(ClientIp("127.0.0.1".to_string()))
     }
 }
@@ -339,13 +338,31 @@ async fn login_handler(
     Form(req): Form<LoginRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
     if !state.login_limiter.allow(&client_ip.0).await {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse {
-                error: "Too many login attempts. Try again later.".to_string(),
-            })
-            .into_response(),
-        ));
+        if state.with_ui {
+            if let Some(templates) = &state.templates {
+                let mut context = tera::Context::new();
+                context.insert("error", &true);
+                if let Ok(html) = templates.render("login.html", &context) {
+                    return Err((StatusCode::TOO_MANY_REQUESTS, Html(html).into_response()));
+                }
+            }
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Html(
+                    "<html><body>Too many login attempts. Try again later.</body></html>"
+                        .to_string(),
+                )
+                .into_response(),
+            ));
+        } else {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorResponse {
+                    error: "Too many login attempts. Try again later.".to_string(),
+                })
+                .into_response(),
+            ));
+        }
     }
     let creds = match Credentials::from_env() {
         Ok(c) => c,
@@ -390,10 +407,7 @@ async fn login_handler(
         use axum::http::header::SET_COOKIE;
         if state.with_ui {
             // Set session cookie (HttpOnly, Secure if HTTPS)
-            let cookie = format!(
-                "session_id={}; Path=/; HttpOnly; Secure; SameSite=Strict",
-                session_id
-            );
+            let cookie = format!("session_id={}; {}", session_id, cookie_attributes());
             let mut resp = Redirect::to("/").into_response();
             resp.headers_mut()
                 .append(SET_COOKIE, cookie.parse().unwrap());
@@ -455,7 +469,7 @@ async fn logout_handler(State(state): State<SharedState>, headers: HeaderMap) ->
 
     debug!("user logged out");
     use axum::http::header::SET_COOKIE;
-    let clear_cookie = "session_id=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
+    let clear_cookie = format!("session_id=; {}; Max-Age=0", cookie_attributes());
 
     if state.with_ui {
         let mut resp = Redirect::to("/login").into_response();
@@ -2113,7 +2127,8 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
         info!("HTTP server in API-only mode starting on port {}", port);
     }
 
-    let bind_addr = default_bind_address(None);
+    let bind = std::env::var("STATUS_PANEL_BIND").ok();
+    let bind_addr = default_bind_address(bind);
     let addr = SocketAddr::from((bind_addr, port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("HTTP server listening on {}", addr);

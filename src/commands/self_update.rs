@@ -74,8 +74,8 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
             return;
         };
 
-        // Enforce HTTPS for update URLs
-        if !url.starts_with("https://") {
+        // Enforce HTTPS for update URLs using shared validation policy
+        if !crate::security::validation::is_safe_update_url(&url) {
             let mut w = jobs_clone.write().await;
             if let Some(st) = w.get_mut(&id_clone) {
                 st.phase =
@@ -137,9 +137,13 @@ pub async fn start_update_job(jobs: UpdateJobs, target_version: Option<String>) 
                     anyhow::bail!("sha256 mismatch: got {} expected {}", got, expected);
                 }
             } else {
-                tracing::warn!(
+                tracing::error!(
                     sha256 = %got,
-                    "UPDATE_EXPECTED_SHA256 not set — update accepted but integrity unverified"
+                    "UPDATE_EXPECTED_SHA256 not set — refusing update because integrity \
+                     verification is mandatory"
+                );
+                anyhow::bail!(
+                    "UPDATE_EXPECTED_SHA256 not set — integrity verification is mandatory"
                 );
             }
             Result::<()>::Ok(())

@@ -23,7 +23,7 @@ pub fn is_safe_shell_value(value: &str) -> bool {
     true
 }
 
-/// Validate a domain name: only alphanumeric, hyphens, dots, and underscores.
+/// Validate a domain name: only alphanumeric, hyphens, and dots (RFC 952).
 pub fn is_valid_domain(domain: &str) -> bool {
     if domain.is_empty() || domain.len() > 253 {
         return false;
@@ -35,9 +35,13 @@ pub fn is_valid_domain(domain: &str) -> bool {
         && !domain.ends_with('-')
 }
 
-/// Validate an email address (basic RFC 5322 check — no shell metacharacters).
+/// Validate an email address (basic RFC 5322 check — no shell metacharacters or whitespace).
 pub fn is_valid_email(email: &str) -> bool {
     if !is_safe_shell_value(email) {
+        return false;
+    }
+    // Reject any whitespace (spaces, tabs, etc.)
+    if email.chars().any(|c| c.is_whitespace()) {
         return false;
     }
     // Must have exactly one @, with non-empty local and domain parts
@@ -100,6 +104,8 @@ mod tests {
         assert!(!is_valid_email("notanemail"));
         assert!(!is_valid_email("@example.com"));
         assert!(!is_valid_email("test@"));
+        assert!(!is_valid_email("a b@example.com"));
+        assert!(!is_valid_email("user @example.com"));
     }
 
     #[test]

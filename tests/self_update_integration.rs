@@ -2,12 +2,54 @@ use sha2::{Digest, Sha256};
 use status_panel::commands::{get_update_status, start_update_job, UpdatePhase};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
+
+// ── Env-var serialization guard ─────────────────────────────────────────────
+
+static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
+    match TEST_LOCK.get_or_init(|| Mutex::new(())).lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    }
+}
+
+/// RAII guard that restores env vars on drop (even on panic).
+struct EnvGuard {
+    vars: Vec<(String, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn new(keys: &[&str]) -> Self {
+        let vars = keys
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        Self { vars }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, original) in &self.vars {
+            match original {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
 
 /// Verify that HTTP update URLs are rejected with a clear error.
 #[tokio::test]
 async fn start_update_job_rejects_http_url() {
+    let _g = lock_tests();
+    let _env = EnvGuard::new(&["UPDATE_BINARY_URL", "UPDATE_EXPECTED_SHA256"]);
+
     let mut server = mockito::Server::new_async().await;
     let _mock = server
         .mock("GET", "/releases/1.2.3/status-linux-x86_64")
@@ -49,24 +91,20 @@ async fn start_update_job_rejects_http_url() {
         }
         other => panic!("expected Failed, got {:?}", other),
     }
-
-    std::env::remove_var("UPDATE_BINARY_URL");
-    std::env::remove_var("UPDATE_EXPECTED_SHA256");
 }
 
-/// Verify download + SHA256 verification works with a real HTTPS URL.
-/// This test uses a file:// workaround since mockito only serves HTTP.
-/// The core logic is tested via the HTTP-rejection test above; this
-/// validates the sha256 verification path directly.
+/// Verify that an unreachable HTTPS URL fails at the download phase.
+/// Mockito only serves HTTP, so we use a localhost URL that nothing listens on.
 #[tokio::test]
-async fn sha256_verification_catches_mismatch() {
+async fn update_fails_when_download_unreachable() {
+    let _g = lock_tests();
+    let _env = EnvGuard::new(&["UPDATE_BINARY_URL", "UPDATE_EXPECTED_SHA256"]);
+
     let binary_bytes = b"hello-update";
     let mut hasher = Sha256::new();
     hasher.update(binary_bytes);
     let correct_sha = format!("{:x}", hasher.finalize());
 
-    // Set a valid HTTPS URL that will fail to download (expected) —
-    // we test the sha256 path separately
     std::env::set_var(
         "UPDATE_BINARY_URL",
         "https://localhost:1/nonexistent-binary",
@@ -95,7 +133,4 @@ async fn sha256_verification_catches_mismatch() {
         "expected failure for unreachable URL, got {:?}",
         phase
     );
-
-    std::env::remove_var("UPDATE_BINARY_URL");
-    std::env::remove_var("UPDATE_EXPECTED_SHA256");
 }

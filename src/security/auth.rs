@@ -139,6 +139,39 @@ impl Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        match ENV_LOCK.get_or_init(|| Mutex::new(())).lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        }
+    }
+
+    /// RAII guard that restores env vars on drop (even on panic).
+    struct EnvGuard {
+        vars: Vec<(String, Option<String>)>,
+    }
+    impl EnvGuard {
+        fn new(keys: &[&str]) -> Self {
+            let vars = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            Self { vars }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, original) in &self.vars {
+                match original {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_session_store_create_and_get() {
@@ -194,22 +227,24 @@ mod tests {
 
     #[test]
     fn test_credentials_from_env() {
+        let _g = lock_env();
+        let _env = EnvGuard::new(&["STATUS_PANEL_USERNAME", "STATUS_PANEL_PASSWORD"]);
+
         std::env::set_var("STATUS_PANEL_USERNAME", "envuser");
         std::env::set_var("STATUS_PANEL_PASSWORD", "envpass12");
 
         let creds = Credentials::from_env().expect("should succeed with env vars set");
         assert_eq!(creds.username, "envuser");
         assert_eq!(creds.password, "envpass12");
-
-        std::env::remove_var("STATUS_PANEL_USERNAME");
-        std::env::remove_var("STATUS_PANEL_PASSWORD");
     }
 
     #[test]
     fn test_credentials_error_when_unset() {
+        let _g = lock_env();
+        let _env = EnvGuard::new(&["STATUS_PANEL_USERNAME", "STATUS_PANEL_PASSWORD"]);
+
         std::env::remove_var("STATUS_PANEL_USERNAME");
         std::env::remove_var("STATUS_PANEL_PASSWORD");
-        std::thread::sleep(std::time::Duration::from_millis(10));
 
         let result = Credentials::from_env();
         assert!(
@@ -220,18 +255,21 @@ mod tests {
 
     #[test]
     fn test_credentials_error_when_empty() {
+        let _g = lock_env();
+        let _env = EnvGuard::new(&["STATUS_PANEL_USERNAME", "STATUS_PANEL_PASSWORD"]);
+
         std::env::set_var("STATUS_PANEL_USERNAME", "");
         std::env::set_var("STATUS_PANEL_PASSWORD", "testpass1");
 
         let result = Credentials::from_env();
         assert!(result.is_err(), "must return error when username is empty");
-
-        std::env::remove_var("STATUS_PANEL_USERNAME");
-        std::env::remove_var("STATUS_PANEL_PASSWORD");
     }
 
     #[test]
     fn test_credentials_error_when_password_too_short() {
+        let _g = lock_env();
+        let _env = EnvGuard::new(&["STATUS_PANEL_USERNAME", "STATUS_PANEL_PASSWORD"]);
+
         std::env::set_var("STATUS_PANEL_USERNAME", "admin");
         std::env::set_var("STATUS_PANEL_PASSWORD", "short");
 
@@ -240,9 +278,6 @@ mod tests {
             result.is_err(),
             "must return error when password is shorter than 8 characters"
         );
-
-        std::env::remove_var("STATUS_PANEL_USERNAME");
-        std::env::remove_var("STATUS_PANEL_PASSWORD");
     }
 
     #[tokio::test]
