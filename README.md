@@ -37,7 +37,7 @@ curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh 
 Pin a specific version or choose a custom directory:
 
 ```bash
-VERSION=v0.1.4 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
+VERSION=v0.1.7 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 INSTALL_DIR=~/.local/bin curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 ```
 
@@ -50,6 +50,7 @@ status --version
 ## CLI Commands
 
 ```
+status init                               Generate default config.json and .env
 status serve [--port 5000] [--with-ui]   Start the HTTP API server
 status containers                         List all Docker containers
 status health [name]                      Check container or stack health
@@ -62,6 +63,29 @@ status metrics [--json]                   Show CPU, memory, disk usage
 status update check                       Check for new versions
 status update apply [--version V]         Download and verify an update
 status update rollback                    Roll back to previous version
+```
+
+## First Run
+
+After installing, generate the default configuration files:
+
+```bash
+status init                      # creates config.json and .env in current directory
+status init --config /etc/status # custom path
+```
+
+Edit `.env` to set **required** credentials before starting:
+
+```bash
+STATUS_PANEL_USERNAME=myuser
+STATUS_PANEL_PASSWORD=strong-secret
+AGENT_ID=my-server-01
+```
+
+Then start the agent:
+
+```bash
+status --config config.json
 ```
 
 ## Running Modes
@@ -158,11 +182,16 @@ The agent accepts signed commands from the Stacker dashboard covering the full l
 
 ## Security
 
+- **No default credentials** — `STATUS_PANEL_USERNAME` and `STATUS_PANEL_PASSWORD` must be set; login is disabled until configured
 - **HMAC-SHA256** request signing with `AGENT_TOKEN`
 - **Replay protection** via `X-Request-Id` tracking
 - **Rate limiting** per agent
+- **Session security** — HttpOnly + Secure + SameSite=Strict cookies; server-side session invalidation on logout; TTL-based cleanup
 - **Command validation** — conservative allowlist, blocked shells and metacharacters
+- **Injection prevention** — all shell-interpolated values (email, domains, container names) validated against metacharacters
 - **Exec sandboxing** — dangerous commands (`rm -rf /`, `mkfs`, `shutdown`, etc.) are blocked
+- **Localhost by default** — API server binds `127.0.0.1`; explicit `--bind 0.0.0.0` required for external access
+- **HTTPS-only updates** — self-update rejects HTTP download URLs; SHA256 verification on every download
 - **Audit logging** — all auth attempts and scope denials recorded
 - **Vault integration** — secrets and configs stored securely, never in plaintext
 
@@ -170,11 +199,14 @@ The agent accepts signed commands from the Stacker dashboard covering the full l
 
 | Environment Variable | Description |
 |---------------------|-------------|
-| `AGENT_ID` | Unique agent identifier |
+| `STATUS_PANEL_USERNAME` | **Required.** Login username |
+| `STATUS_PANEL_PASSWORD` | **Required.** Login password |
+| `AGENT_ID` | **Required.** Unique agent identifier (protects API endpoints) |
 | `AGENT_TOKEN` | Authentication token for signed requests |
 | `DASHBOARD_URL` | Remote dashboard URL |
 | `VAULT_ADDRESS` | HashiCorp Vault server URL |
 | `UPDATE_SERVER_URL` | Remote update server for version checks |
+| `UPDATE_EXPECTED_SHA256` | Expected SHA256 hash for self-update binary |
 | `COMPOSE_AGENT_ENABLED` | Enable compose-agent mode |
 | `METRICS_INTERVAL_SECS` | Metrics collection interval |
 
