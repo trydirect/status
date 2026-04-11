@@ -483,6 +483,9 @@ pub struct ProbeEndpointsCommand {
     /// Timeout per probe request in seconds
     #[serde(default = "default_probe_timeout")]
     probe_timeout: u32,
+    /// Whether to capture sample responses from discovered endpoints
+    #[serde(default)]
+    capture_samples: bool,
 }
 
 fn default_probe_protocols() -> Vec<String> {
@@ -4452,7 +4455,7 @@ async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
 }
 
 #[cfg(any(feature = "docker", test))]
-fn extract_openapi_operations(spec: &Value) -> Vec<Value> {
+fn extract_openapi_operations(spec: &Value, capture_samples: bool) -> Vec<Value> {
     let mut operations = Vec::new();
 
     if let Some(paths) = spec.get("paths").and_then(|p| p.as_object()) {
@@ -4476,18 +4479,87 @@ fn extract_openapi_operations(spec: &Value) -> Vec<Value> {
                     // Extract field names from request body schema
                     let fields = extract_request_fields(spec, details);
 
-                    operations.push(json!({
+                    let mut op = json!({
                         "path": path,
                         "method": method_upper,
                         "summary": summary,
                         "fields": fields,
-                    }));
+                    });
+
+                    // Extract sample response from OpenAPI spec examples
+                    if capture_samples {
+                        if let Some(sample) = extract_response_example(spec, details) {
+                            op["sample_response"] = sample;
+                        }
+                    }
+
+                    operations.push(op);
                 }
             }
         }
     }
 
     operations
+}
+
+/// Extract a sample response from an OpenAPI operation's response schema.
+/// Looks for: responses -> 200 -> content -> application/json -> example/schema/examples
+fn extract_response_example(spec: &Value, operation: &Value) -> Option<Value> {
+    let responses = operation.get("responses")?;
+
+    // Try 200, 201, then default
+    let response = responses
+        .get("200")
+        .or_else(|| responses.get("201"))
+        .or_else(|| responses.get("default"))?;
+
+    // OpenAPI 3.x: content -> application/json -> example or schema -> example
+    if let Some(content) = response.get("content") {
+        if let Some(json_content) = content.get("application/json") {
+            // Direct example on the media type
+            if let Some(example) = json_content.get("example") {
+                return Some(example.clone());
+            }
+            // Examples (named) — take the first one
+            if let Some(examples) = json_content.get("examples").and_then(|e| e.as_object()) {
+                if let Some((_, first)) = examples.iter().next() {
+                    if let Some(value) = first.get("value") {
+                        return Some(value.clone());
+                    }
+                }
+            }
+            // Schema example
+            if let Some(schema) = json_content.get("schema") {
+                if let Some(example) = schema.get("example") {
+                    return Some(example.clone());
+                }
+                // Resolve $ref if present
+                if let Some(ref_path) = schema.get("$ref").and_then(|r| r.as_str()) {
+                    if let Some(resolved) = resolve_ref(spec, ref_path) {
+                        if let Some(example) = resolved.get("example") {
+                            return Some(example.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Swagger 2.x: examples -> application/json
+    if let Some(examples) = response.get("examples") {
+        if let Some(json_example) = examples.get("application/json") {
+            return Some(json_example.clone());
+        }
+    }
+
+    // Swagger 2.x: schema -> example
+    if let Some(schema) = response.get("schema") {
+        if let Some(example) = schema.get("example") {
+            return Some(example.clone());
+        }
+    }
+
+    None
 }
 
 #[cfg(any(feature = "docker", test))]
@@ -4687,7 +4759,8 @@ async fn handle_probe_endpoints(
                                 if !protocols_detected.contains(&"openapi".to_string()) {
                                     protocols_detected.push("openapi".to_string());
                                 }
-                                let operations = extract_openapi_operations(&spec);
+                                let operations =
+                                    extract_openapi_operations(&spec, data.capture_samples);
                                 endpoints.push(json!({
                                     "protocol": "openapi",
                                     "base_url": format!("http://{}:{}", data.app_code, port),
@@ -4754,12 +4827,44 @@ async fn handle_probe_endpoints(
                             if !protocols_detected.contains(&"rest".to_string()) {
                                 protocols_detected.push("rest".to_string());
                             }
-                            endpoints.push(json!({
+
+                            // Capture sample response body for REST endpoints
+                            let mut sample_response = None;
+                            if data.capture_samples && code == "200" {
+                                let body_cmd = format!(
+                                    "curl -sf -m {} http://localhost:{}{} 2>/dev/null || true",
+                                    data.probe_timeout, port, path
+                                );
+                                if let Ok(Ok((0, body, _))) = tokio::time::timeout(
+                                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
+                                    docker::exec_in_container_with_output(&target_name, &body_cmd),
+                                )
+                                .await
+                                {
+                                    let body = body.trim();
+                                    if !body.is_empty() {
+                                        // Try to parse as JSON; fall back to string
+                                        sample_response = Some(
+                                            serde_json::from_str::<Value>(body)
+                                                .unwrap_or_else(|_| json!(body)),
+                                        );
+                                    }
+                                }
+                            }
+
+                            let mut ep = json!({
                                 "protocol": "rest",
                                 "base_url": format!("http://{}:{}", data.app_code, port),
                                 "spec_url": path,
                                 "operations": [],
-                            }));
+                            });
+
+                            // Attach sample_response at endpoint level for REST heuristic
+                            if let Some(sample) = sample_response {
+                                ep["sample_response"] = sample;
+                            }
+
+                            endpoints.push(ep);
                         }
                     }
                     _ => continue,
@@ -5707,6 +5812,7 @@ mod probe_endpoints_command_tests {
             container: Some("  crm-web  ".to_string()),
             protocols: vec!["  OpenAPI  ".to_string(), " REST ".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert_eq!(normalized.deployment_hash, "abc123");
@@ -5723,6 +5829,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec![],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
@@ -5736,6 +5843,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string(), "  ".to_string(), "".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert_eq!(normalized.protocols, vec!["openapi"]);
@@ -5749,6 +5857,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["  ".to_string(), "".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
@@ -5762,6 +5871,7 @@ mod probe_endpoints_command_tests {
             container: Some("   ".to_string()),
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert!(normalized.container.is_none());
@@ -5777,6 +5887,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let agent_cmd = AgentCommand {
             id: "test-id".into(),
@@ -5798,6 +5909,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let agent_cmd = AgentCommand {
             id: "test-id".into(),
@@ -5819,6 +5931,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let agent_cmd = AgentCommand {
             id: "test-id".into(),
@@ -5843,6 +5956,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let result = cmd.validate();
         assert!(result.is_err());
@@ -5857,6 +5971,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let result = cmd.validate();
         assert!(result.is_err());
@@ -5871,6 +5986,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string(), "invalid_proto".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let result = cmd.validate();
         assert!(result.is_err());
@@ -5894,6 +6010,7 @@ mod probe_endpoints_command_tests {
                 "rest".to_string(),
             ],
             probe_timeout: 5,
+            capture_samples: false,
         };
         assert!(cmd.validate().is_ok());
     }
@@ -5906,6 +6023,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         assert!(cmd.validate().is_ok());
     }
@@ -5940,7 +6058,7 @@ mod probe_endpoints_command_tests {
             }
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert_eq!(ops.len(), 2);
 
         // Find the GET operation
@@ -5976,7 +6094,7 @@ mod probe_endpoints_command_tests {
             }
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0]["method"], "GET");
     }
@@ -5988,7 +6106,7 @@ mod probe_endpoints_command_tests {
             "paths": {}
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert!(ops.is_empty());
     }
 
@@ -5999,7 +6117,7 @@ mod probe_endpoints_command_tests {
             "info": { "title": "test" }
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert!(ops.is_empty());
     }
 
@@ -6014,9 +6132,190 @@ mod probe_endpoints_command_tests {
             }
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0]["summary"], "");
+    }
+
+    #[test]
+    fn extract_openapi_operations_capture_samples_from_example() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/v1/posts": {
+                    "get": {
+                        "summary": "List posts",
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "example": [
+                                            {"id": 1, "title": "Hello World", "author": 42}
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Without capture_samples
+        let ops = extract_openapi_operations(&spec, false);
+        assert_eq!(ops.len(), 1);
+        assert!(ops[0].get("sample_response").is_none());
+
+        // With capture_samples
+        let ops = extract_openapi_operations(&spec, true);
+        assert_eq!(ops.len(), 1);
+        let sample = &ops[0]["sample_response"];
+        assert!(sample.is_array());
+        assert_eq!(sample[0]["id"], 1);
+        assert_eq!(sample[0]["title"], "Hello World");
+    }
+
+    #[test]
+    fn extract_openapi_operations_capture_samples_from_schema_example() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/users": {
+                    "get": {
+                        "summary": "Get users",
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "example": {"id": 1, "name": "Alice"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec, true);
+        assert_eq!(ops[0]["sample_response"]["name"], "Alice");
+    }
+
+    #[test]
+    fn extract_openapi_operations_capture_samples_swagger2() {
+        let spec = json!({
+            "swagger": "2.0",
+            "paths": {
+                "/api/items": {
+                    "get": {
+                        "summary": "List items",
+                        "responses": {
+                            "200": {
+                                "examples": {
+                                    "application/json": [
+                                        {"id": 1, "name": "Widget"}
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec, true);
+        assert_eq!(ops[0]["sample_response"][0]["name"], "Widget");
+    }
+
+    #[test]
+    fn extract_openapi_operations_capture_samples_with_ref() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/posts": {
+                    "get": {
+                        "summary": "List posts",
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "#/components/schemas/PostList"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "PostList": {
+                        "type": "array",
+                        "example": [{"id": 1, "title": "First Post"}]
+                    }
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec, true);
+        assert_eq!(ops[0]["sample_response"][0]["title"], "First Post");
+    }
+
+    #[test]
+    fn probe_endpoints_command_capture_samples_defaults_false() {
+        let cmd: ProbeEndpointsCommand = serde_json::from_value(json!({
+            "app_code": "wordpress"
+        }))
+        .unwrap();
+        assert!(!cmd.capture_samples);
+    }
+
+    #[test]
+    fn probe_endpoints_command_capture_samples_true() {
+        let cmd: ProbeEndpointsCommand = serde_json::from_value(json!({
+            "app_code": "wordpress",
+            "capture_samples": true
+        }))
+        .unwrap();
+        assert!(cmd.capture_samples);
+    }
+
+    #[test]
+    fn extract_response_example_from_direct_example() {
+        let spec = json!({});
+        let operation = json!({
+            "responses": {
+                "200": {
+                    "content": {
+                        "application/json": {
+                            "example": {"id": 1, "name": "Test"}
+                        }
+                    }
+                }
+            }
+        });
+        let sample = extract_response_example(&spec, &operation);
+        assert!(sample.is_some());
+        assert_eq!(sample.unwrap()["name"], "Test");
+    }
+
+    #[test]
+    fn extract_response_example_returns_none_when_missing() {
+        let spec = json!({});
+        let operation = json!({
+            "responses": {
+                "200": {
+                    "description": "Success"
+                }
+            }
+        });
+        let sample = extract_response_example(&spec, &operation);
+        assert!(sample.is_none());
     }
 
     // ==================== EXTRACT_REQUEST_FIELDS TESTS ====================
