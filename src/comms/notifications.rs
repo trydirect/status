@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use crate::security::token_provider::TokenProvider;
 use crate::transport::http_polling::build_signed_headers;
 
 // ---- Types ----
@@ -109,7 +110,7 @@ struct StackerNotificationsResponse {
 pub fn spawn_notification_poller(
     dashboard_url: String,
     agent_id: String,
-    agent_token: String,
+    token_provider: TokenProvider,
     deployment_hash: String,
     store: NotificationStore,
     interval: Duration,
@@ -141,7 +142,8 @@ pub fn spawn_notification_poller(
                 dashboard_url, deployment_hash
             );
 
-            let headers = match build_signed_headers(&agent_id, &agent_token, &[]) {
+            let token = token_provider.get().await;
+            let headers = match build_signed_headers(&agent_id, &token, &[]) {
                 Ok(h) => h,
                 Err(e) => {
                     error!(error = %e, "failed to build HMAC headers for notification poll");
@@ -152,8 +154,23 @@ pub fn spawn_notification_poller(
 
             match client.get(&url).headers(headers).send().await {
                 Ok(resp) => {
+                    let status = resp.status().as_u16();
+
+                    // Handle 401/403: refresh token and retry on next iteration
+                    if status == 401 || status == 403 {
+                        warn!(
+                            status,
+                            "auth error from notifications endpoint; refreshing token"
+                        );
+                        if let Err(e) = token_provider.refresh().await {
+                            warn!(error = %e, "token refresh failed");
+                        }
+                        backoff_secs = 5; // short backoff before retry with new token
+                        continue;
+                    }
+
                     backoff_secs = 0;
-                    match resp.status().as_u16() {
+                    match status {
                         200 => {
                             suppressed_404 = false;
                             match resp.json::<StackerNotificationsResponse>().await {
@@ -178,7 +195,7 @@ pub fn spawn_notification_poller(
                                 suppressed_404 = true;
                             }
                         }
-                        status => {
+                        _ => {
                             warn!(status, "unexpected status from notifications endpoint");
                         }
                     }

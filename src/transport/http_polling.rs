@@ -11,6 +11,8 @@ use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::security::request_signer::compute_signature_base64;
+use crate::security::token_provider::TokenProvider;
+use crate::transport::retry::{signed_get_with_retry, signed_post_with_retry, RetryConfig};
 use crate::transport::Command;
 
 const TS_OVERRIDE_ENV: &str = "HTTP_POLLING_TS_OVERRIDE";
@@ -413,6 +415,123 @@ pub async fn update_app_status<T: Serialize>(
     let url = format!("{}/api/v1/apps/status", base_url);
     let client = Client::new();
     let resp = signed_post_json(&client, &url, agent_id, agent_token, payload).await?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "app status update failed: {}",
+            resp.status()
+        ))
+    }
+}
+
+// ---- Retry-aware variants (use TokenProvider + automatic 401/403 refresh) ----
+
+/// Long-poll for a command with automatic token refresh on 401/403.
+pub async fn wait_for_command_with_retry(
+    base_url: &str,
+    deployment_hash: &str,
+    agent_id: &str,
+    token_provider: &TokenProvider,
+    timeout_secs: u64,
+    priority: Option<&str>,
+) -> Result<PollResponse> {
+    let url = build_wait_command_url(base_url, deployment_hash, timeout_secs, priority);
+    let client = create_http_client()?;
+
+    debug!(
+        url = %url,
+        deployment_hash = %deployment_hash,
+        timeout_secs = %timeout_secs,
+        "initiating long-poll with retry"
+    );
+
+    let config = RetryConfig::auth_only();
+    let response = signed_get_with_retry(
+        &client,
+        &url,
+        agent_id,
+        token_provider,
+        Duration::from_secs(timeout_secs + 5),
+        &config,
+    )
+    .await?;
+
+    handle_poll_response(response, &url).await
+}
+
+/// Report command result with automatic token refresh on 401/403.
+#[allow(clippy::too_many_arguments)]
+pub async fn report_result_with_retry(
+    base_url: &str,
+    agent_id: &str,
+    token_provider: &TokenProvider,
+    command_id: &str,
+    deployment_hash: &str,
+    status: &str,
+    result: &Option<serde_json::Value>,
+    error: &Option<String>,
+    completed_at: &str,
+) -> Result<()> {
+    let url = format!("{}/api/v1/agent/commands/report", base_url);
+
+    let mut body = serde_json::Map::new();
+    body.insert("command_id".into(), Value::String(command_id.into()));
+    body.insert(
+        "deployment_hash".into(),
+        Value::String(deployment_hash.into()),
+    );
+    body.insert("status".into(), Value::String(status.into()));
+    body.insert("completed_at".into(), Value::String(completed_at.into()));
+
+    if let Some(res) = result {
+        body.insert("result".into(), res.clone());
+    }
+    body.insert(
+        "error".into(),
+        error
+            .as_ref()
+            .map(|e| Value::String(e.clone()))
+            .unwrap_or(Value::Null),
+    );
+
+    debug!(url = %url, body = ?body, "reporting result with retry");
+
+    let client = Client::new();
+    let config = RetryConfig::default();
+    let resp =
+        signed_post_with_retry(&client, &url, agent_id, token_provider, &body, &config).await?;
+    let status_code = resp.status();
+
+    if status_code.is_success() {
+        debug!(status_code = %status_code.as_u16(), "command result reported successfully");
+        Ok(())
+    } else {
+        let error_body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read body>".to_string());
+        Err(anyhow!(
+            "report failed: {} | body: {}",
+            status_code,
+            error_body
+        ))
+    }
+}
+
+/// Update app status with automatic token refresh on 401/403.
+pub async fn update_app_status_with_retry<T: Serialize>(
+    base_url: &str,
+    agent_id: &str,
+    token_provider: &TokenProvider,
+    payload: &T,
+) -> Result<()> {
+    let url = format!("{}/api/v1/apps/status", base_url);
+    let client = Client::new();
+    let config = RetryConfig::default();
+    let resp =
+        signed_post_with_retry(&client, &url, agent_id, token_provider, payload, &config).await?;
 
     if resp.status().is_success() {
         Ok(())

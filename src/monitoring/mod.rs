@@ -1,3 +1,5 @@
+pub mod alerting;
+
 use reqwest::Client;
 use serde::Serialize;
 use std::sync::Arc;
@@ -7,6 +9,8 @@ use tokio::sync::broadcast;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::info;
+
+use crate::monitoring::alerting::{dispatch_alerts, SharedAlertManager};
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct MetricsSnapshot {
@@ -146,8 +150,14 @@ pub fn spawn_heartbeat(
     interval: Duration,
     tx: MetricsTx,
     webhook: Option<String>,
+    alert_manager: Option<SharedAlertManager>,
 ) -> JoinHandle<()> {
-    let client = webhook.as_ref().map(|_| Client::new());
+    let client = webhook.as_ref().map(|_| Client::new()).or_else(|| {
+        alert_manager
+            .as_ref()
+            .filter(|m| m.is_enabled())
+            .map(|_| Client::new())
+    });
     let agent_id = std::env::var("AGENT_ID").ok();
     tokio::spawn(async move {
         loop {
@@ -184,7 +194,6 @@ pub fn spawn_heartbeat(
                                     tracing::debug!(attempt, status = %status, "metrics webhook push succeeded");
                                     break;
                                 } else if status.is_client_error() {
-                                    // Do not retry on client-side errors (e.g., 401/403/404)
                                     tracing::warn!(attempt, status = %status, "metrics webhook push client error; not retrying");
                                     break;
                                 } else {
@@ -196,17 +205,30 @@ pub fn spawn_heartbeat(
                             }
                         }
 
-                        // Jitter derived from current time to avoid herd effects
                         let nanos = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .map(|d| d.subsec_nanos())
                             .unwrap_or(0);
                         let jitter = Duration::from_millis(50 + (nanos % 200) as u64);
                         tokio::time::sleep(delay + jitter).await;
-                        // Exponential backoff capped at ~8s
                         delay = delay.saturating_mul(2).min(Duration::from_secs(8));
                     }
                 });
+            }
+
+            // Evaluate alert thresholds and dispatch if needed
+            if let (Some(mgr), Some(http)) = (alert_manager.as_ref(), client.as_ref()) {
+                if mgr.is_enabled() {
+                    let alerts = mgr.evaluate(&snapshot).await;
+                    if !alerts.is_empty() {
+                        let http = http.clone();
+                        let url = mgr.config().webhook_url.clone().unwrap_or_default();
+                        let agent = agent_id.clone();
+                        tokio::spawn(async move {
+                            dispatch_alerts(&http, &url, alerts, agent).await;
+                        });
+                    }
+                }
             }
 
             info!(

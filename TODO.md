@@ -45,12 +45,12 @@
 ## Missing Features Implementation Plan (2026-04)
 
 ### Phase 1 - Reliability and Production Readiness
-- [ ] **[status-auth-refresh]** Refresh agent auth immediately on 401/403 and retry polling/report calls with backoff.
+- [x] **[status-auth-refresh]** Refresh agent auth immediately on 401/403 and retry polling/report calls with backoff.
   - Wire the retry path into the polling loop instead of waiting for the periodic refresh task.
   - Define the Vault path/role contract for `status_panel_token` and document failure handling.
-- [ ] **[status-alerting]** Add outbound alert delivery for unhealthy containers, command failures, and host-level incidents.
-  - Start with webhook delivery, then add Slack/email adapters if needed.
-  - Include alert deduplication, severity, and recovery notifications.
+- [x] **[status-alerting]** Add outbound alert delivery for unhealthy containers, command failures, and host-level incidents.
+  - Webhook delivery with env-configured thresholds (`ALERT_WEBHOOK_URL`, CPU/memory/disk thresholds).
+  - Includes alert deduplication, severity escalation, and recovery notifications.
 - [x] **[status-command-provenance]** Surface which control plane executed each action (`status_panel` vs `compose_agent`).
   - Expose provenance in command reports, health metrics, and `/capabilities`-driven diagnostics.
   - Publish and implement the separate token/cache schema for `compose_agent_token`.
@@ -83,7 +83,7 @@
 - [x] Restart: restart container by app_code, then emit updated state in report payload; include errors array on failure.
 - [x] Reporting: call Stacker `POST /api/v1/agent/commands/report` with HMAC headers (`X-Agent-Id`, `X-Timestamp`, `X-Request-Id`, `X-Agent-Signature`) signed using Vault token.
 - [x] Wire agent to poll loop: `GET /api/v1/agent/commands/wait/{deployment_hash}` with HMAC headers.
-- [ ] On 401/403, refresh token from Vault and retry with backoff (which Vault path/role should we use for the agent token?).
+- [x] On 401/403, refresh token from Vault and retry with backoff (TokenProvider with Vault → env fallback, 10s cooldown).
 - [x] Ensure agent generates HMAC signature for every outbound request (wait + report + app status); no secrets expected from Stacker side.
 
 ## Compose Agent Sidecar

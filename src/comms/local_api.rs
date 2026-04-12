@@ -2128,12 +2128,26 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
         .and_then(|s| s.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(30));
+
+    let alert_manager = {
+        let cfg = crate::monitoring::alerting::AlertConfig::from_env();
+        let mgr = crate::monitoring::alerting::AlertManager::new(cfg);
+        if mgr.is_enabled() {
+            tracing::info!("outbound alerting enabled");
+            Some(Arc::new(mgr))
+        } else {
+            tracing::debug!("outbound alerting disabled (ALERT_WEBHOOK_URL not set)");
+            None
+        }
+    };
+
     spawn_heartbeat(
         state.metrics_collector.clone(),
         state.metrics_store.clone(),
         heartbeat_interval,
         state.metrics_tx.clone(),
         state.metrics_webhook.clone(),
+        alert_manager,
     );
 
     // Spawn notification poller if dashboard connection is configured
@@ -2142,20 +2156,26 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
             std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "http://localhost:5000".to_string());
         let agent_id = std::env::var("AGENT_ID").unwrap_or_default();
         let agent_token = std::env::var("AGENT_TOKEN").unwrap_or_default();
-        let deployment_hash =
-            std::env::var("DEPLOYMENT_HASH").unwrap_or_else(|_| "default".to_string());
 
         if !agent_token.is_empty() {
+            // Build a TokenProvider so the poller can refresh on 401/403
+            let token_provider = crate::security::token_provider::TokenProvider::from_env(
+                state.vault_client.clone(),
+            );
+
             let poll_interval = std::env::var("NOTIFICATION_POLL_SECS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(Duration::from_secs(300));
 
+            let deployment_hash =
+                std::env::var("DEPLOYMENT_HASH").unwrap_or_else(|_| "default".to_string());
+
             notifications::spawn_notification_poller(
                 dashboard_url,
                 agent_id,
-                agent_token,
+                token_provider,
                 deployment_hash,
                 state.notification_store.clone(),
                 poll_interval,
