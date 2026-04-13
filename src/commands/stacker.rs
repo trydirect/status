@@ -4504,6 +4504,7 @@ fn extract_openapi_operations(spec: &Value, capture_samples: bool) -> Vec<Value>
 
 /// Extract a sample response from an OpenAPI operation's response schema.
 /// Looks for: responses -> 200 -> content -> application/json -> example/schema/examples
+#[cfg(any(feature = "docker", test))]
 fn extract_response_example(spec: &Value, operation: &Value) -> Option<Value> {
     let responses = operation.get("responses")?;
 

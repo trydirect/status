@@ -1,4 +1,5 @@
 pub mod http_polling;
+pub mod retry;
 pub mod websocket;
 
 use serde::{Deserialize, Serialize};
