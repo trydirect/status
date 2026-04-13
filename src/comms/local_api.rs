@@ -45,6 +45,7 @@ use crate::commands::{
     execute_stacker_command, parse_stacker_command, CommandValidator, DockerOperation,
     TimeoutStrategy,
 };
+use crate::comms::notifications::{self, MarkReadRequest, NotificationStore, UnreadCountResponse};
 use crate::monitoring::{
     spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx,
 };
@@ -123,6 +124,7 @@ pub struct AppState {
     pub update_jobs: UpdateJobs,
     pub firewall_policy: FirewallPolicy,
     pub login_limiter: RateLimiter,
+    pub notification_store: NotificationStore,
 }
 
 impl AppState {
@@ -187,6 +189,7 @@ impl AppState {
             update_jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             firewall_policy,
             login_limiter: RateLimiter::new_per_minute(5),
+            notification_store: notifications::new_notification_store(),
         }
     }
 }
@@ -1425,6 +1428,28 @@ async fn unlink_handler(State(state): State<SharedState>) -> impl IntoResponse {
     }
 }
 
+// ---- Notification API handlers ----
+
+async fn notifications_list(State(state): State<SharedState>) -> impl IntoResponse {
+    let summary = notifications::get_summary(&state.notification_store).await;
+    Json(summary)
+}
+
+async fn notifications_mark_read(
+    State(state): State<SharedState>,
+    Json(req): Json<MarkReadRequest>,
+) -> impl IntoResponse {
+    notifications::mark_read(&state.notification_store, &req.ids, req.all).await;
+    Json(json!({"status": "ok"}))
+}
+
+async fn notifications_unread_count(State(state): State<SharedState>) -> impl IntoResponse {
+    let count = notifications::get_unread_count(&state.notification_store).await;
+    Json(UnreadCountResponse {
+        unread_count: count,
+    })
+}
+
 pub fn create_router(state: SharedState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
@@ -1457,6 +1482,15 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/link", get(link_page).post(link_login_handler))
         .route("/link/select", post(link_select_handler))
         .route("/link/unlink", post(unlink_handler));
+
+    // Notifications
+    router = router
+        .route("/api/v1/notifications", get(notifications_list))
+        .route("/api/v1/notifications/read", post(notifications_mark_read))
+        .route(
+            "/api/v1/notifications/unread-count",
+            get(notifications_unread_count),
+        );
 
     #[cfg(feature = "docker")]
     {
@@ -2101,6 +2135,36 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
         state.metrics_tx.clone(),
         state.metrics_webhook.clone(),
     );
+
+    // Spawn notification poller if dashboard connection is configured
+    {
+        let dashboard_url =
+            std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "http://localhost:5000".to_string());
+        let agent_id = std::env::var("AGENT_ID").unwrap_or_default();
+        let agent_token = std::env::var("AGENT_TOKEN").unwrap_or_default();
+        let deployment_hash =
+            std::env::var("DEPLOYMENT_HASH").unwrap_or_else(|_| "default".to_string());
+
+        if !agent_token.is_empty() {
+            let poll_interval = std::env::var("NOTIFICATION_POLL_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(300));
+
+            notifications::spawn_notification_poller(
+                dashboard_url,
+                agent_id,
+                agent_token,
+                deployment_hash,
+                state.notification_store.clone(),
+                poll_interval,
+            );
+            info!("Notification poller spawned");
+        } else {
+            info!("Notification poller skipped (no AGENT_TOKEN configured)");
+        }
+    }
 
     // Periodic cleanup of rate limiter, login limiter, replay protection, and expired sessions
     {

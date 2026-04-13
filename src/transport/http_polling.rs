@@ -34,7 +34,7 @@ fn signing_meta() -> (i64, String) {
     (ts, request_id)
 }
 
-fn build_signed_headers(agent_id: &str, agent_token: &str, body: &[u8]) -> Result<HeaderMap> {
+pub fn build_signed_headers(agent_id: &str, agent_token: &str, body: &[u8]) -> Result<HeaderMap> {
     let (ts, request_id) = signing_meta();
     let sig = compute_signature_base64(agent_token, body);
 
