@@ -332,6 +332,7 @@ async fn execute_and_report(
         &cmd_result.result,
         &cmd_result.error,
         &cmd_result.completed_at,
+        cmd_result.executed_by.as_deref(),
     )
     .await?;
     info!(

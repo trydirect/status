@@ -124,6 +124,7 @@ impl TokenProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
     use std::sync::{Mutex, OnceLock};
 
     /// Serializes tests that mutate AGENT_TOKEN env var.
@@ -148,20 +149,18 @@ mod tests {
     #[tokio::test]
     async fn refresh_without_vault_reads_env() {
         let _guard = env_lock().lock().unwrap();
-        std::env::set_var("AGENT_TOKEN", "env_refreshed_tp");
+        let _env = EnvGuard::set("AGENT_TOKEN", "env_refreshed_tp");
         let tp = TokenProvider::new("stale".into(), None, "hash".into());
 
         let changed = tp.refresh().await.unwrap();
         assert!(changed);
         assert_eq!(tp.get().await, "env_refreshed_tp");
-
-        std::env::remove_var("AGENT_TOKEN");
     }
 
     #[tokio::test]
     async fn refresh_respects_cooldown() {
         let _guard = env_lock().lock().unwrap();
-        std::env::set_var("AGENT_TOKEN", "fresh_tp");
+        let _env = EnvGuard::set("AGENT_TOKEN", "fresh_tp");
         let tp = TokenProvider::new("stale".into(), None, "hash".into());
 
         let first = tp.refresh().await.unwrap();
@@ -172,19 +171,16 @@ mod tests {
         let second = tp.refresh().await.unwrap();
         assert!(!second);
         assert_eq!(tp.get().await, "fresh_tp");
-
-        std::env::remove_var("AGENT_TOKEN");
     }
 
     #[tokio::test]
     async fn refresh_noop_when_env_same() {
         let _guard = env_lock().lock().unwrap();
-        std::env::set_var("AGENT_TOKEN", "same");
+        let _env = EnvGuard::set("AGENT_TOKEN", "same");
         let tp = TokenProvider::new("same".into(), None, "hash".into());
 
         let changed = tp.refresh().await.unwrap();
         assert!(!changed);
-        std::env::remove_var("AGENT_TOKEN");
     }
 
     #[tokio::test]

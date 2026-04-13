@@ -149,6 +149,25 @@ mod trigger_pipe_handler_tests {
         assert!(command.contains("%{http_code}"));
     }
 
+    #[test]
+    fn build_trigger_pipe_container_command_normalizes_invalid_method() {
+        let command =
+            build_trigger_pipe_container_command("/webhook/pipe", "POST; rm -rf /", &json!({}));
+
+        assert!(command.contains("curl -sS -X POST "));
+        assert!(!command.contains("rm -rf"));
+    }
+
+    #[test]
+    fn normalize_trigger_pipe_method_falls_back_to_default() {
+        assert_eq!(normalize_trigger_pipe_method(" patch ", "POST"), "PATCH");
+        assert_eq!(
+            normalize_trigger_pipe_method("POST;echo nope", "POST"),
+            "POST"
+        );
+        assert_eq!(normalize_trigger_pipe_method("", "GET"), "GET");
+    }
+
     #[tokio::test]
     async fn handle_trigger_pipe_requires_input_or_source_details() {
         let agent_cmd = make_trigger_agent_command();
@@ -409,6 +428,14 @@ fn default_pipe_target_endpoint() -> String {
 
 fn default_pipe_target_method() -> String {
     "POST".to_string()
+}
+
+fn normalize_trigger_pipe_method(method: &str, default_method: &str) -> String {
+    let normalized = trimmed(method).to_ascii_uppercase();
+    match normalized.as_str() {
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" => normalized,
+        _ => default_method.to_string(),
+    }
 }
 
 fn default_pipe_trigger_type() -> String {
@@ -1162,20 +1189,16 @@ impl TriggerPipeCommand {
         if self.source_endpoint.is_empty() {
             self.source_endpoint = default_pipe_source_endpoint();
         }
-        self.source_method = trimmed(&self.source_method).to_uppercase();
-        if self.source_method.is_empty() {
-            self.source_method = default_pipe_source_method();
-        }
+        self.source_method =
+            normalize_trigger_pipe_method(&self.source_method, &default_pipe_source_method());
         self.target_url = self.target_url.map(|value| trimmed(&value));
         self.target_container = self.target_container.map(|value| trimmed(&value));
         self.target_endpoint = trimmed(&self.target_endpoint);
         if self.target_endpoint.is_empty() {
             self.target_endpoint = "/".to_string();
         }
-        self.target_method = trimmed(&self.target_method).to_uppercase();
-        if self.target_method.is_empty() {
-            self.target_method = default_pipe_target_method();
-        }
+        self.target_method =
+            normalize_trigger_pipe_method(&self.target_method, &default_pipe_target_method());
         self.trigger_type = trimmed(&self.trigger_type).to_lowercase();
         if self.trigger_type.is_empty() {
             self.trigger_type = default_pipe_trigger_type();
@@ -1867,20 +1890,23 @@ fn shell_escape_single_quotes(value: &str) -> String {
 fn build_trigger_pipe_container_command(endpoint: &str, method: &str, payload: &Value) -> String {
     let json_payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
     let escaped_payload = shell_escape_single_quotes(&json_payload);
+    let normalized_method = normalize_trigger_pipe_method(method, "POST");
     let url = build_pipe_target_url("http://127.0.0.1", endpoint);
+    let escaped_url = shell_escape_single_quotes(&url);
     format!(
-        "curl -sS -X {} -H 'Content-Type: application/json' --data-raw '{}' -w '\\n%{{http_code}}' {}",
-        method, escaped_payload, url
+        "curl -sS -X {} -H 'Content-Type: application/json' --data-raw '{}' -w '\\n%{{http_code}}' '{}'",
+        normalized_method, escaped_payload, escaped_url
     )
 }
 
 #[cfg(feature = "docker")]
 fn build_trigger_pipe_source_command(endpoint: &str, method: &str) -> String {
+    let normalized_method = normalize_trigger_pipe_method(method, "GET");
     let url = build_pipe_target_url("http://127.0.0.1", endpoint);
+    let escaped_url = shell_escape_single_quotes(&url);
     format!(
-        "curl -sS -X {} -w '\\n%{{http_code}}' {}",
-        method.to_uppercase(),
-        url
+        "curl -sS -X {} -w '\\n%{{http_code}}' '{}'",
+        normalized_method, escaped_url
     )
 }
 
@@ -5468,9 +5494,13 @@ async fn handle_probe_endpoints(
                             // Capture sample response body for REST endpoints
                             let mut sample_response = None;
                             if data.capture_samples && code == "200" {
+                                let escaped_url = shell_escape_single_quotes(&format!(
+                                    "http://localhost:{}{}",
+                                    port, path
+                                ));
                                 let body_cmd = format!(
-                                    "curl -sf -m {} http://localhost:{}{} 2>/dev/null || true",
-                                    data.probe_timeout, port, path
+                                    "curl -sf -m {} '{}' 2>/dev/null || true",
+                                    data.probe_timeout, escaped_url
                                 );
                                 if let Ok(Ok((0, body, _))) = tokio::time::timeout(
                                     std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
