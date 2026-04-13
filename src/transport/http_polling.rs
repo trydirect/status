@@ -349,6 +349,7 @@ pub async fn report_result(
     result: &Option<serde_json::Value>,
     error: &Option<String>,
     completed_at: &str,
+    executed_by: Option<&str>,
 ) -> Result<()> {
     let url = format!("{}/api/v1/agent/commands/report", base_url);
 
@@ -369,6 +370,12 @@ pub async fn report_result(
         "completed_at".to_string(),
         serde_json::Value::String(completed_at.to_string()),
     );
+    if let Some(executed_by) = executed_by {
+        body.insert(
+            "executed_by".to_string(),
+            serde_json::Value::String(executed_by.to_string()),
+        );
+    }
 
     if let Some(res) = result {
         body.insert("result".to_string(), res.clone());
@@ -453,6 +460,7 @@ mod tests {
         let result: Option<serde_json::Value> = None;
         let error = None;
         let completed_at = "2023-11-15T10:00:00Z";
+        let executed_by = Some("compose_agent");
 
         let mut payload = serde_json::Map::new();
         payload.insert(
@@ -470,6 +478,10 @@ mod tests {
         payload.insert(
             "completed_at".to_string(),
             serde_json::Value::String(completed_at.to_string()),
+        );
+        payload.insert(
+            "executed_by".to_string(),
+            serde_json::Value::String(executed_by.unwrap().to_string()),
         );
         if let Some(value) = result.clone() {
             payload.insert("result".to_string(), value);
@@ -505,6 +517,7 @@ mod tests {
             &result,
             &error,
             completed_at,
+            executed_by,
         )
         .await
         .expect("report_result should succeed");

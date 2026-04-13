@@ -7,7 +7,6 @@ use serde::Deserialize;
 use serde::Serialize;
 #[cfg(any(feature = "docker", test))]
 use serde_json::json;
-#[cfg(any(feature = "docker", test))]
 use serde_json::Value;
 #[cfg(feature = "docker")]
 use std::collections::{HashMap, HashSet};
@@ -35,6 +34,149 @@ pub enum ContainerRuntime {
     #[default]
     Runc,
     Kata,
+}
+
+#[cfg(all(test, feature = "docker"))]
+mod trigger_pipe_handler_tests {
+    use super::*;
+    use mockito::{Matcher, Server};
+
+    fn make_trigger_agent_command() -> AgentCommand {
+        AgentCommand {
+            id: "cmd-trigger".into(),
+            command_id: "cmd-trigger".into(),
+            name: "trigger_pipe".into(),
+            params: json!({}),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_posts_mapped_payload_to_external_target() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/webhook/pipe")
+            .match_body(Matcher::Exact(r#"{"email":"dev@try.direct"}"#.into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"accepted":true}"#)
+            .create_async()
+            .await;
+
+        let agent_cmd = make_trigger_agent_command();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some(server.url()),
+            target_container: None,
+            target_endpoint: "/webhook/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data)
+            .await
+            .expect("trigger_pipe should execute");
+
+        mock.assert_async().await;
+        assert_eq!(result.status, "completed");
+        assert!(result.error.is_none());
+
+        let body = result.result.expect("trigger_pipe result body");
+        assert_eq!(body["success"], true);
+        assert_eq!(body["mapped_data"], json!({ "email": "dev@try.direct" }));
+        assert_eq!(body["target_response"]["status"], 200);
+        assert_eq!(body["target_response"]["body"], json!({ "accepted": true }));
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_requires_external_target_url() {
+        let agent_cmd = make_trigger_agent_command();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: None,
+            target_container: None,
+            target_endpoint: "/webhook/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data)
+            .await
+            .expect("trigger_pipe should return structured failure");
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.error.as_deref(),
+            Some("trigger_pipe requires target_url or target_container")
+        );
+    }
+
+    #[test]
+    fn build_trigger_pipe_container_command_posts_json_payload() {
+        let command = build_trigger_pipe_container_command(
+            "/webhook/pipe",
+            "POST",
+            &json!({ "email": "dev@try.direct", "name": "O'Reilly" }),
+        );
+
+        assert!(command.contains("curl -sS -X POST"));
+        assert!(command.contains("http://127.0.0.1/webhook/pipe"));
+        assert!(command.contains("\"email\":\"dev@try.direct\""));
+        assert!(!command.contains("\"name\":\"O'Reilly\""));
+        assert!(command.contains("Reilly"));
+        assert!(command.contains("%{http_code}"));
+    }
+
+    #[test]
+    fn build_trigger_pipe_source_command_fetches_json_payload() {
+        let command = build_trigger_pipe_source_command("/source/data", "get");
+
+        assert!(command.contains("curl -sS -X GET"));
+        assert!(command.contains("http://127.0.0.1/source/data"));
+        assert!(command.contains("%{http_code}"));
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_requires_input_or_source_details() {
+        let agent_cmd = make_trigger_agent_command();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            input_data: None,
+            source_container: None,
+            source_endpoint: "/source/data".into(),
+            source_method: "GET".into(),
+            target_url: None,
+            target_container: Some("target-app".into()),
+            target_endpoint: "/webhook/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data)
+            .await
+            .expect("trigger_pipe should return structured failure");
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.error.as_deref(),
+            Some("trigger_pipe requires input_data or source_container")
+        );
+    }
 }
 
 impl std::fmt::Display for ContainerRuntime {
@@ -138,6 +280,7 @@ pub enum StackerCommand {
     ListContainers(ListContainersCommand),
     ConfigureFirewall(ConfigureFirewallCommand),
     ProbeEndpoints(ProbeEndpointsCommand),
+    TriggerPipe(TriggerPipeCommand),
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -222,6 +365,54 @@ pub struct ErrorSummaryCommand {
     hours: u32,
     #[serde(default = "default_true")]
     redact: bool,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct TriggerPipeCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    pipe_instance_id: String,
+    #[serde(default)]
+    input_data: Option<Value>,
+    #[serde(default)]
+    source_container: Option<String>,
+    #[serde(default = "default_pipe_source_endpoint")]
+    source_endpoint: String,
+    #[serde(default = "default_pipe_source_method")]
+    source_method: String,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    target_container: Option<String>,
+    #[serde(default = "default_pipe_target_endpoint")]
+    target_endpoint: String,
+    #[serde(default = "default_pipe_target_method")]
+    target_method: String,
+    #[serde(default)]
+    field_mapping: Option<Value>,
+    #[serde(default = "default_pipe_trigger_type")]
+    trigger_type: String,
+}
+
+fn default_pipe_source_endpoint() -> String {
+    "/".to_string()
+}
+
+fn default_pipe_source_method() -> String {
+    "GET".to_string()
+}
+
+fn default_pipe_target_endpoint() -> String {
+    "/".to_string()
+}
+
+fn default_pipe_target_method() -> String {
+    "POST".to_string()
+}
+
+fn default_pipe_trigger_type() -> String {
+    "manual".to_string()
 }
 
 /// Command to fetch app configuration from Vault
@@ -645,6 +836,13 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             payload.validate()?;
             Ok(Some(StackerCommand::ProbeEndpoints(payload)))
         }
+        "trigger_pipe" | "stacker.trigger_pipe" => {
+            let payload: TriggerPipeCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid trigger_pipe payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::TriggerPipe(payload)))
+        }
         _ => Ok(None),
     }
 }
@@ -948,6 +1146,56 @@ impl ErrorSummaryCommand {
             bail!("deployment_hash is required");
         }
         // app_code is optional for error_summary - if empty, analyze all containers
+        Ok(())
+    }
+}
+
+impl TriggerPipeCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.pipe_instance_id = trimmed(&self.pipe_instance_id);
+        self.source_container = self.source_container.map(|value| trimmed(&value));
+        self.source_endpoint = trimmed(&self.source_endpoint);
+        if self.source_endpoint.is_empty() {
+            self.source_endpoint = default_pipe_source_endpoint();
+        }
+        self.source_method = trimmed(&self.source_method).to_uppercase();
+        if self.source_method.is_empty() {
+            self.source_method = default_pipe_source_method();
+        }
+        self.target_url = self.target_url.map(|value| trimmed(&value));
+        self.target_container = self.target_container.map(|value| trimmed(&value));
+        self.target_endpoint = trimmed(&self.target_endpoint);
+        if self.target_endpoint.is_empty() {
+            self.target_endpoint = "/".to_string();
+        }
+        self.target_method = trimmed(&self.target_method).to_uppercase();
+        if self.target_method.is_empty() {
+            self.target_method = default_pipe_target_method();
+        }
+        self.trigger_type = trimmed(&self.trigger_type).to_lowercase();
+        if self.trigger_type.is_empty() {
+            self.trigger_type = default_pipe_trigger_type();
+        }
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.pipe_instance_id.is_empty() {
+            bail!("pipe_instance_id is required");
+        }
         Ok(())
     }
 }
@@ -1541,10 +1789,398 @@ async fn execute_with_docker(
         StackerCommand::ServerResources(data) => handle_server_resources(agent_cmd, data).await,
         StackerCommand::ListContainers(data) => handle_list_containers(agent_cmd, data).await,
         StackerCommand::ProbeEndpoints(data) => handle_probe_endpoints(agent_cmd, data).await,
+        StackerCommand::TriggerPipe(data) => handle_trigger_pipe(agent_cmd, data).await,
         StackerCommand::ConfigureFirewall(data) => {
             firewall::handle_configure_firewall(agent_cmd, data, firewall_policy).await
         }
     }
+}
+
+#[cfg(feature = "docker")]
+fn extract_json_path_value(source: &Value, path: &str) -> Value {
+    let trimmed = path.trim();
+    if !trimmed.starts_with("$.") {
+        return Value::Null;
+    }
+
+    let mut current = source;
+    for segment in trimmed.trim_start_matches("$.").split('.') {
+        if segment.is_empty() {
+            continue;
+        }
+        match current {
+            Value::Object(map) => match map.get(segment) {
+                Some(value) => current = value,
+                None => return Value::Null,
+            },
+            _ => return Value::Null,
+        }
+    }
+
+    current.clone()
+}
+
+#[cfg(feature = "docker")]
+fn apply_pipe_field_mapping(source: &Value, field_mapping: Option<&Value>) -> Value {
+    let Some(Value::Object(mapping)) = field_mapping else {
+        return source.clone();
+    };
+
+    if mapping.is_empty() {
+        return source.clone();
+    }
+
+    let mut mapped = serde_json::Map::new();
+    for (key, rule) in mapping {
+        let value = match rule {
+            Value::String(path) if path.starts_with("$.") => extract_json_path_value(source, path),
+            other => other.clone(),
+        };
+        mapped.insert(key.clone(), value);
+    }
+    Value::Object(mapped)
+}
+
+#[cfg(feature = "docker")]
+fn build_pipe_target_url(base: &str, endpoint: &str) -> String {
+    let trimmed_base = base.trim_end_matches('/');
+    let trimmed_endpoint = endpoint.trim();
+    if trimmed_endpoint.is_empty() || trimmed_endpoint == "/" {
+        return format!("{}/", trimmed_base);
+    }
+    format!(
+        "{}/{}",
+        trimmed_base,
+        trimmed_endpoint.trim_start_matches('/')
+    )
+}
+
+#[cfg(feature = "docker")]
+fn shell_escape_single_quotes(value: &str) -> String {
+    value.replace('\'', r#"'\"'\"'"#)
+}
+
+#[cfg(feature = "docker")]
+fn build_trigger_pipe_container_command(endpoint: &str, method: &str, payload: &Value) -> String {
+    let json_payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    let escaped_payload = shell_escape_single_quotes(&json_payload);
+    let url = build_pipe_target_url("http://127.0.0.1", endpoint);
+    format!(
+        "curl -sS -X {} -H 'Content-Type: application/json' --data-raw '{}' -w '\\n%{{http_code}}' {}",
+        method, escaped_payload, url
+    )
+}
+
+#[cfg(feature = "docker")]
+fn build_trigger_pipe_source_command(endpoint: &str, method: &str) -> String {
+    let url = build_pipe_target_url("http://127.0.0.1", endpoint);
+    format!(
+        "curl -sS -X {} -w '\\n%{{http_code}}' {}",
+        method.to_uppercase(),
+        url
+    )
+}
+
+#[cfg(feature = "docker")]
+async fn send_trigger_pipe_request(
+    url: &str,
+    method: &str,
+    payload: &Value,
+) -> Result<(u16, Value)> {
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("invalid target_method '{}'", method))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building trigger_pipe http client")?;
+
+    let response = client
+        .request(method, url)
+        .json(payload)
+        .send()
+        .await
+        .with_context(|| format!("sending trigger_pipe request to {}", url))?;
+
+    let status = response.status().as_u16();
+    let body_text = response
+        .text()
+        .await
+        .context("reading trigger_pipe response body")?;
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
+}
+
+#[cfg(feature = "docker")]
+async fn fetch_trigger_pipe_source_request(
+    container: &str,
+    endpoint: &str,
+    method: &str,
+) -> Result<(u16, Value)> {
+    let command = build_trigger_pipe_source_command(endpoint, method);
+    let (exit_code, stdout, stderr) = docker::exec_in_container_with_output(container, &command)
+        .await
+        .with_context(|| {
+            format!(
+                "fetching trigger_pipe source inside container {}",
+                container
+            )
+        })?;
+
+    if exit_code != 0 {
+        bail!(
+            "source container request failed with code {}: {}",
+            exit_code,
+            stderr.trim()
+        );
+    }
+
+    let mut lines = stdout.lines().collect::<Vec<_>>();
+    let status_line = lines.pop().unwrap_or("000").trim();
+    let status = status_line.parse::<u16>().unwrap_or(0);
+    let body_text = lines.join("\n");
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
+}
+
+#[cfg(feature = "docker")]
+async fn send_trigger_pipe_container_request(
+    container: &str,
+    endpoint: &str,
+    method: &str,
+    payload: &Value,
+) -> Result<(u16, Value)> {
+    let command = build_trigger_pipe_container_command(endpoint, method, payload);
+    let (exit_code, stdout, stderr) = docker::exec_in_container_with_output(container, &command)
+        .await
+        .with_context(|| {
+            format!(
+                "sending trigger_pipe request inside container {}",
+                container
+            )
+        })?;
+
+    if exit_code != 0 {
+        bail!(
+            "target container request failed with code {}: {}",
+            exit_code,
+            stderr.trim()
+        );
+    }
+
+    let mut lines = stdout.lines().collect::<Vec<_>>();
+    let status_line = lines.pop().unwrap_or("000").trim();
+    let status = status_line.parse::<u16>().unwrap_or(0);
+    let body_text = lines.join("\n");
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
+}
+
+#[cfg(feature = "docker")]
+async fn handle_trigger_pipe(
+    agent_cmd: &AgentCommand,
+    data: &TriggerPipeCommand,
+) -> Result<CommandResult> {
+    let mut result = base_result(agent_cmd, &data.deployment_hash, "", "trigger_pipe");
+    let source_data = match data.input_data.clone() {
+        Some(value) => value,
+        None => match data
+            .source_container
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            Some(container) => match fetch_trigger_pipe_source_request(
+                container,
+                &data.source_endpoint,
+                &data.source_method,
+            )
+            .await
+            {
+                Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+                    response_body
+                }
+                Ok((status_code, response_body)) => {
+                    let error = format!("source fetch failed with status {}", status_code);
+                    result.status = "failed".into();
+                    result.result = Some(json!({
+                        "type": "trigger_pipe",
+                        "deployment_hash": data.deployment_hash,
+                        "pipe_instance_id": data.pipe_instance_id,
+                        "success": false,
+                        "source_data": response_body,
+                        "mapped_data": Value::Null,
+                        "target_response": Value::Null,
+                        "error": error,
+                        "triggered_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        "trigger_type": data.trigger_type,
+                    }));
+                    result.error = Some(error);
+                    return Ok(result);
+                }
+                Err(err) => {
+                    let error = format!("failed to fetch trigger_pipe source: {}", err);
+                    result.status = "failed".into();
+                    result.result = Some(json!({
+                        "type": "trigger_pipe",
+                        "deployment_hash": data.deployment_hash,
+                        "pipe_instance_id": data.pipe_instance_id,
+                        "success": false,
+                        "source_data": Value::Null,
+                        "mapped_data": Value::Null,
+                        "target_response": Value::Null,
+                        "error": error,
+                        "triggered_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        "trigger_type": data.trigger_type,
+                    }));
+                    result.error = Some(error);
+                    return Ok(result);
+                }
+            },
+            None => {
+                let error = "trigger_pipe requires input_data or source_container";
+                result.status = "failed".into();
+                result.result = Some(json!({
+                    "type": "trigger_pipe",
+                    "deployment_hash": data.deployment_hash,
+                    "pipe_instance_id": data.pipe_instance_id,
+                    "success": false,
+                    "source_data": Value::Null,
+                    "mapped_data": Value::Null,
+                    "target_response": Value::Null,
+                    "error": error,
+                    "triggered_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                    "trigger_type": data.trigger_type,
+                }));
+                result.error = Some(error.into());
+                return Ok(result);
+            }
+        },
+    };
+
+    let mapped_data = apply_pipe_field_mapping(&source_data, data.field_mapping.as_ref());
+    let target = match (
+        data.target_url.as_deref().filter(|value| !value.is_empty()),
+        data.target_container
+            .as_deref()
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(value), _) => Ok((
+            "external",
+            build_pipe_target_url(value, &data.target_endpoint),
+        )),
+        (None, Some(value)) => Ok(("container", value.to_string())),
+        (None, None) => {
+            let error = "trigger_pipe requires target_url or target_container";
+            result.status = "failed".into();
+            result.result = Some(json!({
+                "type": "trigger_pipe",
+                "deployment_hash": data.deployment_hash,
+                "pipe_instance_id": data.pipe_instance_id,
+                "success": false,
+                "source_data": source_data,
+                "mapped_data": mapped_data,
+                "target_response": Value::Null,
+                "error": error,
+                "triggered_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                "trigger_type": data.trigger_type,
+            }));
+            result.error = Some(error.into());
+            Err(())
+        }
+    };
+    if target.is_err() {
+        return Ok(result);
+    }
+    let (target_mode, target_value) = target.unwrap();
+
+    let send_result = match target_mode {
+        "external" => {
+            send_trigger_pipe_request(&target_value, &data.target_method, &mapped_data).await
+        }
+        "container" => {
+            send_trigger_pipe_container_request(
+                &target_value,
+                &data.target_endpoint,
+                &data.target_method,
+                &mapped_data,
+            )
+            .await
+        }
+        _ => unreachable!(),
+    };
+
+    match send_result {
+        Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+            result.status = "completed".into();
+            result.result = Some(json!({
+                "type": "trigger_pipe",
+                "deployment_hash": data.deployment_hash,
+                "pipe_instance_id": data.pipe_instance_id,
+                "success": true,
+                "source_data": source_data,
+                "mapped_data": mapped_data,
+                "target_response": {
+                    "status": status_code,
+                    "body": response_body,
+                },
+                "triggered_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                "trigger_type": data.trigger_type,
+            }));
+        }
+        Ok((status_code, response_body)) => {
+            let error = format!("target request failed with status {}", status_code);
+            result.status = "failed".into();
+            result.result = Some(json!({
+                "type": "trigger_pipe",
+                "deployment_hash": data.deployment_hash,
+                "pipe_instance_id": data.pipe_instance_id,
+                "success": false,
+                "source_data": source_data,
+                "mapped_data": mapped_data,
+                "target_response": {
+                    "status": status_code,
+                    "body": response_body,
+                },
+                "error": error,
+                "triggered_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                "trigger_type": data.trigger_type,
+            }));
+            result.error = Some(error);
+        }
+        Err(err) => {
+            let error = err.to_string();
+            result.status = "failed".into();
+            result.result = Some(json!({
+                "type": "trigger_pipe",
+                "deployment_hash": data.deployment_hash,
+                "pipe_instance_id": data.pipe_instance_id,
+                "success": false,
+                "source_data": source_data,
+                "mapped_data": mapped_data,
+                "target_response": Value::Null,
+                "error": error,
+                "triggered_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                "trigger_type": data.trigger_type,
+            }));
+            result.error = Some(error);
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(feature = "docker")]
@@ -4955,6 +5591,19 @@ mod tests {
         StackerCommand::ListContainers
     );
     stacker_test!(
+        parses_trigger_pipe_command,
+        "trigger_pipe",
+        json!({
+            "params": {
+                "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                "input_data": {
+                    "invoice_id": "inv-1"
+                }
+            }
+        }),
+        StackerCommand::TriggerPipe
+    );
+    stacker_test!(
         parses_stacker_list_containers_command,
         "stacker.list_containers",
         json!({
@@ -4978,6 +5627,105 @@ mod tests {
 
         let parsed = parse_stacker_command(&cmd).unwrap();
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parses_trigger_pipe_external_target_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-trigger".into(),
+            command_id: "cmd-trigger".into(),
+            name: "trigger_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "target_url": "https://example.com",
+                    "target_endpoint": "/webhook/pipe",
+                    "target_method": "post",
+                    "field_mapping": { "email": "$.user.email" },
+                    "trigger_type": "manual",
+                    "input_data": { "user": { "email": "dev@try.direct" } }
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(data.target_url.as_deref(), Some("https://example.com"));
+                assert_eq!(data.target_endpoint, "/webhook/pipe");
+                assert_eq!(data.target_method, "POST");
+                assert_eq!(data.trigger_type, "manual");
+                assert_eq!(data.field_mapping, Some(json!({ "email": "$.user.email" })));
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_trigger_pipe_internal_target_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-trigger".into(),
+            command_id: "cmd-trigger".into(),
+            name: "trigger_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "target_container": "target-app",
+                    "target_endpoint": "/hooks/pipe",
+                    "target_method": "post",
+                    "field_mapping": { "email": "$.user.email" },
+                    "input_data": { "user": { "email": "dev@try.direct" } }
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.target_container.as_deref(), Some("target-app"));
+                assert_eq!(data.target_endpoint, "/hooks/pipe");
+                assert_eq!(data.target_method, "POST");
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_trigger_pipe_source_fetch_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-trigger".into(),
+            command_id: "cmd-trigger".into(),
+            name: "trigger_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "source_container": "source-app",
+                    "source_endpoint": "/source/data",
+                    "source_method": "get",
+                    "target_container": "target-app",
+                    "target_endpoint": "/hooks/pipe",
+                    "target_method": "post"
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.source_container.as_deref(), Some("source-app"));
+                assert_eq!(data.source_endpoint, "/source/data");
+                assert_eq!(data.source_method, "GET");
+                assert_eq!(data.target_container.as_deref(), Some("target-app"));
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
     }
 
     // --- ContainerRuntime tests ---

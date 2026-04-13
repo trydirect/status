@@ -12,7 +12,9 @@ use crate::agent::config::Config;
 use crate::commands::executor::CommandExecutor;
 use crate::commands::firewall::FirewallPolicy;
 use crate::commands::TimeoutStrategy;
-use crate::monitoring::{spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore};
+use crate::monitoring::{
+    spawn_heartbeat, ControlPlane, MetricsCollector, MetricsSnapshot, MetricsStore,
+};
 use crate::transport::{http_polling, CommandResult};
 use serde_json::{json, Value};
 
@@ -27,12 +29,14 @@ pub async fn run(config_path: String) -> Result<()> {
         .or(Some(cfg.compose_agent_enabled))
         .unwrap_or(false);
 
-    let control_plane = std::env::var("CONTROL_PLANE")
-        .ok()
-        .or(cfg.control_plane.clone())
-        .unwrap_or_else(|| "status_panel".to_string());
+    let control_plane = ControlPlane::from_value(
+        std::env::var("CONTROL_PLANE")
+            .ok()
+            .as_deref()
+            .or(cfg.control_plane.as_deref()),
+    );
 
-    if !compose_agent_enabled && control_plane == "status_panel" {
+    if !compose_agent_enabled && control_plane == ControlPlane::StatusPanel {
         warn!("compose_agent=false - running in legacy mode (Status Panel handles all operations)");
     } else if compose_agent_enabled {
         info!("compose_agent=true - compose-agent sidecar handling Docker operations");
@@ -102,6 +106,7 @@ pub async fn run(config_path: String) -> Result<()> {
         polling_backoff,
         command_timeout,
         firewall_policy,
+        control_plane,
     };
 
     // Spawn the long-polling loop
@@ -130,6 +135,7 @@ struct PollingContext {
     polling_backoff: u64,
     command_timeout: u64,
     firewall_policy: FirewallPolicy,
+    control_plane: ControlPlane,
 }
 
 /// Long-polling loop: continuously waits for commands and executes them
@@ -210,6 +216,7 @@ async fn execute_and_report(
                         result: None,
                         error: Some(e.to_string()),
                         completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        executed_by: Some(ctx.control_plane.to_string()),
                         ..CommandResult::default()
                     }
                 }
@@ -236,6 +243,7 @@ async fn execute_and_report(
                     })),
                     error: None,
                     completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                    executed_by: Some(ctx.control_plane.to_string()),
                     ..CommandResult::default()
                 },
                 Err(e) => CommandResult {
@@ -244,6 +252,7 @@ async fn execute_and_report(
                     result: None,
                     error: Some(e.to_string()),
                     completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                    executed_by: Some(ctx.control_plane.to_string()),
                     ..CommandResult::default()
                 },
             }
@@ -257,6 +266,7 @@ async fn execute_and_report(
                 result: None,
                 error: Some(format!("Invalid command parameters: {}", e)),
                 completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                executed_by: Some(ctx.control_plane.to_string()),
                 ..CommandResult::default()
             }
         }
@@ -278,6 +288,7 @@ async fn execute_and_report(
         &cmd_result.result,
         &cmd_result.error,
         &cmd_result.completed_at,
+        cmd_result.executed_by.as_deref(),
     )
     .await?;
     info!(

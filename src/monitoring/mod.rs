@@ -28,6 +28,15 @@ pub enum ControlPlane {
     ComposeAgent,
 }
 
+impl ControlPlane {
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value {
+            Some("compose_agent") => ControlPlane::ComposeAgent,
+            _ => ControlPlane::StatusPanel,
+        }
+    }
+}
+
 impl std::fmt::Display for ControlPlane {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -275,6 +284,23 @@ mod tests {
     fn control_plane_equality() {
         assert_eq!(ControlPlane::StatusPanel, ControlPlane::StatusPanel);
         assert_ne!(ControlPlane::StatusPanel, ControlPlane::ComposeAgent);
+    }
+
+    #[test]
+    fn control_plane_from_value_defaults_to_status_panel() {
+        assert_eq!(
+            ControlPlane::from_value(Some("compose_agent")),
+            ControlPlane::ComposeAgent
+        );
+        assert_eq!(
+            ControlPlane::from_value(Some("status_panel")),
+            ControlPlane::StatusPanel
+        );
+        assert_eq!(
+            ControlPlane::from_value(Some("unexpected")),
+            ControlPlane::StatusPanel
+        );
+        assert_eq!(ControlPlane::from_value(None), ControlPlane::StatusPanel);
     }
 
     #[test]
