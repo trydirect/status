@@ -52,6 +52,21 @@
                 </button>
                 <h1 class="topbar-title">{% block page_title %}Dashboard{% endblock %}</h1>
                 <div class="topbar-actions">
+                    <div class="notification-bell-wrapper" style="position:relative;">
+                        <button class="notification-bell" id="notification-bell" aria-label="Notifications">
+                            <span class="material-icons-outlined">notifications</span>
+                            <span class="bell-badge" id="bell-badge">0</span>
+                        </button>
+                        <div class="notification-dropdown" id="notification-dropdown">
+                            <div class="notification-dropdown-header">
+                                <h4>Notifications</h4>
+                                <button id="mark-all-read">Mark all read</button>
+                            </div>
+                            <div class="notification-dropdown-list" id="notification-list">
+                                <div class="notification-empty">No notifications</div>
+                            </div>
+                        </div>
+                    </div>
                     {% block topbar_actions %}{% endblock %}
                 </div>
             </header>

@@ -3,13 +3,13 @@
 ## Marketplace Integration: Agent Registration & Local Deploy
 
 ### Agent Self-Registration (for curl one-liner and manual install entry points)
-- [ ] **`POST /api/v1/register`** (local endpoint on Status Panel) — Triggered after install.sh completes
+- [x] **`POST /api/v1/register`** (local endpoint on Status Panel) — Triggered after install.sh completes
   - Accept `{ purchase_token, stack_id }` from install script
   - Collect server fingerprint (hostname, IP, OS, CPU, RAM, disk)
   - Call Stacker Server: `POST /api/v1/agents/register { purchase_token, server_fingerprint, stack_id }`
   - Store returned `agent_id`, `deployment_hash`, `dashboard_url` locally
   - Begin heartbeat loop to Stacker Server
-- [ ] **Local `stacker deploy` trigger** — After registration, Status Panel invokes Stacker CLI locally
+- [x] **Local `stacker deploy` trigger** — After registration, Status Panel invokes Stacker CLI locally
   - `stacker deploy --from /opt/stacker/stacks/{stack_id}/` (the downloaded archive)
   - Monitor deploy progress, report status back to Stacker Server via existing agent report endpoint
   - No Install Service involved — fully local execution
@@ -17,30 +17,62 @@
 ### Dashboard Linking (optional, user-initiated)
 - [x] Provide web UI page at `http://localhost:{STATUS_PORT}/link` to connect Status Panel to TryDirect dashboard
 - [x] Support unlinking from dashboard (agent continues to work standalone)
-- [ ] **Login-based linking flow (Entry Point C):**
+- [x] **Login-based linking flow (Entry Point C):**
   - User logs in with TryDirect email + password from Status Panel UI
   - Status Panel calls Stacker: `POST /api/v1/auth/login { email, password }` → returns `session_token` + user's deployments
   - User selects a deployment from the list → Status Panel calls Stacker: `POST /api/v1/agents/link { session_token, deployment_id, server_fingerprint }`
   - Stacker validates session, checks user owns the deployment, issues `agent_id` + `agent_token`
   - No purchase_token needed — user's identity is the trust anchor
   - `purchase_token` flow retained only for headless Entry Point B (curl one-liner)
-- [ ] Add "Use Standalone" option for users without TryDirect account (skip linking entirely)
+- [x] Add "Use Standalone" option for users without TryDirect account (skip linking entirely)
 
 ### Standalone Status Panel Entry Point (Phase 2)
-- [ ] **"Deploy a Stack" page** in Status Panel web UI
+- [x] **"Deploy a Stack" page** in Status Panel web UI
   - Browse available stacks from marketplace API: `GET /api/v1/marketplace/stacks`
   - User selects stack → Status Panel downloads archive + calls `stacker deploy` locally
   - This enables Entry Point C: user installs Status Panel first, then deploys stacks from its UI
 
 ### Notifications Relay
-- [ ] Forward marketplace notifications (stack published, update available) from Stacker Server to Status Panel UI
-- [ ] Show "Update Available" badge when a newer version of the deployed stack exists
+- [x] Forward marketplace notifications (stack published, update available) from Stacker Server to Status Panel UI
+- [x] Show "Update Available" badge when a newer version of the deployed stack exists
 
 ---
-- Align build and runtime images so the compiled `status` binary links against the same glibc version (or older) as production.
-- Add a musl-based build target and image variant to provide a statically linked binary that avoids glibc drift.
+- ~~Align build and runtime images so the compiled `status` binary links against the same glibc version (or older) as production.~~ ✅ Done — Dockerfiles use `clux/muslrust:stable` → `gcr.io/distroless/cc`, musl avoids glibc drift.
+- ~~Add a musl-based build target and image variant to provide a statically linked binary that avoids glibc drift.~~ ✅ Done — CI builds `x86_64-unknown-linux-musl` target, releases musl binary.
 - Update CI to build/test using the production base image to prevent future GLIBC_x.y.z mismatches.
 - Add a simple container start-up check that surfaces linker/runtime errors early in the pipeline.
+
+## Missing Features Implementation Plan (2026-04)
+
+### Phase 1 - Reliability and Production Readiness
+- [x] **[status-auth-refresh]** Refresh agent auth immediately on 401/403 and retry polling/report calls with backoff.
+  - Wire the retry path into the polling loop instead of waiting for the periodic refresh task.
+  - Define the Vault path/role contract for `status_panel_token` and document failure handling.
+- [x] **[status-alerting]** Add outbound alert delivery for unhealthy containers, command failures, and host-level incidents.
+  - Webhook delivery with env-configured thresholds (`ALERT_WEBHOOK_URL`, CPU/memory/disk thresholds).
+  - Includes alert deduplication, severity escalation, and recovery notifications.
+- [x] **[status-command-provenance]** Surface which control plane executed each action (`status_panel` vs `compose_agent`).
+  - Expose provenance in command reports, health metrics, and `/capabilities`-driven diagnostics.
+  - Publish and implement the separate token/cache schema for `compose_agent_token`.
+- [ ] **[status-ssl-renewal]** Automate SSL certificate renewal for hosts that enable HTTPS.
+  - Add renewal scheduling, renewal result logging, and certificate reload without manual intervention.
+
+### Phase 2 - Data Safety and Day-2 Operations
+- [ ] **[status-volume-backups]** Add scheduled backup and restore support for Docker volumes.
+  - Support policy-driven backups for stateful services, retention, restore validation, and signed metadata.
+  - Reuse existing backup/security primitives where possible instead of introducing a separate backup path.
+
+### Phase 3 - Standalone and Dashboard UX
+- [x] **[status-login-linking]** Complete the login-based dashboard linking flow and standalone mode.
+  - Finish the UI + daemon wiring for email/password linking to an owned deployment.
+  - Add "Use Standalone" so the panel is usable without a TryDirect account.
+- [x] **[status-deploy-stack-ui]** Build the local "Deploy a Stack" flow in Status Panel.
+  - Browse marketplace stacks, download the selected archive, and trigger local `stacker deploy`.
+  - Show deployment progress, update availability, and compatibility checks in the local UI.
+
+### Cross-Project Coordination
+- [ ] Coordinate `status-deploy-stack-ui` with Stacker marketplace archive/download validation.
+- [ ] Coordinate `status-command-provenance` and future pipe execution with the Stacker control-plane roadmap.
 
 ## Status Panel Agent Commands (Pull Model)
 **Key principle**: Agent polls Stacker; Stacker never pushes to the agent. Agent is responsible for adding HMAC headers on its outbound calls.
@@ -51,14 +83,14 @@
 - [x] Restart: restart container by app_code, then emit updated state in report payload; include errors array on failure.
 - [x] Reporting: call Stacker `POST /api/v1/agent/commands/report` with HMAC headers (`X-Agent-Id`, `X-Timestamp`, `X-Request-Id`, `X-Agent-Signature`) signed using Vault token.
 - [x] Wire agent to poll loop: `GET /api/v1/agent/commands/wait/{deployment_hash}` with HMAC headers.
-- [ ] On 401/403, refresh token from Vault and retry with backoff (which Vault path/role should we use for the agent token?).
+- [x] On 401/403, refresh token from Vault and retry with backoff (TokenProvider with Vault → env fallback, 10s cooldown).
 - [x] Ensure agent generates HMAC signature for every outbound request (wait + report + app status); no secrets expected from Stacker side.
 
 ## Compose Agent Sidecar
 - [x] Ship a separate `compose-agent` container (Docker Compose + MCP Gateway) deployed alongside the Status Panel container; Service file should ensure it mounts the Docker socket while Status Panel does not.
 - [x] Implement watchdog to restart only the compose container on failure/glibc mismatch without touching the Status Panel daemon; prove via integration test.
-- [ ] Expose health metrics indicating which control plane executed each command (`status_panel` vs `compose_agent`) so ops can track rollout and fallbacks.
-- [ ] Publish Vault secret schema: `secret/agent/{hash}/status_panel_token` and `secret/agent/{hash}/compose_agent_token`; refresh + cache them independently.
+- [x] Expose health metrics indicating which control plane executed each command (`status_panel` vs `compose_agent`) so ops can track rollout and fallbacks.
+- [x] Publish Vault secret schema: `secret/agent/{hash}/status_panel_token` and `secret/agent/{hash}/compose_agent_token`; refresh + cache them independently.
 - [x] Add config flag to disable compose agent (legacy mode) and emit warning log so Blog receives `compose_agent=false` via `/capabilities`.
 
 ## Kata Containers Support (Stacker Server)

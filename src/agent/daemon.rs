@@ -13,7 +13,11 @@ use crate::commands::executor::CommandExecutor;
 use crate::commands::firewall::FirewallPolicy;
 use crate::commands::validator::CommandValidator;
 use crate::commands::TimeoutStrategy;
-use crate::monitoring::{spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore};
+use crate::monitoring::{
+    spawn_heartbeat, ControlPlane, MetricsCollector, MetricsSnapshot, MetricsStore,
+};
+use crate::security::token_provider::TokenProvider;
+use crate::security::vault_client::VaultClient;
 use crate::transport::{http_polling, CommandResult};
 use serde_json::{json, Value};
 
@@ -28,12 +32,14 @@ pub async fn run(config_path: String) -> Result<()> {
         .or(Some(cfg.compose_agent_enabled))
         .unwrap_or(false);
 
-    let control_plane = std::env::var("CONTROL_PLANE")
-        .ok()
-        .or(cfg.control_plane.clone())
-        .unwrap_or_else(|| "status_panel".to_string());
+    let control_plane = ControlPlane::from_value(
+        std::env::var("CONTROL_PLANE")
+            .ok()
+            .as_deref()
+            .or(cfg.control_plane.as_deref()),
+    );
 
-    if !compose_agent_enabled && control_plane == "status_panel" {
+    if !compose_agent_enabled && control_plane == ControlPlane::StatusPanel {
         warn!("compose_agent=false - running in legacy mode (Status Panel handles all operations)");
     } else if compose_agent_enabled {
         info!("compose_agent=true - compose-agent sidecar handling Docker operations");
@@ -51,7 +57,25 @@ pub async fn run(config_path: String) -> Result<()> {
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(10));
 
-    let heartbeat_handle = spawn_heartbeat(collector, store, metrics_interval, tx, webhook.clone());
+    let alert_manager = {
+        let cfg = crate::monitoring::alerting::AlertConfig::from_env();
+        let mgr = crate::monitoring::alerting::AlertManager::new(cfg);
+        if mgr.is_enabled() {
+            info!("outbound alerting enabled");
+            Some(std::sync::Arc::new(mgr))
+        } else {
+            None
+        }
+    };
+
+    let heartbeat_handle = spawn_heartbeat(
+        collector,
+        store,
+        metrics_interval,
+        tx,
+        webhook.clone(),
+        alert_manager,
+    );
     info!(
         interval_secs = metrics_interval.as_secs(),
         webhook = webhook.as_deref().unwrap_or("none"),
@@ -81,6 +105,10 @@ pub async fn run(config_path: String) -> Result<()> {
         warn!("AGENT_TOKEN is not set; authenticated dashboard requests will fail");
     }
 
+    // Build a shared token provider (Vault → env fallback on 401/403)
+    let vault_client = VaultClient::from_env().ok().flatten();
+    let token_provider = TokenProvider::new(agent_token, vault_client, deployment_hash.clone());
+
     info!(
         dashboard_url = %dashboard_url,
         agent_id = %agent_id,
@@ -98,11 +126,12 @@ pub async fn run(config_path: String) -> Result<()> {
         dashboard_url,
         deployment_hash,
         agent_id,
-        agent_token,
+        token_provider,
         polling_timeout,
         polling_backoff,
         command_timeout,
         firewall_policy,
+        control_plane,
     };
 
     // Spawn the long-polling loop
@@ -126,11 +155,12 @@ struct PollingContext {
     dashboard_url: String,
     deployment_hash: String,
     agent_id: String,
-    agent_token: String,
+    token_provider: TokenProvider,
     polling_timeout: u64,
     polling_backoff: u64,
     command_timeout: u64,
     firewall_policy: FirewallPolicy,
+    control_plane: ControlPlane,
 }
 
 /// Long-polling loop: continuously waits for commands and executes them
@@ -138,11 +168,11 @@ async fn polling_loop(ctx: PollingContext) {
     let executor = CommandExecutor::new();
 
     loop {
-        match http_polling::wait_for_command(
+        match http_polling::wait_for_command_with_retry(
             &ctx.dashboard_url,
             &ctx.deployment_hash,
             &ctx.agent_id,
-            &ctx.agent_token,
+            &ctx.token_provider,
             ctx.polling_timeout,
             None,
         )
@@ -211,6 +241,7 @@ async fn execute_and_report(
                         result: None,
                         error: Some(e.to_string()),
                         completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        executed_by: Some(ctx.control_plane.to_string()),
                         ..CommandResult::default()
                     }
                 }
@@ -232,6 +263,7 @@ async fn execute_and_report(
                     result: None,
                     error: Some(format!("Command validation failed: {}", e)),
                     completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                    executed_by: Some(ctx.control_plane.to_string()),
                     ..CommandResult::default()
                 }
             } else {
@@ -254,6 +286,7 @@ async fn execute_and_report(
                         })),
                         error: None,
                         completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        executed_by: Some(ctx.control_plane.to_string()),
                         ..CommandResult::default()
                     },
                     Err(e) => CommandResult {
@@ -262,6 +295,7 @@ async fn execute_and_report(
                         result: None,
                         error: Some(e.to_string()),
                         completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        executed_by: Some(ctx.control_plane.to_string()),
                         ..CommandResult::default()
                     },
                 }
@@ -276,6 +310,7 @@ async fn execute_and_report(
                 result: None,
                 error: Some(format!("Invalid command parameters: {}", e)),
                 completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                executed_by: Some(ctx.control_plane.to_string()),
                 ..CommandResult::default()
             }
         }
@@ -287,16 +322,17 @@ async fn execute_and_report(
         status = %cmd_result.status,
         "reporting command result to stacker"
     );
-    http_polling::report_result(
+    http_polling::report_result_with_retry(
         &ctx.dashboard_url,
         &ctx.agent_id,
-        &ctx.agent_token,
+        &ctx.token_provider,
         &cmd_result.command_id,
         &ctx.deployment_hash,
         &cmd_result.status,
         &cmd_result.result,
         &cmd_result.error,
         &cmd_result.completed_at,
+        cmd_result.executed_by.as_deref(),
     )
     .await?;
     info!(
@@ -305,10 +341,10 @@ async fn execute_and_report(
     );
 
     if let Some(app_status) = build_app_status_update(&cmd_result) {
-        if let Err(e) = http_polling::update_app_status(
+        if let Err(e) = http_polling::update_app_status_with_retry(
             &ctx.dashboard_url,
             &ctx.agent_id,
-            &ctx.agent_token,
+            &ctx.token_provider,
             &app_status,
         )
         .await

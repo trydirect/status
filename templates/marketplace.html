@@ -32,7 +32,15 @@
                 {% endif %}
             </div>
             <div class="stack-card-body">
-                <div class="stack-card-title">{{ stack.name }}</div>
+                <div class="stack-card-title">
+                    {{ stack.name }}
+                    <span class="update-badge" data-stack-id="{{ stack.id }}" style="display:none;">
+                        <span class="badge badge-warning" style="font-size:10px;padding:2px 8px;margin-left:6px;">
+                            <span class="material-icons-outlined" style="font-size:13px;">system_update</span>
+                            Update Available
+                        </span>
+                    </span>
+                </div>
                 <div class="stack-card-desc">{{ stack.description }}</div>
                 <div class="stack-card-meta">
                     <span>{{ stack.author }}</span>
@@ -145,5 +153,26 @@ async function confirmDeploy() {
         document.getElementById('deploy-status').textContent = 'Network error: ' + err.message;
     }
 }
+
+// Show "Update Available" badges from notifications
+(async function checkUpdateBadges() {
+    try {
+        const resp = await fetch('/api/v1/notifications');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.notifications) return;
+        const updateIds = new Set();
+        data.notifications.forEach(n => {
+            if (n.kind === 'stack_update_available' && n.stack_id) {
+                updateIds.add(n.stack_id);
+            }
+        });
+        document.querySelectorAll('.update-badge[data-stack-id]').forEach(el => {
+            if (updateIds.has(el.dataset.stackId)) {
+                el.style.display = 'inline';
+            }
+        });
+    } catch (_) {}
+})();
 </script>
 {% endblock %}

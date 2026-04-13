@@ -11,6 +11,8 @@ use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::security::request_signer::compute_signature_base64;
+use crate::security::token_provider::TokenProvider;
+use crate::transport::retry::{signed_get_with_retry, signed_post_with_retry, RetryConfig};
 use crate::transport::Command;
 
 const TS_OVERRIDE_ENV: &str = "HTTP_POLLING_TS_OVERRIDE";
@@ -34,7 +36,7 @@ fn signing_meta() -> (i64, String) {
     (ts, request_id)
 }
 
-fn build_signed_headers(agent_id: &str, agent_token: &str, body: &[u8]) -> Result<HeaderMap> {
+pub fn build_signed_headers(agent_id: &str, agent_token: &str, body: &[u8]) -> Result<HeaderMap> {
     let (ts, request_id) = signing_meta();
     let sig = compute_signature_base64(agent_token, body);
 
@@ -349,6 +351,7 @@ pub async fn report_result(
     result: &Option<serde_json::Value>,
     error: &Option<String>,
     completed_at: &str,
+    executed_by: Option<&str>,
 ) -> Result<()> {
     let url = format!("{}/api/v1/agent/commands/report", base_url);
 
@@ -369,6 +372,12 @@ pub async fn report_result(
         "completed_at".to_string(),
         serde_json::Value::String(completed_at.to_string()),
     );
+    if let Some(executed_by) = executed_by {
+        body.insert(
+            "executed_by".to_string(),
+            serde_json::Value::String(executed_by.to_string()),
+        );
+    }
 
     if let Some(res) = result {
         body.insert("result".to_string(), res.clone());
@@ -424,6 +433,127 @@ pub async fn update_app_status<T: Serialize>(
     }
 }
 
+// ---- Retry-aware variants (use TokenProvider + automatic 401/403 refresh) ----
+
+/// Long-poll for a command with automatic token refresh on 401/403.
+pub async fn wait_for_command_with_retry(
+    base_url: &str,
+    deployment_hash: &str,
+    agent_id: &str,
+    token_provider: &TokenProvider,
+    timeout_secs: u64,
+    priority: Option<&str>,
+) -> Result<PollResponse> {
+    let url = build_wait_command_url(base_url, deployment_hash, timeout_secs, priority);
+    let client = create_http_client()?;
+
+    debug!(
+        url = %url,
+        deployment_hash = %deployment_hash,
+        timeout_secs = %timeout_secs,
+        "initiating long-poll with retry"
+    );
+
+    let config = RetryConfig::auth_only();
+    let response = signed_get_with_retry(
+        &client,
+        &url,
+        agent_id,
+        token_provider,
+        Duration::from_secs(timeout_secs + 5),
+        &config,
+    )
+    .await?;
+
+    handle_poll_response(response, &url).await
+}
+
+/// Report command result with automatic token refresh on 401/403.
+#[allow(clippy::too_many_arguments)]
+pub async fn report_result_with_retry(
+    base_url: &str,
+    agent_id: &str,
+    token_provider: &TokenProvider,
+    command_id: &str,
+    deployment_hash: &str,
+    status: &str,
+    result: &Option<serde_json::Value>,
+    error: &Option<String>,
+    completed_at: &str,
+    executed_by: Option<&str>,
+) -> Result<()> {
+    let url = format!("{}/api/v1/agent/commands/report", base_url);
+
+    let mut body = serde_json::Map::new();
+    body.insert("command_id".into(), Value::String(command_id.into()));
+    body.insert(
+        "deployment_hash".into(),
+        Value::String(deployment_hash.into()),
+    );
+    body.insert("status".into(), Value::String(status.into()));
+    body.insert("completed_at".into(), Value::String(completed_at.into()));
+    if let Some(executed_by) = executed_by {
+        body.insert("executed_by".into(), Value::String(executed_by.to_string()));
+    }
+
+    if let Some(res) = result {
+        body.insert("result".into(), res.clone());
+    }
+    body.insert(
+        "error".into(),
+        error
+            .as_ref()
+            .map(|e| Value::String(e.clone()))
+            .unwrap_or(Value::Null),
+    );
+
+    debug!(url = %url, body = ?body, "reporting result with retry");
+
+    let client = Client::new();
+    let config = RetryConfig::default();
+    let resp =
+        signed_post_with_retry(&client, &url, agent_id, token_provider, &body, &config).await?;
+    let status_code = resp.status();
+
+    if status_code.is_success() {
+        debug!(status_code = %status_code.as_u16(), "command result reported successfully");
+        Ok(())
+    } else {
+        let error_body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read body>".to_string());
+        Err(anyhow!(
+            "report failed: {} | body: {}",
+            status_code,
+            error_body
+        ))
+    }
+}
+
+/// Update app status with automatic token refresh on 401/403.
+pub async fn update_app_status_with_retry<T: Serialize>(
+    base_url: &str,
+    agent_id: &str,
+    token_provider: &TokenProvider,
+    payload: &T,
+) -> Result<()> {
+    let url = format!("{}/api/v1/apps/status", base_url);
+    let client = Client::new();
+    let config = RetryConfig::default();
+    let resp =
+        signed_post_with_retry(&client, &url, agent_id, token_provider, payload, &config).await?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "app status update failed: {}",
+            resp.status()
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +583,7 @@ mod tests {
         let result: Option<serde_json::Value> = None;
         let error = None;
         let completed_at = "2023-11-15T10:00:00Z";
+        let executed_by = Some("compose_agent");
 
         let mut payload = serde_json::Map::new();
         payload.insert(
@@ -470,6 +601,10 @@ mod tests {
         payload.insert(
             "completed_at".to_string(),
             serde_json::Value::String(completed_at.to_string()),
+        );
+        payload.insert(
+            "executed_by".to_string(),
+            serde_json::Value::String(executed_by.unwrap().to_string()),
         );
         if let Some(value) = result.clone() {
             payload.insert("result".to_string(), value);
@@ -505,9 +640,89 @@ mod tests {
             &result,
             &error,
             completed_at,
+            executed_by,
         )
         .await
         .expect("report_result should succeed");
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn report_result_with_retry_posts_executed_by() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        env::set_var(TS_OVERRIDE_ENV, "1700000000");
+        env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-123-retry");
+
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+        let agent_id = "agent-123";
+        let agent_token = "token-abc";
+        let token_provider =
+            TokenProvider::new(agent_token.to_string(), None, "dep-hash-123".into());
+        let command_id = "cmd-1";
+        let deployment_hash = "dep-hash-123";
+        let status = "success";
+        let result: Option<serde_json::Value> = None;
+        let error = None;
+        let completed_at = "2023-11-15T10:00:00Z";
+        let executed_by = Some("compose_agent");
+
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "command_id".into(),
+            serde_json::Value::String(command_id.to_string()),
+        );
+        payload.insert(
+            "deployment_hash".into(),
+            serde_json::Value::String(deployment_hash.to_string()),
+        );
+        payload.insert(
+            "status".into(),
+            serde_json::Value::String(status.to_string()),
+        );
+        payload.insert(
+            "completed_at".into(),
+            serde_json::Value::String(completed_at.to_string()),
+        );
+        payload.insert(
+            "executed_by".into(),
+            serde_json::Value::String(executed_by.unwrap().to_string()),
+        );
+        payload.insert("error".into(), serde_json::Value::Null);
+
+        let body = serde_json::to_vec(&payload).unwrap();
+        let signature = compute_signature_base64(agent_token, &body);
+        let ts = env::var(TS_OVERRIDE_ENV).unwrap();
+        let req_id = env::var(REQUEST_ID_OVERRIDE_ENV).unwrap();
+        let mock = server
+            .mock("POST", "/api/v1/agent/commands/report")
+            .match_header("X-Agent-Id", Matcher::Exact(agent_id.into()))
+            .match_header(
+                "Authorization",
+                Matcher::Exact(format!("Bearer {}", agent_token)),
+            )
+            .match_header("X-Timestamp", Matcher::Exact(ts))
+            .match_header("X-Request-Id", Matcher::Exact(req_id))
+            .match_header("X-Agent-Signature", Matcher::Exact(signature))
+            .match_body(Matcher::Exact(String::from_utf8(body).unwrap()))
+            .with_status(200)
+            .create_async()
+            .await;
+
+        report_result_with_retry(
+            &base_url,
+            agent_id,
+            &token_provider,
+            command_id,
+            deployment_hash,
+            status,
+            &result,
+            &error,
+            completed_at,
+            executed_by,
+        )
+        .await
+        .expect("report_result_with_retry should succeed");
         mock.assert();
     }
 
