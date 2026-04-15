@@ -1,3 +1,4 @@
+pub mod grpc_client;
 pub mod http_polling;
 pub mod retry;
 pub mod websocket;

@@ -2138,7 +2138,23 @@ async fn handle_trigger_pipe(
 
     let send_result = match target_mode {
         "external" => {
-            send_trigger_pipe_request(&target_value, &data.target_method, &mapped_data).await
+            if target_value.starts_with("ws://") || target_value.starts_with("wss://") {
+                crate::transport::websocket::ws_send_target(&target_value, &mapped_data)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            } else if target_value.starts_with("grpc://") {
+                let grpc_endpoint = target_value.replacen("grpc://", "http://", 1);
+                crate::transport::grpc_client::grpc_send_target(
+                    &grpc_endpoint,
+                    &data.pipe_instance_id,
+                    "",
+                    &mapped_data,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(e))
+            } else {
+                send_trigger_pipe_request(&target_value, &data.target_method, &mapped_data).await
+            }
         }
         "container" => {
             send_trigger_pipe_container_request(
