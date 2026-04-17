@@ -196,6 +196,130 @@ mod trigger_pipe_handler_tests {
             Some("trigger_pipe requires input_data or source_container")
         );
     }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_routes_ws_target() {
+        // Use a port that is not listening so the WS connection fails fast
+        let agent_cmd = make_trigger_agent_command();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-ws-1".into(),
+            input_data: Some(json!({ "key": "value" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some("ws://127.0.0.1:19999".into()),
+            target_container: None,
+            target_endpoint: "/ws-target".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data)
+            .await
+            .expect("trigger_pipe should return structured result");
+
+        // WS connection will fail (nothing listening), so we expect a failed status
+        assert_eq!(result.status, "failed");
+        let error = result.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("WebSocket") || error.contains("Connection refused"),
+            "expected WS connection error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_routes_grpc_target() {
+        let agent_cmd = make_trigger_agent_command();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-grpc-1".into(),
+            input_data: Some(json!({ "key": "value" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some("grpc://127.0.0.1:19998".into()),
+            target_container: None,
+            target_endpoint: "/grpc-target".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data)
+            .await
+            .expect("trigger_pipe should return structured result");
+
+        // gRPC connection will fail (nothing listening), so we expect a failed status
+        assert_eq!(result.status, "failed");
+        let error = result.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("gRPC") || error.contains("connection") || error.contains("connect"),
+            "expected gRPC connection error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_routes_grpcs_target() {
+        let agent_cmd = make_trigger_agent_command();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-grpcs-1".into(),
+            input_data: Some(json!({ "key": "value" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some("grpcs://127.0.0.1:19997".into()),
+            target_container: None,
+            target_endpoint: "/".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data)
+            .await
+            .expect("trigger_pipe should return structured result");
+
+        // grpcs:// should be routed to gRPC transport (fails on connect)
+        assert_eq!(result.status, "failed");
+        let error = result.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("gRPC") || error.contains("connection") || error.contains("connect"),
+            "expected gRPC connection error for grpcs://, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_grpc_rejects_empty_pipe_instance_id() {
+        let agent_cmd = make_trigger_agent_command();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "".into(),
+            input_data: Some(json!({ "key": "value" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some("grpc://127.0.0.1:19996".into()),
+            target_container: None,
+            target_endpoint: "/".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data)
+            .await
+            .expect("trigger_pipe should return structured result");
+
+        assert_eq!(result.status, "failed");
+        let error = result.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("non-empty"),
+            "expected empty step_id error, got: {error}"
+        );
+    }
 }
 
 impl std::fmt::Display for ContainerRuntime {
@@ -2142,16 +2266,27 @@ async fn handle_trigger_pipe(
                 crate::transport::websocket::ws_send_target(&target_value, &mapped_data)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))
-            } else if target_value.starts_with("grpc://") {
-                let grpc_endpoint = target_value.replacen("grpc://", "http://", 1);
-                crate::transport::grpc_client::grpc_send_target(
-                    &grpc_endpoint,
-                    &data.pipe_instance_id,
-                    "",
-                    &mapped_data,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
+            } else if target_value.starts_with("grpc://") || target_value.starts_with("grpcs://") {
+                let grpc_endpoint = if target_value.starts_with("grpcs://") {
+                    target_value.replacen("grpcs://", "https://", 1)
+                } else {
+                    target_value.replacen("grpc://", "http://", 1)
+                };
+                let step_id = data.pipe_instance_id.trim();
+                if step_id.is_empty() {
+                    Err(anyhow::anyhow!(
+                        "trigger_pipe gRPC target requires a non-empty pipe_instance_id for step_id"
+                    ))
+                } else {
+                    crate::transport::grpc_client::grpc_send_target(
+                        &grpc_endpoint,
+                        &data.pipe_instance_id,
+                        step_id,
+                        &mapped_data,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+                }
             } else {
                 send_trigger_pipe_request(&target_value, &data.target_method, &mapped_data).await
             }

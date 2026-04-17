@@ -27,7 +27,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde_yaml = "0.9"
 futures-util = "0.3"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 prost-types = "0.13"

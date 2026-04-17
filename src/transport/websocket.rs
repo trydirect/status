@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
+
+const WS_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Connect to a WebSocket endpoint and read the first message as pipe source data.
 pub async fn ws_fetch_source(url: &str) -> Result<Value> {
@@ -11,24 +14,49 @@ pub async fn ws_fetch_source(url: &str) -> Result<Value> {
         .await
         .with_context(|| format!("WebSocket connection failed: {url}"))?;
 
-    let (_write, mut read) = ws_stream.split();
+    let (mut write, mut read) = ws_stream.split();
 
-    match read.next().await {
-        Some(Ok(Message::Text(text))) => {
-            debug!(len = text.len(), "ws_fetch_source: received text");
-            serde_json::from_str::<Value>(&text)
-                .with_context(|| "ws_fetch_source: failed to parse JSON")
+    loop {
+        let msg = tokio::time::timeout(WS_READ_TIMEOUT, read.next())
+            .await
+            .with_context(|| format!("ws_fetch_source: timed out after {WS_READ_TIMEOUT:?}"))?;
+
+        match msg {
+            Some(Ok(Message::Text(text))) => {
+                debug!(len = text.len(), "ws_fetch_source: received text");
+                return serde_json::from_str::<Value>(&text)
+                    .with_context(|| "ws_fetch_source: failed to parse JSON");
+            }
+            Some(Ok(Message::Binary(bin))) => {
+                debug!(len = bin.len(), "ws_fetch_source: received binary");
+                return serde_json::from_slice::<Value>(&bin)
+                    .with_context(|| "ws_fetch_source: failed to parse binary JSON");
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                debug!(len = payload.len(), "ws_fetch_source: received ping");
+                write
+                    .send(Message::Pong(payload))
+                    .await
+                    .with_context(|| "ws_fetch_source: failed to send pong")?;
+            }
+            Some(Ok(Message::Pong(_))) => {
+                debug!("ws_fetch_source: received pong, ignoring");
+            }
+            Some(Ok(Message::Close(frame))) => {
+                return Err(anyhow::anyhow!(
+                    "ws_fetch_source: stream closed before data: {frame:?}"
+                ));
+            }
+            Some(Ok(other)) => {
+                debug!(message = %other, "ws_fetch_source: ignoring non-data frame");
+            }
+            Some(Err(e)) => return Err(anyhow::anyhow!("ws_fetch_source read error: {e}")),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "ws_fetch_source: stream closed without data"
+                ))
+            }
         }
-        Some(Ok(Message::Binary(bin))) => {
-            debug!(len = bin.len(), "ws_fetch_source: received binary");
-            serde_json::from_slice::<Value>(&bin)
-                .with_context(|| "ws_fetch_source: failed to parse binary JSON")
-        }
-        Some(Ok(other)) => Ok(serde_json::json!({ "raw": other.to_string() })),
-        Some(Err(e)) => Err(anyhow::anyhow!("ws_fetch_source read error: {e}")),
-        None => Err(anyhow::anyhow!(
-            "ws_fetch_source: stream closed without data"
-        )),
     }
 }
 
@@ -45,7 +73,7 @@ pub async fn ws_send_target(url: &str, data: &Value) -> Result<(u16, Value)> {
         serde_json::to_string(data).with_context(|| "ws_send_target: failed to serialize")?;
 
     write
-        .send(Message::Text(payload))
+        .send(Message::Text(payload.into()))
         .await
         .with_context(|| "ws_send_target: failed to send")?;
 
@@ -61,18 +89,25 @@ pub async fn connect_and_stream(ws_url: &str) -> Result<()> {
         .await
         .with_context(|| format!("WebSocket streaming connection failed: {ws_url}"))?;
 
-    let (_write, mut read) = ws_stream.split();
+    let (mut write, mut read) = ws_stream.split();
 
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
                 debug!(len = text.len(), "stream message received");
             }
-            Ok(Message::Ping(_)) => {
-                debug!("stream ping received");
+            Ok(Message::Ping(payload)) => {
+                debug!(len = payload.len(), "stream ping received");
+                if let Err(e) = write.send(Message::Pong(payload)).await {
+                    warn!(error = %e, "failed to send pong");
+                    break;
+                }
             }
-            Ok(Message::Close(_)) => {
+            Ok(Message::Close(frame)) => {
                 info!("stream closed by server");
+                if let Err(e) = write.send(Message::Close(frame)).await {
+                    warn!(error = %e, "failed to acknowledge close frame");
+                }
                 break;
             }
             Err(e) => {

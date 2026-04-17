@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::time::Duration;
 use tracing::info;
 
 pub mod pipe_proto {
@@ -9,6 +10,9 @@ pub mod pipe_proto {
 use pipe_proto::pipe_service_client::PipeServiceClient;
 use pipe_proto::{PipeMessage, SubscribeRequest};
 
+const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Subscribe to a gRPC pipe source and read the first message.
 pub async fn grpc_fetch_source(
     endpoint: &str,
@@ -16,9 +20,15 @@ pub async fn grpc_fetch_source(
     step_id: &str,
 ) -> Result<Value> {
     info!(endpoint, "grpc_fetch_source: connecting");
-    let mut client = PipeServiceClient::connect(endpoint.to_string())
+    let channel = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+        .with_context(|| format!("invalid gRPC endpoint: {endpoint}"))?
+        .connect_timeout(GRPC_CONNECT_TIMEOUT)
+        .timeout(GRPC_REQUEST_TIMEOUT)
+        .connect()
         .await
         .with_context(|| format!("gRPC connection failed: {endpoint}"))?;
+
+    let mut client = PipeServiceClient::new(channel);
 
     let request = tonic::Request::new(SubscribeRequest {
         pipe_instance_id: pipe_instance_id.to_string(),
@@ -53,11 +63,18 @@ pub async fn grpc_send_target(
     data: &Value,
 ) -> Result<(u16, Value)> {
     info!(endpoint, "grpc_send_target: connecting");
-    let mut client = PipeServiceClient::connect(endpoint.to_string())
+    let channel = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+        .with_context(|| format!("invalid gRPC endpoint: {endpoint}"))?
+        .connect_timeout(GRPC_CONNECT_TIMEOUT)
+        .timeout(GRPC_REQUEST_TIMEOUT)
+        .connect()
         .await
         .with_context(|| format!("gRPC connection failed: {endpoint}"))?;
 
-    let payload_struct = json_to_struct(data);
+    let mut client = PipeServiceClient::new(channel);
+
+    let payload_struct =
+        json_to_struct(data).with_context(|| "failed to convert payload to gRPC Struct")?;
 
     let request = tonic::Request::new(PipeMessage {
         pipe_instance_id: pipe_instance_id.to_string(),
@@ -84,30 +101,45 @@ pub async fn grpc_send_target(
 
 // ── Conversion helpers: serde_json ↔ prost_types::Struct ──
 
-fn json_to_struct(value: &Value) -> prost_types::Struct {
+fn json_to_struct(value: &Value) -> Result<prost_types::Struct> {
     let fields = match value.as_object() {
         Some(map) => map
             .iter()
-            .map(|(k, v)| (k.clone(), json_to_prost_value(v)))
-            .collect(),
-        None => Default::default(),
+            .map(|(k, v)| Ok((k.clone(), json_to_prost_value(v)?)))
+            .collect::<Result<_>>()?,
+        None => {
+            return Err(anyhow::anyhow!(
+                "gRPC Struct conversion requires a JSON object, got: {}",
+                match value {
+                    Value::Array(_) => "array",
+                    Value::String(_) => "string",
+                    Value::Number(_) => "number",
+                    Value::Bool(_) => "bool",
+                    Value::Null => "null",
+                    _ => "unknown",
+                }
+            ));
+        }
     };
-    prost_types::Struct { fields }
+    Ok(prost_types::Struct { fields })
 }
 
-fn json_to_prost_value(value: &Value) -> prost_types::Value {
+fn json_to_prost_value(value: &Value) -> Result<prost_types::Value> {
     use prost_types::value::Kind;
     let kind = match value {
         Value::Null => Kind::NullValue(0),
         Value::Bool(b) => Kind::BoolValue(*b),
-        Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(0.0)),
+        Value::Number(n) => Kind::NumberValue(
+            n.as_f64()
+                .ok_or_else(|| anyhow::anyhow!("number {n} cannot be represented as f64"))?,
+        ),
         Value::String(s) => Kind::StringValue(s.clone()),
         Value::Array(arr) => Kind::ListValue(prost_types::ListValue {
-            values: arr.iter().map(json_to_prost_value).collect(),
+            values: arr.iter().map(json_to_prost_value).collect::<Result<_>>()?,
         }),
-        Value::Object(_) => Kind::StructValue(json_to_struct(value)),
+        Value::Object(_) => Kind::StructValue(json_to_struct(value)?),
     };
-    prost_types::Value { kind: Some(kind) }
+    Ok(prost_types::Value { kind: Some(kind) })
 }
 
 fn struct_to_json(s: &prost_types::Struct) -> Value {
@@ -141,10 +173,18 @@ mod tests {
     #[test]
     fn test_json_struct_roundtrip() {
         let original = serde_json::json!({"name": "test", "count": 42, "active": true});
-        let proto = json_to_struct(&original);
+        let proto = json_to_struct(&original).unwrap();
         let back = struct_to_json(&proto);
         assert_eq!(back["name"], "test");
         assert_eq!(back["count"], 42.0);
         assert_eq!(back["active"], true);
+    }
+
+    #[test]
+    fn test_json_to_struct_rejects_non_object() {
+        assert!(json_to_struct(&serde_json::json!("string")).is_err());
+        assert!(json_to_struct(&serde_json::json!(42)).is_err());
+        assert!(json_to_struct(&serde_json::json!([1, 2])).is_err());
+        assert!(json_to_struct(&serde_json::json!(null)).is_err());
     }
 }
