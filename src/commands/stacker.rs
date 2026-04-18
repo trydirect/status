@@ -186,11 +186,8 @@ mod trigger_pipe_handler_tests {
     #[test]
     fn given_http_target_response_when_delivery_succeeds_then_report_includes_transport_and_delivery_status(
     ) {
-        let response = build_trigger_pipe_target_response(
-            "http",
-            Some(202),
-            json!({"accepted": true}),
-        );
+        let response =
+            build_trigger_pipe_target_response("http", Some(202), json!({"accepted": true}));
 
         assert_eq!(response["transport"], "http");
         assert_eq!(response["status"], 202);
@@ -214,7 +211,10 @@ mod trigger_pipe_handler_tests {
             pipe_source_worker_kind("rabbitmq"),
             Some(PipeSourceWorkerKind::Amqp)
         );
-        assert_eq!(pipe_source_worker_kind("amqp"), Some(PipeSourceWorkerKind::Amqp));
+        assert_eq!(
+            pipe_source_worker_kind("amqp"),
+            Some(PipeSourceWorkerKind::Amqp)
+        );
     }
 
     #[tokio::test]
@@ -2852,11 +2852,7 @@ fn trigger_pipe_target_transport(target_mode: &str, target_value: &str) -> &'sta
     }
 }
 
-fn build_trigger_pipe_target_response(
-    transport: &str,
-    status: Option<u16>,
-    body: Value,
-) -> Value {
+fn build_trigger_pipe_target_response(transport: &str, status: Option<u16>, body: Value) -> Value {
     json!({
         "transport": transport,
         "status": status,
@@ -3386,13 +3382,14 @@ async fn run_amqp_source_worker(
                             while let Some(delivery) = consumer.next().await {
                                 match delivery {
                                     Ok(delivery) => {
-                                        let payload = serde_json::from_slice::<Value>(&delivery.data)
-                                            .unwrap_or_else(|_| {
-                                                Value::String(
-                                                    String::from_utf8_lossy(&delivery.data)
-                                                        .to_string(),
-                                                )
-                                            });
+                                        let payload =
+                                            serde_json::from_slice::<Value>(&delivery.data)
+                                                .unwrap_or_else(|_| {
+                                                    Value::String(
+                                                        String::from_utf8_lossy(&delivery.data)
+                                                            .to_string(),
+                                                    )
+                                                });
                                         if let Err(error) = runtime
                                             .trigger_registered_payload(
                                                 &key.deployment_hash,
