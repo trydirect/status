@@ -16,7 +16,7 @@ pub use deploy::{
 pub use docker_executor::execute_docker_operation;
 pub use docker_ops::DockerOperation;
 pub use self_update::{get_update_status, start_update_job, UpdateJobs, UpdatePhase, UpdateStatus};
-pub use stacker::{execute_stacker_command, parse_stacker_command, StackerCommand};
+pub use stacker::{execute_stacker_command, parse_stacker_command, PipeRuntime, StackerCommand};
 pub use timeout::{TimeoutPhase, TimeoutStrategy, TimeoutTracker};
 pub use validator::{CommandValidator, ValidatorConfig};
 pub use version_check::check_remote_version;

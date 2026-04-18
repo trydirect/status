@@ -3,6 +3,7 @@ use axum::{body::Body, Router};
 use base64::{engine::general_purpose, Engine};
 use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
+use mockito::{Matcher, Server};
 use serde_json::json;
 use sha2::Sha256;
 use status_panel::agent::config::{Config, ReqData};
@@ -250,4 +251,228 @@ async fn wait_can_require_signature() {
         .unwrap();
     // No commands queued -> 204 No Content
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn given_signed_local_wait_request_when_queue_is_empty_then_local_wait_returns_no_content() {
+    let _g = lock_tests();
+    std::env::set_var("WAIT_REQUIRE_SIGNATURE", "true");
+    let app = router_with_env("agent-1", "secret-token", "commands:wait");
+
+    let ts = format!("{}", chrono::Utc::now().timestamp());
+    let rid = Uuid::new_v4().to_string();
+    let sig = sign_b64("secret-token", b"");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/commands/wait/session?timeout=1")
+                .header("X-Agent-Id", "agent-1")
+                .header("X-Timestamp", ts)
+                .header("X-Request-Id", rid)
+                .header("X-Agent-Signature", sig)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn given_registered_webhook_pipe_when_signed_webhook_arrives_then_payload_is_forwarded_to_target()
+{
+    let _g = lock_tests();
+    let mut server = Server::new_async().await;
+    let target = server
+        .mock("POST", "/pipe-target")
+        .match_body(Matcher::Exact(r#"{"email":"webhook@try.direct"}"#.into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"accepted":true}"#)
+        .create_async()
+        .await;
+
+    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+
+    let (activate_status, _) = post_with_sig(
+        &app,
+        "/api/v1/commands/execute",
+        "agent-1",
+        "secret-token",
+        json!({
+            "id": "cmd-activate-webhook",
+            "command_id": "cmd-activate-webhook",
+            "name": "activate_pipe",
+            "params": {
+                "deployment_hash": "dep-webhook",
+                "pipe_instance_id": "pipe-webhook-1",
+                "target_url": server.url(),
+                "target_endpoint": "/pipe-target",
+                "target_method": "POST",
+                "field_mapping": { "email": "$.user.email" },
+                "trigger_type": "webhook"
+            }
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(activate_status, StatusCode::OK);
+
+    let (webhook_status, webhook_body) = post_with_sig(
+        &app,
+        "/api/v1/pipes/webhook/dep-webhook/pipe-webhook-1",
+        "agent-1",
+        "secret-token",
+        json!({
+            "user": {
+                "email": "webhook@try.direct"
+            }
+        }),
+        None,
+    )
+    .await;
+
+    assert_eq!(webhook_status, StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(&webhook_body).unwrap();
+    assert_eq!(payload["status"], "success");
+    assert_eq!(payload["result"]["target_response"]["transport"], "http");
+    assert_eq!(payload["result"]["target_response"]["delivered"], true);
+    target.assert_async().await;
+}
+
+#[tokio::test]
+async fn given_registered_manual_pipe_when_it_is_triggered_and_deactivated_then_follow_up_trigger_fails_cleanly(
+) {
+    let _g = lock_tests();
+    let mut server = Server::new_async().await;
+    let target = server
+        .mock("POST", "/pipe-target")
+        .match_body(Matcher::Exact(r#"{"email":"manual@try.direct"}"#.into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"accepted":true}"#)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+
+    let (activate_status, activate_body) = post_with_sig(
+        &app,
+        "/api/v1/commands/execute",
+        "agent-1",
+        "secret-token",
+        json!({
+            "id": "cmd-activate-manual",
+            "command_id": "cmd-activate-manual",
+            "name": "activate_pipe",
+            "params": {
+                "deployment_hash": "dep-manual",
+                "pipe_instance_id": "pipe-manual-1",
+                "target_url": server.url(),
+                "target_endpoint": "/pipe-target",
+                "target_method": "POST",
+                "field_mapping": { "email": "$.user.email" },
+                "trigger_type": "manual"
+            }
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(activate_status, StatusCode::OK);
+    let activate_payload: serde_json::Value = serde_json::from_slice(&activate_body).unwrap();
+    assert_eq!(activate_payload["status"], "success");
+    assert_eq!(activate_payload["result"]["active"], true);
+    assert_eq!(activate_payload["result"]["lifecycle"]["state"], "active");
+
+    let (trigger_status, trigger_body) = post_with_sig(
+        &app,
+        "/api/v1/commands/execute",
+        "agent-1",
+        "secret-token",
+        json!({
+            "id": "cmd-trigger-manual",
+            "command_id": "cmd-trigger-manual",
+            "name": "trigger_pipe",
+            "params": {
+                "deployment_hash": "dep-manual",
+                "pipe_instance_id": "pipe-manual-1",
+                "input_data": {
+                    "user": {
+                        "email": "manual@try.direct"
+                    }
+                }
+            }
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(trigger_status, StatusCode::OK);
+    let trigger_payload: serde_json::Value = serde_json::from_slice(&trigger_body).unwrap();
+    assert_eq!(trigger_payload["status"], "success");
+    assert_eq!(trigger_payload["result"]["success"], true);
+    assert_eq!(trigger_payload["result"]["target_response"]["transport"], "http");
+    assert_eq!(trigger_payload["result"]["target_response"]["delivered"], true);
+    assert_eq!(trigger_payload["result"]["lifecycle"]["state"], "active");
+    assert_eq!(trigger_payload["result"]["lifecycle"]["trigger_count"], 1);
+
+    let (deactivate_status, deactivate_body) = post_with_sig(
+        &app,
+        "/api/v1/commands/execute",
+        "agent-1",
+        "secret-token",
+        json!({
+            "id": "cmd-deactivate-manual",
+            "command_id": "cmd-deactivate-manual",
+            "name": "deactivate_pipe",
+            "params": {
+                "deployment_hash": "dep-manual",
+                "pipe_instance_id": "pipe-manual-1"
+            }
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(deactivate_status, StatusCode::OK);
+    let deactivate_payload: serde_json::Value = serde_json::from_slice(&deactivate_body).unwrap();
+    assert_eq!(deactivate_payload["status"], "success");
+    assert_eq!(deactivate_payload["result"]["active"], false);
+    assert_eq!(deactivate_payload["result"]["lifecycle"]["state"], "inactive");
+
+    let (follow_up_status, follow_up_body) = post_with_sig(
+        &app,
+        "/api/v1/commands/execute",
+        "agent-1",
+        "secret-token",
+        json!({
+            "id": "cmd-trigger-after-deactivate",
+            "command_id": "cmd-trigger-after-deactivate",
+            "name": "trigger_pipe",
+            "params": {
+                "deployment_hash": "dep-manual",
+                "pipe_instance_id": "pipe-manual-1",
+                "input_data": {
+                    "user": {
+                        "email": "manual@try.direct"
+                    }
+                }
+            }
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(follow_up_status, StatusCode::OK);
+    let follow_up_payload: serde_json::Value = serde_json::from_slice(&follow_up_body).unwrap();
+    assert_eq!(follow_up_payload["status"], "failed");
+    assert_eq!(follow_up_payload["result"]["success"], false);
+    assert_eq!(
+        follow_up_payload["result"]["error"],
+        "trigger_pipe requires target_url or target_container"
+    );
+    assert_eq!(follow_up_payload["result"]["lifecycle"]["state"], "failed");
+
+    target.assert_async().await;
 }

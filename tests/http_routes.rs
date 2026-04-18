@@ -85,6 +85,33 @@ async fn test_capabilities_endpoint() {
 }
 
 #[tokio::test]
+async fn given_capabilities_request_when_agent_supports_pipe_runtime_then_pipe_features_are_advertised(
+) {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body_bytes).unwrap();
+    let features = value["features"].as_array().expect("features array");
+
+    assert!(features.contains(&Value::String("pipes".to_string())));
+    assert!(features.contains(&Value::String("activate_pipe".to_string())));
+    assert!(features.contains(&Value::String("deactivate_pipe".to_string())));
+    assert!(features.contains(&Value::String("trigger_pipe".to_string())));
+}
+
+#[tokio::test]
 async fn test_login_page_get() {
     let app = test_router();
 

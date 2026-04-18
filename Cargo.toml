@@ -31,6 +31,7 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 prost-types = "0.13"
+lapin = "2"
 tera = "1"
 tower-http = { version = "0.6", features = ["fs"] }
 base64 = "0.22"
