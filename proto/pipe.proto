@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package pipe;
+
+import "google/protobuf/struct.proto";
+
+service PipeService {
+  // Send data to a pipe target (unary)
+  rpc Send(PipeMessage) returns (PipeResponse);
+
+  // Subscribe to a pipe source (server-streaming)
+  rpc Subscribe(SubscribeRequest) returns (stream PipeMessage);
+}
+
+message PipeMessage {
+  string pipe_instance_id = 1;
+  string step_id = 2;
+  google.protobuf.Struct payload = 3;
+  int64 timestamp_ms = 4;
+}
+
+message PipeResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SubscribeRequest {
+  string pipe_instance_id = 1;
+  string step_id = 2;
+  map<string, string> filters = 3;
+}
