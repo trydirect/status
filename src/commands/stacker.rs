@@ -806,7 +806,7 @@ pub struct ActivatePipeCommand {
     target_method: String,
     #[serde(default)]
     field_mapping: Option<Value>,
-    #[serde(default = "default_pipe_trigger_type")]
+    #[serde(default = "default_activate_pipe_trigger_type")]
     trigger_type: String,
 }
 
@@ -868,6 +868,10 @@ fn normalize_trigger_pipe_method(method: &str, default_method: &str) -> String {
         "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" => normalized,
         _ => default_method.to_string(),
     }
+}
+
+fn default_activate_pipe_trigger_type() -> String {
+    "webhook".to_string()
 }
 
 fn default_pipe_trigger_type() -> String {
@@ -2027,7 +2031,7 @@ impl ActivatePipeCommand {
             normalize_trigger_pipe_method(&self.target_method, &default_pipe_target_method());
         self.trigger_type = trimmed(&self.trigger_type).to_lowercase();
         if self.trigger_type.is_empty() {
-            self.trigger_type = default_pipe_trigger_type();
+            self.trigger_type = default_activate_pipe_trigger_type();
         }
         self
     }
@@ -7218,6 +7222,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn fixture(path: &str) -> Value {
+        let body = match path {
+            "activate_pipe.webhook.command.json" => include_str!(
+                "../../../shared-fixtures/pipe-contract/activate_pipe.webhook.command.json"
+            ),
+            "activate_pipe.rabbitmq.command.json" => include_str!(
+                "../../../shared-fixtures/pipe-contract/activate_pipe.rabbitmq.command.json"
+            ),
+            "deactivate_pipe.command.json" => {
+                include_str!("../../../shared-fixtures/pipe-contract/deactivate_pipe.command.json")
+            }
+            "trigger_pipe.manual.command.json" => include_str!(
+                "../../../shared-fixtures/pipe-contract/trigger_pipe.manual.command.json"
+            ),
+            "trigger_pipe.replay.command.json" => include_str!(
+                "../../../shared-fixtures/pipe-contract/trigger_pipe.replay.command.json"
+            ),
+            other => panic!("unknown fixture: {}", other),
+        };
+
+        serde_json::from_str(body).expect("fixture should be valid json")
+    }
+
     macro_rules! stacker_test {
         ($name:ident, $cmd_name:expr, $payload:expr, $variant:path) => {
             #[test]
@@ -7237,6 +7264,115 @@ mod tests {
                 }
             }
         };
+    }
+
+    #[test]
+    fn parses_activate_pipe_shared_webhook_fixture() {
+        let cmd = AgentCommand {
+            id: "cmd-activate-fixture".into(),
+            command_id: "cmd-activate-fixture".into(),
+            name: "activate_pipe".into(),
+            params: json!({ "params": fixture("activate_pipe.webhook.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(data.source_container.as_deref(), Some("source-app"));
+                assert_eq!(data.trigger_type, "webhook");
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_activate_pipe_shared_rabbitmq_fixture() {
+        let cmd = AgentCommand {
+            id: "cmd-activate-rabbit-fixture".into(),
+            command_id: "cmd-activate-rabbit-fixture".into(),
+            name: "activate_pipe".into(),
+            params: json!({ "params": fixture("activate_pipe.rabbitmq.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(data.trigger_type, "rabbitmq");
+                assert_eq!(data.source_queue.as_deref(), Some("events.queue"));
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_deactivate_pipe_shared_fixture() {
+        let cmd = AgentCommand {
+            id: "cmd-deactivate-fixture".into(),
+            command_id: "cmd-deactivate-fixture".into(),
+            name: "deactivate_pipe".into(),
+            params: json!({ "params": fixture("deactivate_pipe.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::DeactivatePipe(data)) => {
+                assert_eq!(
+                    data.pipe_instance_id,
+                    "11111111-1111-1111-1111-111111111111"
+                );
+            }
+            other => panic!("Expected DeactivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_trigger_pipe_shared_manual_fixture() {
+        let cmd = AgentCommand {
+            id: "cmd-trigger-fixture".into(),
+            command_id: "cmd-trigger-fixture".into(),
+            name: "trigger_pipe".into(),
+            params: json!({ "params": fixture("trigger_pipe.manual.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.trigger_type, "manual");
+                assert_eq!(data.target_url.as_deref(), Some("https://example.com"));
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_trigger_pipe_shared_replay_fixture() {
+        let cmd = AgentCommand {
+            id: "cmd-trigger-replay-fixture".into(),
+            command_id: "cmd-trigger-replay-fixture".into(),
+            name: "trigger_pipe".into(),
+            params: json!({ "params": fixture("trigger_pipe.replay.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.trigger_type, "replay");
+                assert_eq!(data.input_data, Some(json!({ "invoice_id": "inv-replay" })));
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
     }
 
     stacker_test!(
@@ -7397,6 +7533,32 @@ mod tests {
         }),
         StackerCommand::ActivatePipe
     );
+
+    #[test]
+    fn activate_pipe_defaults_trigger_type_to_webhook() {
+        let cmd = AgentCommand {
+            id: "cmd-activate-default".into(),
+            command_id: "cmd-activate-default".into(),
+            name: "activate_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "target_url": "https://example.com"
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.trigger_type, "webhook");
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
     stacker_test!(
         parses_deactivate_pipe_command,
         "deactivate_pipe",
