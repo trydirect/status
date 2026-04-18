@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
                 info!("Starting local API server on port {port}");
             }
             let config = agent::config::Config::from_file(&args.config)?;
-            comms::local_api::serve(config, port, with_ui).await?;
+            comms::local_api::serve(config, &args.config, port, with_ui).await?;
         }
         #[cfg(feature = "docker")]
         Some(Commands::Containers) => {

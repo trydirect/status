@@ -24,6 +24,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Fetch shared pipe fixtures
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/../config" "${GITHUB_WORKSPACE}/../shared-fixtures"
+          git clone --depth 1 --branch main https://github.com/trydirect/config.git "${GITHUB_WORKSPACE}/../config"
+          ln -sfn "${GITHUB_WORKSPACE}/../config/shared-fixtures" "${GITHUB_WORKSPACE}/../shared-fixtures"
+          test -d "${GITHUB_WORKSPACE}/../shared-fixtures/pipe-contract"
 
       - name: Setup Rust toolchain (${{ matrix.rust }})
         uses: dtolnay/rust-toolchain@stable
@@ -94,6 +100,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Fetch shared pipe fixtures
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/../config" "${GITHUB_WORKSPACE}/../shared-fixtures"
+          git clone --depth 1 --branch main https://github.com/trydirect/config.git "${GITHUB_WORKSPACE}/../config"
+          ln -sfn "${GITHUB_WORKSPACE}/../config/shared-fixtures" "${GITHUB_WORKSPACE}/../shared-fixtures"
+          test -d "${GITHUB_WORKSPACE}/../shared-fixtures/pipe-contract"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -182,6 +194,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Fetch shared pipe fixtures
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/../config" "${GITHUB_WORKSPACE}/../shared-fixtures"
+          git clone --depth 1 --branch main https://github.com/trydirect/config.git "${GITHUB_WORKSPACE}/../config"
+          ln -sfn "${GITHUB_WORKSPACE}/../config/shared-fixtures" "${GITHUB_WORKSPACE}/../shared-fixtures"
+          test -d "${GITHUB_WORKSPACE}/../shared-fixtures/pipe-contract"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -213,5 +231,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           file: Dockerfile.prod
+          build-contexts: |
+            shared_fixtures=${{ github.workspace }}/../config/shared-fixtures
           push: true
           tags: ${{ steps.vars.outputs.tags }}

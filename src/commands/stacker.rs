@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 #[cfg(feature = "docker")]
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -878,13 +879,37 @@ fn default_pipe_trigger_type() -> String {
     "manual".to_string()
 }
 
+pub fn default_pipe_runtime_state_path(config_path: Option<&str>) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("PIPE_RUNTIME_STATE_PATH") {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(PathBuf::from(trimmed));
+    }
+
+    if let Some(config_path) = config_path {
+        let config_path = PathBuf::from(config_path);
+        let base_dir = config_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.to_path_buf())
+            .or_else(|| std::env::current_dir().ok());
+        return base_dir.map(|dir| dir.join(".status").join("pipe-runtime-state.json"));
+    }
+
+    std::env::current_dir()
+        .ok()
+        .map(|dir| dir.join(".status").join("pipe-runtime-state.json"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PipeRuntimeKey {
     deployment_hash: String,
     pipe_instance_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum PipeLifecycleState {
     Active,
@@ -892,7 +917,7 @@ enum PipeLifecycleState {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PipeLifecycleSnapshot {
     state: PipeLifecycleState,
     activated_at: String,
@@ -906,7 +931,7 @@ struct PipeLifecycleSnapshot {
     last_updated_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PipeRegistration {
     source_container: Option<String>,
     source_endpoint: String,
@@ -929,6 +954,19 @@ pub struct PipeRuntime {
     registrations: Arc<RwLock<HashMap<PipeRuntimeKey, PipeRegistration>>>,
     lifecycle: Arc<RwLock<HashMap<PipeRuntimeKey, PipeLifecycleSnapshot>>>,
     workers: Arc<RwLock<HashMap<PipeRuntimeKey, AbortHandle>>>,
+    state_path: Arc<RwLock<Option<PathBuf>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedPipeEntry {
+    deployment_hash: String,
+    pipe_instance_id: String,
+    registration: PipeRegistration,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct PersistedPipeRuntime {
+    entries: Vec<PersistedPipeEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -957,18 +995,105 @@ impl PipeRuntime {
         Self::default()
     }
 
+    pub async fn configure_persistence(&self, path: Option<PathBuf>) {
+        let mut state_path = self.state_path.write().await;
+        *state_path = path;
+    }
+
+    pub async fn restore_from_disk(&self) -> Result<usize> {
+        let Some(path) = self.state_path.read().await.clone() else {
+            return Ok(0);
+        };
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        let body = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("reading pipe runtime state from {}", path.display()))?;
+        if body.trim().is_empty() {
+            return Ok(0);
+        }
+
+        let persisted: PersistedPipeRuntime = serde_json::from_str(&body)
+            .with_context(|| format!("parsing pipe runtime state from {}", path.display()))?;
+
+        {
+            let mut registrations = self.registrations.write().await;
+            let mut lifecycle = self.lifecycle.write().await;
+            registrations.clear();
+            lifecycle.clear();
+            for entry in &persisted.entries {
+                let key = PipeRuntimeKey {
+                    deployment_hash: entry.deployment_hash.clone(),
+                    pipe_instance_id: entry.pipe_instance_id.clone(),
+                };
+                registrations.insert(key.clone(), entry.registration.clone());
+                lifecycle.insert(key, entry.registration.lifecycle.clone());
+            }
+        }
+
+        for entry in &persisted.entries {
+            self.spawn_source_worker_if_needed(
+                &entry.deployment_hash,
+                &entry.pipe_instance_id,
+                entry.registration.clone(),
+            )
+            .await;
+        }
+
+        Ok(persisted.entries.len())
+    }
+
+    async fn persist_active_registrations(&self) -> Result<()> {
+        let Some(path) = self.state_path.read().await.clone() else {
+            return Ok(());
+        };
+
+        let registrations = self.registrations.read().await;
+        let persisted = PersistedPipeRuntime {
+            entries: registrations
+                .iter()
+                .map(|(key, registration)| PersistedPipeEntry {
+                    deployment_hash: key.deployment_hash.clone(),
+                    pipe_instance_id: key.pipe_instance_id.clone(),
+                    registration: registration.clone(),
+                })
+                .collect(),
+        };
+        drop(registrations);
+
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating pipe runtime state dir {}", parent.display()))?;
+        }
+
+        let body = serde_json::to_vec_pretty(&persisted).context("serializing pipe runtime")?;
+        tokio::fs::write(&path, body)
+            .await
+            .with_context(|| format!("writing pipe runtime state to {}", path.display()))?;
+        Ok(())
+    }
+
     async fn activate(
         &self,
         key: PipeRuntimeKey,
         registration: PipeRegistration,
     ) -> ActivationResult {
-        let mut registrations = self.registrations.write().await;
-        let mut lifecycle = self.lifecycle.write().await;
-        let previous_lifecycle = lifecycle.get(&key).cloned();
-        let replaced = registrations
-            .insert(key.clone(), registration.clone())
-            .is_some();
-        lifecycle.insert(key, registration.lifecycle.clone());
+        let (replaced, previous_lifecycle) = {
+            let mut registrations = self.registrations.write().await;
+            let mut lifecycle = self.lifecycle.write().await;
+            let previous_lifecycle = lifecycle.get(&key).cloned();
+            let replaced = registrations
+                .insert(key.clone(), registration.clone())
+                .is_some();
+            lifecycle.insert(key, registration.lifecycle.clone());
+            (replaced, previous_lifecycle)
+        };
+        if let Err(error) = self.persist_active_registrations().await {
+            warn!(error = %error, "failed to persist active pipe registrations after activate");
+        }
         ActivationResult {
             replaced,
             registration,
@@ -986,25 +1111,31 @@ impl PipeRuntime {
             deployment_hash: deployment_hash.to_string(),
             pipe_instance_id: pipe_instance_id.to_string(),
         };
-        let mut registrations = self.registrations.write().await;
-        let mut lifecycle = self.lifecycle.write().await;
-        let removed = registrations.remove(&key).is_some();
-        let mut snapshot = lifecycle
-            .get(&key)
-            .cloned()
-            .unwrap_or(PipeLifecycleSnapshot {
-                state: PipeLifecycleState::Inactive,
-                activated_at: deactivated_at.clone(),
-                deactivated_at: None,
-                last_triggered_at: None,
-                last_error: None,
-                trigger_count: 0,
-                last_updated_at: deactivated_at.clone(),
-            });
-        snapshot.state = PipeLifecycleState::Inactive;
-        snapshot.deactivated_at = Some(deactivated_at.clone());
-        snapshot.last_updated_at = deactivated_at;
-        lifecycle.insert(key, snapshot.clone());
+        let (removed, snapshot) = {
+            let mut registrations = self.registrations.write().await;
+            let mut lifecycle = self.lifecycle.write().await;
+            let removed = registrations.remove(&key).is_some();
+            let mut snapshot = lifecycle
+                .get(&key)
+                .cloned()
+                .unwrap_or(PipeLifecycleSnapshot {
+                    state: PipeLifecycleState::Inactive,
+                    activated_at: deactivated_at.clone(),
+                    deactivated_at: None,
+                    last_triggered_at: None,
+                    last_error: None,
+                    trigger_count: 0,
+                    last_updated_at: deactivated_at.clone(),
+                });
+            snapshot.state = PipeLifecycleState::Inactive;
+            snapshot.deactivated_at = Some(deactivated_at.clone());
+            snapshot.last_updated_at = deactivated_at;
+            lifecycle.insert(key, snapshot.clone());
+            (removed, snapshot)
+        };
+        if let Err(error) = self.persist_active_registrations().await {
+            warn!(error = %error, "failed to persist active pipe registrations after deactivate");
+        }
         DeactivationResult {
             removed,
             lifecycle: snapshot,
@@ -1055,6 +1186,9 @@ impl PipeRuntime {
             snapshot.trigger_count += 1;
             snapshot.last_updated_at = triggered_at;
         }
+        if let Err(error) = self.persist_active_registrations().await {
+            warn!(error = %error, "failed to persist active pipe registrations after trigger");
+        }
     }
 
     async fn mark_failed(
@@ -1095,6 +1229,9 @@ impl PipeRuntime {
                 trigger_count: 0,
                 last_updated_at: failed_at,
             });
+        if let Err(error) = self.persist_active_registrations().await {
+            warn!(error = %error, "failed to persist active pipe registrations after failure");
+        }
     }
 
     async fn snapshot(
@@ -7221,6 +7358,7 @@ async fn handle_probe_endpoints(
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::tempdir;
 
     fn fixture(path: &str) -> Value {
         let body = match path {
@@ -7373,6 +7511,185 @@ mod tests {
             }
             other => panic!("Expected TriggerPipe command, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn pipe_runtime_persists_and_restores_active_registration() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("pipe-runtime.json");
+
+        let runtime = PipeRuntime::new();
+        runtime
+            .configure_persistence(Some(state_path.clone()))
+            .await;
+
+        let mut registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-restore".into(),
+            pipe_instance_id: "pipe-restore-1".into(),
+            source_container: Some("source-app".into()),
+            source_endpoint: "/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some("https://example.com".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "webhook".into(),
+        });
+        registration.lifecycle = PipeLifecycleSnapshot::active("2026-01-01T00:00:00Z".into());
+
+        runtime
+            .activate(
+                PipeRuntimeKey {
+                    deployment_hash: "dep-restore".into(),
+                    pipe_instance_id: "pipe-restore-1".into(),
+                },
+                registration,
+            )
+            .await;
+
+        let restored = PipeRuntime::new();
+        restored.configure_persistence(Some(state_path)).await;
+        let count = restored.restore_from_disk().await.unwrap();
+
+        assert_eq!(count, 1);
+        let registration = restored
+            .resolve("dep-restore", "pipe-restore-1")
+            .await
+            .expect("registration should restore");
+        assert_eq!(registration.target_url.as_deref(), Some("https://example.com"));
+        assert_eq!(registration.trigger_type, "webhook");
+
+        let snapshot = restored
+            .snapshot("dep-restore", "pipe-restore-1")
+            .await
+            .expect("lifecycle should restore");
+        assert_eq!(snapshot.state, PipeLifecycleState::Active);
+        assert_eq!(snapshot.activated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn pipe_runtime_deactivate_removes_persisted_registration() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("pipe-runtime.json");
+
+        let runtime = PipeRuntime::new();
+        runtime
+            .configure_persistence(Some(state_path.clone()))
+            .await;
+
+        let mut registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-deactivate".into(),
+            pipe_instance_id: "pipe-deactivate-1".into(),
+            source_container: Some("source-app".into()),
+            source_endpoint: "/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some("https://example.com".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "webhook".into(),
+        });
+        registration.lifecycle = PipeLifecycleSnapshot::active("2026-01-01T00:00:00Z".into());
+
+        runtime
+            .activate(
+                PipeRuntimeKey {
+                    deployment_hash: "dep-deactivate".into(),
+                    pipe_instance_id: "pipe-deactivate-1".into(),
+                },
+                registration,
+            )
+            .await;
+
+        runtime
+            .deactivate(
+                "dep-deactivate",
+                "pipe-deactivate-1",
+                "2026-01-01T00:05:00Z".into(),
+            )
+            .await;
+
+        let restored = PipeRuntime::new();
+        restored.configure_persistence(Some(state_path)).await;
+        let count = restored.restore_from_disk().await.unwrap();
+
+        assert_eq!(count, 0);
+        assert!(
+            restored
+                .resolve("dep-deactivate", "pipe-deactivate-1")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn pipe_runtime_restore_restarts_poll_worker() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("pipe-runtime.json");
+
+        let runtime = PipeRuntime::new();
+        runtime
+            .configure_persistence(Some(state_path.clone()))
+            .await;
+
+        let mut registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-poll".into(),
+            pipe_instance_id: "pipe-poll-1".into(),
+            source_container: None,
+            source_endpoint: "http://127.0.0.1:1/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some("https://example.com".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "poll".into(),
+        });
+        registration.lifecycle = PipeLifecycleSnapshot::active("2026-01-01T00:00:00Z".into());
+
+        runtime
+            .activate(
+                PipeRuntimeKey {
+                    deployment_hash: "dep-poll".into(),
+                    pipe_instance_id: "pipe-poll-1".into(),
+                },
+                registration,
+            )
+            .await;
+
+        let restored = PipeRuntime::new();
+        restored.configure_persistence(Some(state_path)).await;
+        let count = restored.restore_from_disk().await.unwrap();
+        assert_eq!(count, 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let workers = restored.workers.read().await;
+        assert_eq!(workers.len(), 1);
+        drop(workers);
+        restored.stop_worker("dep-poll", "pipe-poll-1").await;
+    }
+
+    #[test]
+    fn default_pipe_runtime_state_path_uses_config_directory() {
+        let path = default_pipe_runtime_state_path(Some("/tmp/status/config.json")).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/status/.status/pipe-runtime-state.json")
+        );
     }
 
     stacker_test!(

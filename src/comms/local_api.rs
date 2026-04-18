@@ -2204,9 +2204,22 @@ pub fn default_bind_address(bind: Option<String>) -> std::net::Ipv4Addr {
     }
 }
 
-pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
+pub async fn serve(config: Config, config_path: &str, port: u16, with_ui: bool) -> Result<()> {
     let cfg = Arc::new(config);
     let state = Arc::new(AppState::new(cfg, with_ui, Some(port)));
+    state
+        .pipe_runtime
+        .configure_persistence(crate::commands::default_pipe_runtime_state_path(Some(config_path)))
+        .await;
+    match state.pipe_runtime.restore_from_disk().await {
+        Ok(restored) if restored > 0 => {
+            info!(restored, "restored persisted pipe runtime registrations");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            error!(error = %error, "failed to restore persisted pipe runtime registrations");
+        }
+    }
 
     // Spawn token refresh task if Vault is configured
     if let (Some(vault_client), Some(token_cache)) = (&state.vault_client, &state.token_cache) {

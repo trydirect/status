@@ -1,6 +1,8 @@
+# syntax=docker/dockerfile:1.4
 FROM clux/muslrust:stable AS builder
 
 WORKDIR /app
+COPY --from=shared_fixtures / /shared-fixtures
 COPY Cargo.toml Cargo.lock* ./
 COPY src src
 COPY templates templates
