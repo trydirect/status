@@ -13,9 +13,9 @@ use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
 #[cfg(feature = "docker")]
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
@@ -7561,7 +7561,10 @@ mod tests {
             .resolve("dep-restore", "pipe-restore-1")
             .await
             .expect("registration should restore");
-        assert_eq!(registration.target_url.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            registration.target_url.as_deref(),
+            Some("https://example.com")
+        );
         assert_eq!(registration.trigger_type, "webhook");
 
         let snapshot = restored
@@ -7624,12 +7627,10 @@ mod tests {
         let count = restored.restore_from_disk().await.unwrap();
 
         assert_eq!(count, 0);
-        assert!(
-            restored
-                .resolve("dep-deactivate", "pipe-deactivate-1")
-                .await
-                .is_none()
-        );
+        assert!(restored
+            .resolve("dep-deactivate", "pipe-deactivate-1")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
