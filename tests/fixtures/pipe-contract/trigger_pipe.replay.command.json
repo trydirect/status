@@ -1,0 +1,7 @@
+{
+  "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+  "input_data": {
+    "invoice_id": "inv-replay"
+  },
+  "trigger_type": "replay"
+}

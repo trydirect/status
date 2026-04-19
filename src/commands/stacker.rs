@@ -15,10 +15,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 #[cfg(feature = "docker")]
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
@@ -1057,7 +1060,7 @@ impl PipeRuntime {
                 .map(|(key, registration)| PersistedPipeEntry {
                     deployment_hash: key.deployment_hash.clone(),
                     pipe_instance_id: key.pipe_instance_id.clone(),
-                    registration: registration.clone(),
+                    registration: redact_persisted_registration(registration),
                 })
                 .collect(),
         };
@@ -1070,9 +1073,25 @@ impl PipeRuntime {
         }
 
         let body = serde_json::to_vec_pretty(&persisted).context("serializing pipe runtime")?;
-        tokio::fs::write(&path, body)
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+
+        let mut file = options
+            .open(&path)
+            .await
+            .with_context(|| format!("opening pipe runtime state {}", path.display()))?;
+        file.write_all(&body)
             .await
             .with_context(|| format!("writing pipe runtime state to {}", path.display()))?;
+        file.flush()
+            .await
+            .with_context(|| format!("flushing pipe runtime state {}", path.display()))?;
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
         Ok(())
     }
 
@@ -1186,9 +1205,6 @@ impl PipeRuntime {
             snapshot.trigger_count += 1;
             snapshot.last_updated_at = triggered_at;
         }
-        if let Err(error) = self.persist_active_registrations().await {
-            warn!(error = %error, "failed to persist active pipe registrations after trigger");
-        }
     }
 
     async fn mark_failed(
@@ -1229,9 +1245,6 @@ impl PipeRuntime {
                 trigger_count: 0,
                 last_updated_at: failed_at,
             });
-        if let Err(error) = self.persist_active_registrations().await {
-            warn!(error = %error, "failed to persist active pipe registrations after failure");
-        }
     }
 
     async fn snapshot(
@@ -2970,6 +2983,7 @@ fn pipe_source_poll_interval() -> Duration {
     std::env::var("PIPE_POLL_INTERVAL_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
+        .map(|secs| secs.max(1))
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(30))
 }
@@ -3000,6 +3014,31 @@ fn build_trigger_pipe_target_response(transport: &str, status: Option<u16>, body
         "delivered": status.map(|value| (200..300).contains(&value)).unwrap_or(false),
         "body": body,
     })
+}
+
+fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistration {
+    let mut registration = registration.clone();
+    registration.source_broker_url = registration
+        .source_broker_url
+        .as_deref()
+        .map(redact_url_credentials);
+    registration.target_url = registration
+        .target_url
+        .as_deref()
+        .map(redact_url_credentials);
+    registration
+}
+
+fn redact_url_credentials(raw: &str) -> String {
+    let Some((scheme, remainder)) = raw.split_once("://") else {
+        return raw.to_string();
+    };
+    let authority_end = remainder.find('/').unwrap_or(remainder.len());
+    let (authority, rest) = remainder.split_at(authority_end);
+    let Some((_, host)) = authority.rsplit_once('@') else {
+        return raw.to_string();
+    };
+    format!("{scheme}://***@{host}{rest}")
 }
 
 fn registered_pipe_key(deployment_hash: &str, pipe_instance_id: &str) -> PipeRuntimeKey {
@@ -7358,29 +7397,58 @@ async fn handle_probe_endpoints(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn fixture(path: &str) -> Value {
         let body = match path {
-            "activate_pipe.webhook.command.json" => include_str!(
-                "../../../shared-fixtures/pipe-contract/activate_pipe.webhook.command.json"
-            ),
+            "activate_pipe.webhook.command.json" => {
+                include_str!(
+                    "../../tests/fixtures/pipe-contract/activate_pipe.webhook.command.json"
+                )
+            }
             "activate_pipe.rabbitmq.command.json" => include_str!(
-                "../../../shared-fixtures/pipe-contract/activate_pipe.rabbitmq.command.json"
+                "../../tests/fixtures/pipe-contract/activate_pipe.rabbitmq.command.json"
             ),
             "deactivate_pipe.command.json" => {
-                include_str!("../../../shared-fixtures/pipe-contract/deactivate_pipe.command.json")
+                include_str!("../../tests/fixtures/pipe-contract/deactivate_pipe.command.json")
             }
-            "trigger_pipe.manual.command.json" => include_str!(
-                "../../../shared-fixtures/pipe-contract/trigger_pipe.manual.command.json"
-            ),
-            "trigger_pipe.replay.command.json" => include_str!(
-                "../../../shared-fixtures/pipe-contract/trigger_pipe.replay.command.json"
-            ),
+            "trigger_pipe.manual.command.json" => {
+                include_str!("../../tests/fixtures/pipe-contract/trigger_pipe.manual.command.json")
+            }
+            "trigger_pipe.replay.command.json" => {
+                include_str!("../../tests/fixtures/pipe-contract/trigger_pipe.replay.command.json")
+            }
             other => panic!("unknown fixture: {}", other),
         };
 
         serde_json::from_str(body).expect("fixture should be valid json")
+    }
+
+    struct EnvGuard {
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&str]) -> Self {
+            let vars = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            Self { vars }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, original) in &self.vars {
+                match original {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     macro_rules! stacker_test {
@@ -7691,6 +7759,66 @@ mod tests {
             path,
             PathBuf::from("/tmp/status/.status/pipe-runtime-state.json")
         );
+    }
+
+    #[test]
+    fn pipe_source_poll_interval_clamps_zero_to_one_second() {
+        let _env = EnvGuard::new(&["PIPE_POLL_INTERVAL_SECS"]);
+        std::env::set_var("PIPE_POLL_INTERVAL_SECS", "0");
+
+        assert_eq!(pipe_source_poll_interval(), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn pipe_runtime_persistence_redacts_credentials() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("pipe-runtime.json");
+
+        let runtime = PipeRuntime::new();
+        runtime
+            .configure_persistence(Some(state_path.clone()))
+            .await;
+
+        let mut registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-secret".into(),
+            pipe_instance_id: "pipe-secret-1".into(),
+            source_container: None,
+            source_endpoint: "/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: Some("amqp://guest:guest@localhost:5672/%2f".into()),
+            source_queue: Some("events.queue".into()),
+            source_exchange: Some("events.exchange".into()),
+            source_routing_key: Some("events.created".into()),
+            target_url: Some("https://user:token@example.com/hooks".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "rabbitmq".into(),
+        });
+        registration.lifecycle = PipeLifecycleSnapshot::active("2026-01-01T00:00:00Z".into());
+
+        runtime
+            .activate(
+                PipeRuntimeKey {
+                    deployment_hash: "dep-secret".into(),
+                    pipe_instance_id: "pipe-secret-1".into(),
+                },
+                registration,
+            )
+            .await;
+
+        let body = tokio::fs::read_to_string(&state_path).await.unwrap();
+        assert!(!body.contains("guest:guest"));
+        assert!(!body.contains("user:token"));
+        assert!(body.contains("amqp://***@localhost:5672/%2f"));
+        assert!(body.contains("https://***@example.com/hooks"));
+
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     stacker_test!(

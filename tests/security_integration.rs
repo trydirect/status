@@ -28,6 +28,31 @@ fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
+struct EnvGuard {
+    vars: Vec<(String, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn new(keys: &[&str]) -> Self {
+        let vars = keys
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        Self { vars }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, original) in &self.vars {
+            match original {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 fn test_config() -> Arc<Config> {
     Arc::new(Config {
         domain: Some("test.example.com".to_string()),
@@ -43,13 +68,19 @@ fn test_config() -> Arc<Config> {
     })
 }
 
-fn router_with_env(agent_id: &str, token: &str, scopes: &str) -> Router {
+fn router_with_env(agent_id: &str, token: &str, scopes: &str) -> (Router, EnvGuard) {
+    let env = EnvGuard::new(&[
+        "AGENT_ID",
+        "AGENT_TOKEN",
+        "AGENT_SCOPES",
+        "RATE_LIMIT_PER_MIN",
+    ]);
     std::env::set_var("AGENT_ID", agent_id);
     std::env::set_var("AGENT_TOKEN", token);
     std::env::set_var("AGENT_SCOPES", scopes);
     std::env::set_var("RATE_LIMIT_PER_MIN", "1000");
     let state = Arc::new(AppState::new(test_config(), false, None));
-    create_router(state)
+    (create_router(state), env)
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -208,7 +239,7 @@ async fn wait_for_request_count(
 #[tokio::test]
 async fn execute_requires_signature_and_scope() {
     let _g = lock_tests();
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:execute");
 
     // Missing signature
     let response = app
@@ -250,7 +281,7 @@ async fn execute_requires_signature_and_scope() {
 #[tokio::test]
 async fn replay_detection_returns_409() {
     let _g = lock_tests();
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:execute");
     let rid = Uuid::new_v4().to_string();
     let path = "/api/v1/commands/execute";
     let body = json!({"id": "cmd-3", "command_id": "cmd-exec-3", "name": "echo hi", "params": {}});
@@ -311,7 +342,7 @@ async fn rate_limit_returns_429() {
 async fn scope_denied_returns_403() {
     let _g = lock_tests();
     // Do not include commands:execute
-    let app = router_with_env("agent-1", "secret-token", "commands:report");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:report");
     let (status, body) = post_with_sig(
         &app,
         "/api/v1/commands/execute",
@@ -329,9 +360,10 @@ async fn scope_denied_returns_403() {
 #[tokio::test]
 async fn wait_can_require_signature() {
     let _g = lock_tests();
+    let _env = EnvGuard::new(&["WAIT_REQUIRE_SIGNATURE"]);
     // Enable signing for GET /wait
     std::env::set_var("WAIT_REQUIRE_SIGNATURE", "true");
-    let app = router_with_env("agent-1", "secret-token", "commands:wait");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:wait");
 
     // Missing signature should fail
     let response = app
@@ -374,8 +406,9 @@ async fn wait_can_require_signature() {
 #[tokio::test]
 async fn given_signed_local_wait_request_when_queue_is_empty_then_local_wait_returns_no_content() {
     let _g = lock_tests();
+    let _env = EnvGuard::new(&["WAIT_REQUIRE_SIGNATURE"]);
     std::env::set_var("WAIT_REQUIRE_SIGNATURE", "true");
-    let app = router_with_env("agent-1", "secret-token", "commands:wait");
+    let (app, _router_env) = router_with_env("agent-1", "secret-token", "commands:wait");
 
     let ts = format!("{}", chrono::Utc::now().timestamp());
     let rid = Uuid::new_v4().to_string();
@@ -403,8 +436,9 @@ async fn given_signed_local_wait_request_when_queue_is_empty_then_local_wait_ret
 async fn given_pipe_command_enqueued_when_agent_waits_and_reports_result_then_transport_path_delivers_and_records_execution(
 ) {
     let _g = lock_tests();
+    let _env = EnvGuard::new(&["WAIT_REQUIRE_SIGNATURE"]);
     std::env::set_var("WAIT_REQUIRE_SIGNATURE", "true");
-    let app = router_with_env(
+    let (app, _router_env) = router_with_env(
         "agent-1",
         "secret-token",
         "commands:enqueue,commands:wait,commands:report",
@@ -528,7 +562,7 @@ async fn given_registered_webhook_pipe_when_signed_webhook_arrives_then_payload_
         .create_async()
         .await;
 
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:execute");
 
     let (activate_status, _) = post_with_sig(
         &app,
@@ -580,7 +614,7 @@ async fn given_registered_webhook_pipe_when_signed_webhook_arrives_then_payload_
 async fn given_signed_webhook_request_without_execute_scope_when_pipe_ingest_is_called_then_it_is_rejected(
 ) {
     let _g = lock_tests();
-    let app = router_with_env("agent-1", "secret-token", "commands:report");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:report");
 
     let (status, body) = post_with_sig(
         &app,
@@ -601,7 +635,7 @@ async fn given_signed_webhook_request_without_execute_scope_when_pipe_ingest_is_
 async fn given_signed_webhook_request_with_invalid_json_when_pipe_ingest_is_called_then_it_returns_bad_request(
 ) {
     let _g = lock_tests();
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:execute");
 
     let (status, body) = post_raw_with_sig(
         &app,
@@ -625,7 +659,7 @@ async fn given_signed_webhook_request_with_invalid_json_when_pipe_ingest_is_call
 #[tokio::test]
 async fn given_replayed_signed_webhook_request_when_pipe_ingest_is_called_then_replay_is_blocked() {
     let _g = lock_tests();
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:execute");
     let request_id = Uuid::new_v4().to_string();
 
     let (first_status, first_body) = post_with_sig(
@@ -662,7 +696,7 @@ async fn given_reactivated_manual_pipe_when_it_is_triggered_then_only_the_latest
     let _g = lock_tests();
     let (target_url, requests, target_handle) =
         spawn_target_capture_server(StatusCode::OK, json!({"accepted": true})).await;
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:execute");
 
     let (first_activate_status, first_activate_body) = post_with_sig(
         &app,
@@ -760,12 +794,13 @@ async fn given_reactivated_manual_pipe_when_it_is_triggered_then_only_the_latest
 async fn given_poll_pipe_when_source_worker_fetches_payload_then_target_receives_it_and_deactivation_stops_future_deliveries(
 ) {
     let _g = lock_tests();
+    let _env = EnvGuard::new(&["PIPE_POLL_INTERVAL_SECS"]);
     std::env::set_var("PIPE_POLL_INTERVAL_SECS", "1");
     let (source_url, source_handle) =
         spawn_source_server(json!({"user": {"email": "poll@try.direct"}})).await;
     let (target_url, requests, target_handle) =
         spawn_target_capture_server(StatusCode::OK, json!({"accepted": true})).await;
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _router_env) = router_with_env("agent-1", "secret-token", "commands:execute");
 
     let (activate_status, activate_body) = post_with_sig(
         &app,
@@ -832,7 +867,6 @@ async fn given_poll_pipe_when_source_worker_fetches_payload_then_target_receives
     let final_snapshot = requests.lock().await.clone();
     assert_eq!(final_snapshot.len(), 1);
 
-    std::env::remove_var("PIPE_POLL_INTERVAL_SECS");
     target_handle.abort();
     source_handle.abort();
 }
@@ -846,7 +880,7 @@ async fn given_registered_manual_pipe_when_target_returns_server_error_then_fail
         json!({"error": "downstream unavailable"}),
     )
     .await;
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:execute");
 
     let (activate_status, _) = post_with_sig(
         &app,
@@ -940,7 +974,7 @@ async fn given_registered_manual_pipe_when_it_is_triggered_and_deactivated_then_
         .create_async()
         .await;
 
-    let app = router_with_env("agent-1", "secret-token", "commands:execute");
+    let (app, _env) = router_with_env("agent-1", "secret-token", "commands:execute");
 
     let (activate_status, activate_body) = post_with_sig(
         &app,

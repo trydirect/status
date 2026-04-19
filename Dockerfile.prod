@@ -2,7 +2,6 @@
 FROM clux/muslrust:stable AS builder
 
 WORKDIR /app
-COPY --from=shared_fixtures / /shared-fixtures
 COPY Cargo.toml Cargo.lock* ./
 COPY build.rs build.rs
 COPY proto proto

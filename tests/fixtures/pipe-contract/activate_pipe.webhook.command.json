@@ -1,0 +1,13 @@
+{
+  "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+  "source_container": "source-app",
+  "source_endpoint": "/source/data",
+  "source_method": "GET",
+  "target_url": "https://example.com",
+  "target_endpoint": "/runtime/pipe",
+  "target_method": "POST",
+  "field_mapping": {
+    "email": "$.user.email"
+  },
+  "trigger_type": "webhook"
+}
