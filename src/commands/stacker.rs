@@ -7402,28 +7402,36 @@ mod tests {
     use tempfile::tempdir;
 
     fn fixture(path: &str) -> Value {
-        let body = match path {
+        let relative_path = match path {
             "activate_pipe.webhook.command.json" => {
-                include_str!(
-                    "../../tests/fixtures/pipe-contract/activate_pipe.webhook.command.json"
-                )
+                "../shared-fixtures/pipe-contract/activate_pipe.webhook.command.json"
             }
-            "activate_pipe.rabbitmq.command.json" => include_str!(
-                "../../tests/fixtures/pipe-contract/activate_pipe.rabbitmq.command.json"
-            ),
+            "activate_pipe.rabbitmq.command.json" => {
+                "../shared-fixtures/pipe-contract/activate_pipe.rabbitmq.command.json"
+            }
             "deactivate_pipe.command.json" => {
-                include_str!("../../tests/fixtures/pipe-contract/deactivate_pipe.command.json")
+                "../shared-fixtures/pipe-contract/deactivate_pipe.command.json"
             }
             "trigger_pipe.manual.command.json" => {
-                include_str!("../../tests/fixtures/pipe-contract/trigger_pipe.manual.command.json")
+                "../shared-fixtures/pipe-contract/trigger_pipe.manual.command.json"
             }
             "trigger_pipe.replay.command.json" => {
-                include_str!("../../tests/fixtures/pipe-contract/trigger_pipe.replay.command.json")
+                "../shared-fixtures/pipe-contract/trigger_pipe.replay.command.json"
             }
             other => panic!("unknown fixture: {}", other),
         };
 
-        serde_json::from_str(body).expect("fixture should be valid json")
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+        let body = std::fs::read_to_string(&fixture_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read fixture {} at {}: {}",
+                path,
+                fixture_path.display(),
+                error
+            )
+        });
+
+        serde_json::from_str(&body).expect("fixture should be valid json")
     }
 
     struct EnvGuard {
