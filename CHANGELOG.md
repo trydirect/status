@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8 — 2026-04-21
+### Added
+- `status --version` now includes the git short hash (for example `0.1.8 (abc1234)`) so production builds can be identified instantly.
+
+### Changed
+- Docker builds now include the protobuf build inputs required for gRPC client code generation in musl/release images.
+- Pipe-contract fixtures remain sourced from `trydirect/config`, while fork PRs and unauthorized CI runs now skip only the shared-fixture tests instead of failing the entire workflow.
+
 ## 0.1.7 — 2026-04-10
 ### Security — OWASP Top 10 Hardening
 
@@ -207,4 +215,3 @@ This is a **security release** addressing 6 Critical and 5 High severity finding
 - Planned: align build and runtime images to avoid glibc drift; keep the musl-based build variant as the default container target.
 - Planned: update CI to build and test using the production base image so linker/runtime errors are caught early.
 - Planned: add a container startup smoke check to surface missing runtime dependencies before release.
-
