@@ -16,6 +16,8 @@ jobs:
   build-and-test:
     name: Build & Test (features=${{ matrix.features }})
     runs-on: ubuntu-latest
+    env:
+      CONFIG_FIXTURES_TOKEN: ${{ secrets.CONFIG_FIXTURES_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -25,23 +27,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Checkout shared pipe fixtures repo
-        if: ${{ secrets.CONFIG_FIXTURES_TOKEN != '' }}
+        if: ${{ env.CONFIG_FIXTURES_TOKEN != '' }}
         uses: actions/checkout@v4
         with:
           repository: trydirect/config
           ref: main
-          token: ${{ secrets.CONFIG_FIXTURES_TOKEN }}
+          token: ${{ env.CONFIG_FIXTURES_TOKEN }}
           path: config-fixtures-repo
           fetch-depth: 1
           persist-credentials: false
           sparse-checkout: |
             shared-fixtures
       - name: Shared pipe fixtures unavailable
-        if: ${{ secrets.CONFIG_FIXTURES_TOKEN == '' }}
+        if: ${{ env.CONFIG_FIXTURES_TOKEN == '' }}
         run: |
           echo "::notice::CONFIG_FIXTURES_TOKEN is unavailable for this workflow run; shared-fixture tests will be skipped."
       - name: Link shared pipe fixtures
-        if: ${{ secrets.CONFIG_FIXTURES_TOKEN != '' }}
+        if: ${{ env.CONFIG_FIXTURES_TOKEN != '' }}
         run: |
           rm -rf "${GITHUB_WORKSPACE}/../config" "${GITHUB_WORKSPACE}/../shared-fixtures"
           ln -sfn "${GITHUB_WORKSPACE}/config-fixtures-repo/shared-fixtures" "${GITHUB_WORKSPACE}/../shared-fixtures"
