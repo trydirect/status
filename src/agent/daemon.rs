@@ -12,7 +12,7 @@ use crate::agent::config::Config;
 use crate::commands::executor::CommandExecutor;
 use crate::commands::firewall::FirewallPolicy;
 use crate::commands::validator::CommandValidator;
-use crate::commands::TimeoutStrategy;
+use crate::commands::{default_pipe_runtime_state_path, PipeRuntime, TimeoutStrategy};
 use crate::monitoring::{
     spawn_heartbeat, ControlPlane, MetricsCollector, MetricsSnapshot, MetricsStore,
 };
@@ -122,6 +122,20 @@ pub async fn run(config_path: String) -> Result<()> {
     // Build firewall policy from config (no API port in daemon mode)
     let firewall_policy = FirewallPolicy::from_config(&cfg, None);
 
+    let pipe_runtime = PipeRuntime::new();
+    pipe_runtime
+        .configure_persistence(default_pipe_runtime_state_path(Some(&config_path)))
+        .await;
+    match pipe_runtime.restore_from_disk().await {
+        Ok(restored) if restored > 0 => {
+            info!(restored, "restored persisted pipe runtime registrations");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(error = %error, "failed to restore persisted pipe runtime registrations");
+        }
+    }
+
     let ctx = PollingContext {
         dashboard_url,
         deployment_hash,
@@ -132,6 +146,7 @@ pub async fn run(config_path: String) -> Result<()> {
         command_timeout,
         firewall_policy,
         control_plane,
+        pipe_runtime,
     };
 
     // Spawn the long-polling loop
@@ -161,6 +176,7 @@ struct PollingContext {
     command_timeout: u64,
     firewall_policy: FirewallPolicy,
     control_plane: ControlPlane,
+    pipe_runtime: PipeRuntime,
 }
 
 /// Long-polling loop: continuously waits for commands and executes them
@@ -231,7 +247,14 @@ async fn execute_and_report(
                 command_type = %cmd.name,
                 "executing stacker command"
             );
-            match execute_stacker_command(&cmd, &stacker_cmd, &ctx.firewall_policy).await {
+            match execute_stacker_command(
+                &cmd,
+                &stacker_cmd,
+                &ctx.firewall_policy,
+                &ctx.pipe_runtime,
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(e) => {
                     error!(command_id = %cmd.command_id, error = %e, "stacker command execution failed");

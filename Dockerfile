@@ -2,6 +2,8 @@ FROM clux/muslrust:stable AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
+COPY build.rs build.rs
+COPY proto proto
 COPY src src
 COPY templates templates
 COPY static static

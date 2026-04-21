@@ -111,6 +111,15 @@ status serve --port 5000           # JSON API only
 status serve --port 5000 --with-ui # API + web dashboard
 ```
 
+## Command Transport Split
+
+Status Panel uses **two different command transport paths**:
+
+1. **Normal Status Panel commands** use the dashboard DB queue plus HTTP long-polling. The agent waits on `/api/v1/agent/commands/wait/{deployment_hash}`, executes the command locally, then reports back to `/api/v1/agent/commands/report`.
+2. **Agent-executor pipe steps** are a separate path. AMQP/RabbitMQ support belongs to that executor flow, not to the normal Status Panel command queue.
+
+This means RabbitMQ is **not** the transport for regular `health`, `logs`, `deploy_app`, or other Status Panel commands. Pipe operations such as `activate_pipe`, `deactivate_pipe`, and `trigger_pipe` run inside the agent runtime, but the normal command delivery path is still DB queue + long-polling.
+
 ## Build from Source
 
 ```bash
@@ -151,6 +160,8 @@ Or use Docker Compose with the included `docker-compose.yml` for a full setup wi
 | `POST` | `/api/v1/commands/enqueue` | Enqueue a command |
 | `POST` | `/api/v1/commands/report` | Report execution result |
 
+The local `/api/v1/commands/*` endpoints are the agent's own Axum API surface. When connected to the remote dashboard, the daemon uses the `/api/v1/agent/commands/*` contract instead. AMQP-backed executor traffic is separate from both of these HTTP command paths.
+
 ### Self-Update
 
 | Method | Path | Description |
@@ -179,6 +190,7 @@ The agent accepts signed commands from the Stacker dashboard covering the full l
 | `config_diff` | Detect configuration drift |
 | `configure_proxy` | Nginx proxy management |
 | `configure_firewall` | iptables policy management |
+| `activate_pipe` / `deactivate_pipe` / `trigger_pipe` | Agent-side pipe registration and runtime execution |
 
 ## Security
 

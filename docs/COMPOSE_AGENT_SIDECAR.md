@@ -35,6 +35,14 @@ The Compose Agent Sidecar is a separate container that handles Docker Compose op
 
 5. **Watchdog Monitoring**: Automatic health checks and restart logic for the compose-agent container.
 
+### Command Transport Boundary
+
+The sidecar split does **not** change the main Status Panel command transport:
+
+- **Normal dashboard commands** still move through the Status Panel DB queue and the agent's HTTP long-poll loop (`/api/v1/agent/commands/wait/{deployment_hash}` → execute locally → `/api/v1/agent/commands/report`).
+- **AMQP/RabbitMQ** belongs to the separate agent-executor pipe-step path, not to the normal Status Panel command queue.
+- Pipe commands such as `activate_pipe`, `deactivate_pipe`, and `trigger_pipe` now execute inside the agent runtime, but their command delivery is still initiated through the regular dashboard command path unless a separate executor flow is used.
+
 ## Configuration
 
 ### Docker Compose Setup

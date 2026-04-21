@@ -42,7 +42,7 @@ use crate::commands::{
     check_remote_version, get_update_status, start_update_job, UpdateJobs, UpdatePhase,
 };
 use crate::commands::{
-    execute_stacker_command, parse_stacker_command, CommandValidator, DockerOperation,
+    execute_stacker_command, parse_stacker_command, CommandValidator, DockerOperation, PipeRuntime,
     TimeoutStrategy,
 };
 use crate::comms::notifications::{self, MarkReadRequest, NotificationStore, UnreadCountResponse};
@@ -127,6 +127,7 @@ pub struct AppState {
     pub firewall_policy: FirewallPolicy,
     pub login_limiter: RateLimiter,
     pub notification_store: NotificationStore,
+    pub pipe_runtime: PipeRuntime,
 }
 
 impl AppState {
@@ -193,6 +194,7 @@ impl AppState {
             firewall_policy,
             login_limiter: RateLimiter::new_per_minute(5),
             notification_store: notifications::new_notification_store(),
+            pipe_runtime: PipeRuntime::new(),
         }
     }
 }
@@ -1129,6 +1131,10 @@ async fn capabilities_handler(State(state): State<SharedState>) -> impl IntoResp
         features.push("logs".to_string());
         features.push("restart".to_string());
     }
+    features.push("pipes".to_string());
+    features.push("activate_pipe".to_string());
+    features.push("deactivate_pipe".to_string());
+    features.push("trigger_pipe".to_string());
     if compose_agent {
         features.push("compose_agent".to_string());
     }
@@ -1501,6 +1507,11 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/v1/commands/execute", post(commands_execute))
         .route("/api/v1/commands/enqueue", post(commands_enqueue))
         .route("/api/v1/auth/rotate-token", post(rotate_token));
+
+    router = router.route(
+        "/api/v1/pipes/webhook/{deployment_hash}/{pipe_instance_id}",
+        post(pipe_webhook_ingest),
+    );
 
     // Marketplace & dashboard linking
     router = router
@@ -1969,7 +1980,14 @@ async fn commands_execute(
     )
     .to_string();
     if let Some(stacker_cmd) = parsed_stacker_cmd {
-        match execute_stacker_command(&cmd, &stacker_cmd, &state.firewall_policy).await {
+        match execute_stacker_command(
+            &cmd,
+            &stacker_cmd,
+            &state.firewall_policy,
+            &state.pipe_runtime,
+        )
+        .await
+        {
             Ok(result) => {
                 return Json(attach_command_provenance(&state, result, &executed_by).await)
                     .into_response();
@@ -2104,6 +2122,41 @@ async fn commands_enqueue(
     (StatusCode::ACCEPTED, Json(json!({"queued": true}))).into_response()
 }
 
+async fn pipe_webhook_ingest(
+    State(state): State<SharedState>,
+    Path((deployment_hash, pipe_instance_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:execute").await {
+        return resp.into_response();
+    }
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid webhook payload: {}", error)})),
+            )
+                .into_response()
+        }
+    };
+
+    match state
+        .pipe_runtime
+        .trigger_registered_payload(&deployment_hash, &pipe_instance_id, payload, "webhook")
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct RotateTokenRequest {
     new_token: String,
@@ -2151,9 +2204,24 @@ pub fn default_bind_address(bind: Option<String>) -> std::net::Ipv4Addr {
     }
 }
 
-pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
+pub async fn serve(config: Config, config_path: &str, port: u16, with_ui: bool) -> Result<()> {
     let cfg = Arc::new(config);
     let state = Arc::new(AppState::new(cfg, with_ui, Some(port)));
+    state
+        .pipe_runtime
+        .configure_persistence(crate::commands::default_pipe_runtime_state_path(Some(
+            config_path,
+        )))
+        .await;
+    match state.pipe_runtime.restore_from_disk().await {
+        Ok(restored) if restored > 0 => {
+            info!(restored, "restored persisted pipe runtime registrations");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            error!(error = %error, "failed to restore persisted pipe runtime registrations");
+        }
+    }
 
     // Spawn token refresh task if Vault is configured
     if let (Some(vault_client), Some(token_cache)) = (&state.vault_client, &state.token_cache) {
@@ -2329,5 +2397,24 @@ mod tests {
             payload["last_control_plane"],
             Value::String("status_panel".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn capabilities_include_pipe_operations() {
+        let state = test_state(Some("status_panel"));
+
+        let response = capabilities_handler(State(state)).await.into_response();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("capabilities body");
+        let payload: Value = serde_json::from_slice(&body).expect("capabilities json");
+        let features = payload["features"]
+            .as_array()
+            .expect("features should be an array");
+
+        assert!(features.contains(&Value::String("pipes".to_string())));
+        assert!(features.contains(&Value::String("activate_pipe".to_string())));
+        assert!(features.contains(&Value::String("deactivate_pipe".to_string())));
+        assert!(features.contains(&Value::String("trigger_pipe".to_string())));
     }
 }
