@@ -24,13 +24,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Ensure fixture checkout token is configured
-        run: |
-          if [ -z "${{ secrets.CONFIG_FIXTURES_TOKEN }}" ]; then
-            echo "::error::Missing CONFIG_FIXTURES_TOKEN secret with read access to trydirect/config"
-            exit 1
-          fi
       - name: Checkout shared pipe fixtures repo
+        if: ${{ secrets.CONFIG_FIXTURES_TOKEN != '' }}
         uses: actions/checkout@v4
         with:
           repository: trydirect/config
@@ -41,7 +36,12 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             shared-fixtures
+      - name: Shared pipe fixtures unavailable
+        if: ${{ secrets.CONFIG_FIXTURES_TOKEN == '' }}
+        run: |
+          echo "::notice::CONFIG_FIXTURES_TOKEN is unavailable for this workflow run; shared-fixture tests will be skipped."
       - name: Link shared pipe fixtures
+        if: ${{ secrets.CONFIG_FIXTURES_TOKEN != '' }}
         run: |
           rm -rf "${GITHUB_WORKSPACE}/../config" "${GITHUB_WORKSPACE}/../shared-fixtures"
           ln -sfn "${GITHUB_WORKSPACE}/config-fixtures-repo/shared-fixtures" "${GITHUB_WORKSPACE}/../shared-fixtures"
