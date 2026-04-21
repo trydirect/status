@@ -27,7 +27,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Checkout shared pipe fixtures repo
+        id: checkout_shared_fixtures
         if: ${{ env.CONFIG_FIXTURES_TOKEN != '' }}
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: trydirect/config
@@ -39,11 +41,11 @@ jobs:
           sparse-checkout: |
             shared-fixtures
       - name: Shared pipe fixtures unavailable
-        if: ${{ env.CONFIG_FIXTURES_TOKEN == '' }}
+        if: ${{ env.CONFIG_FIXTURES_TOKEN == '' || steps.checkout_shared_fixtures.outcome != 'success' }}
         run: |
-          echo "::notice::CONFIG_FIXTURES_TOKEN is unavailable for this workflow run; shared-fixture tests will be skipped."
+          echo "::notice::Shared pipe fixtures are unavailable for this workflow run; shared-fixture tests will be skipped."
       - name: Link shared pipe fixtures
-        if: ${{ env.CONFIG_FIXTURES_TOKEN != '' }}
+        if: ${{ env.CONFIG_FIXTURES_TOKEN != '' && steps.checkout_shared_fixtures.outcome == 'success' }}
         run: |
           rm -rf "${GITHUB_WORKSPACE}/../config" "${GITHUB_WORKSPACE}/../shared-fixtures"
           ln -sfn "${GITHUB_WORKSPACE}/config-fixtures-repo/shared-fixtures" "${GITHUB_WORKSPACE}/../shared-fixtures"
