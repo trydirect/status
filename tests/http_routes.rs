@@ -85,6 +85,33 @@ async fn test_capabilities_endpoint() {
 }
 
 #[tokio::test]
+async fn given_capabilities_request_when_agent_supports_pipe_runtime_then_pipe_features_are_advertised(
+) {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body_bytes).unwrap();
+    let features = value["features"].as_array().expect("features array");
+
+    assert!(features.contains(&Value::String("pipes".to_string())));
+    assert!(features.contains(&Value::String("activate_pipe".to_string())));
+    assert!(features.contains(&Value::String("deactivate_pipe".to_string())));
+    assert!(features.contains(&Value::String("trigger_pipe".to_string())));
+}
+
+#[tokio::test]
 async fn test_login_page_get() {
     let app = test_router();
 
@@ -478,4 +505,194 @@ async fn test_backup_download_success() {
     // Check body content
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), b"test backup content");
+}
+
+// ---- Notification endpoint tests ----
+
+#[tokio::test]
+async fn test_notifications_unread_count_starts_at_zero() {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/notifications/unread-count")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["unread_count"], 0);
+}
+
+#[tokio::test]
+async fn test_notifications_list_empty() {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/notifications")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["unread_count"], 0);
+    assert_eq!(json["notifications"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_notifications_mark_read_all_on_empty() {
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/notifications/read")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"all": true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn test_notifications_full_lifecycle() {
+    use status_panel::comms::notifications::{self, Notification, NotificationKind};
+
+    let state = Arc::new(AppState::new(test_config(), false, None));
+    let app = create_router(state.clone());
+
+    // Seed notifications into the store directly
+    let notifs = vec![
+        Notification {
+            id: "test-1".to_string(),
+            kind: NotificationKind::StackUpdateAvailable,
+            title: "Update for MyStack".to_string(),
+            message: "Version 2.0 is available".to_string(),
+            stack_id: Some("stack-1".to_string()),
+            stack_name: Some("MyStack".to_string()),
+            new_version: Some("2.0".to_string()),
+            created_at: "2026-04-12T00:00:00Z".to_string(),
+            read: false,
+        },
+        Notification {
+            id: "test-2".to_string(),
+            kind: NotificationKind::StackPublished,
+            title: "New stack: CoolApp".to_string(),
+            message: "CoolApp has been published".to_string(),
+            stack_id: Some("stack-2".to_string()),
+            stack_name: Some("CoolApp".to_string()),
+            new_version: None,
+            created_at: "2026-04-12T01:00:00Z".to_string(),
+            read: false,
+        },
+    ];
+    notifications::merge_notifications(&state.notification_store, notifs).await;
+
+    // Check unread count = 2
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/notifications/unread-count")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["unread_count"], 2);
+
+    // List all notifications
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/notifications")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["unread_count"], 2);
+    assert_eq!(json["notifications"].as_array().unwrap().len(), 2);
+
+    // Mark one as read
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/notifications/read")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"ids": ["test-1"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Unread count should now be 1
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/notifications/unread-count")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["unread_count"], 1);
+
+    // Mark all as read
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/notifications/read")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"all": true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Unread count should now be 0
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/notifications/unread-count")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["unread_count"], 0);
 }

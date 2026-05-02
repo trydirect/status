@@ -1,4 +1,6 @@
+pub mod grpc_client;
 pub mod http_polling;
+pub mod retry;
 pub mod websocket;
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +37,8 @@ pub struct CommandResult {
     pub truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,4 +58,6 @@ pub struct StackerCommandReport {
     pub result: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executed_by: Option<String>,
 }

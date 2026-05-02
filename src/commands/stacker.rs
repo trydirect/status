@@ -1,18 +1,31 @@
 use anyhow::{bail, Context, Result};
-#[cfg(feature = "docker")]
 use chrono::{SecondsFormat, Utc};
+use futures_util::StreamExt;
+use lapin::{
+    options::{BasicAckOptions, BasicConsumeOptions, QueueBindOptions},
+    types::FieldTable,
+    Connection, ConnectionProperties,
+};
 #[cfg(feature = "docker")]
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
-#[cfg(any(feature = "docker", test))]
 use serde_json::json;
-#[cfg(any(feature = "docker", test))]
 use serde_json::Value;
+use std::collections::HashMap;
 #[cfg(feature = "docker")]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
+use tokio::task::AbortHandle;
+use tokio::time::Duration;
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "docker")]
 use crate::transport::CommandError;
@@ -35,6 +48,546 @@ pub enum ContainerRuntime {
     #[default]
     Runc,
     Kata,
+}
+
+#[cfg(all(test, feature = "docker"))]
+mod trigger_pipe_handler_tests {
+    use super::*;
+    use mockito::{Matcher, Server};
+
+    fn make_trigger_agent_command() -> AgentCommand {
+        AgentCommand {
+            id: "cmd-trigger".into(),
+            command_id: "cmd-trigger".into(),
+            name: "trigger_pipe".into(),
+            params: json!({}),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_posts_mapped_payload_to_external_target() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/webhook/pipe")
+            .match_body(Matcher::Exact(r#"{"email":"dev@try.direct"}"#.into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"accepted":true}"#)
+            .create_async()
+            .await;
+
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some(server.url()),
+            target_container: None,
+            target_endpoint: "/webhook/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should execute");
+
+        mock.assert_async().await;
+        assert_eq!(result.status, "success");
+        assert!(result.error.is_none());
+
+        let body = result.result.expect("trigger_pipe result body");
+        assert_eq!(body["success"], true);
+        assert_eq!(body["mapped_data"], json!({ "email": "dev@try.direct" }));
+        assert_eq!(body["target_response"]["transport"], "http");
+        assert_eq!(body["target_response"]["status"], 200);
+        assert_eq!(body["target_response"]["delivered"], true);
+        assert_eq!(body["target_response"]["body"], json!({ "accepted": true }));
+        assert_eq!(body["lifecycle"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_requires_external_target_url() {
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: None,
+            target_container: None,
+            target_endpoint: "/webhook/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should return structured failure");
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.error.as_deref(),
+            Some("trigger_pipe requires target_url or target_container")
+        );
+    }
+
+    #[test]
+    fn build_trigger_pipe_container_command_posts_json_payload() {
+        let command = build_trigger_pipe_container_command(
+            "/webhook/pipe",
+            "POST",
+            &json!({ "email": "dev@try.direct", "name": "O'Reilly" }),
+        );
+
+        assert!(command.contains("curl -sS -X POST"));
+        assert!(command.contains("http://127.0.0.1/webhook/pipe"));
+        assert!(command.contains("\"email\":\"dev@try.direct\""));
+        assert!(!command.contains("\"name\":\"O'Reilly\""));
+        assert!(command.contains("Reilly"));
+        assert!(command.contains("%{http_code}"));
+    }
+
+    #[test]
+    fn build_trigger_pipe_source_command_fetches_json_payload() {
+        let command = build_trigger_pipe_source_command("/source/data", "get");
+
+        assert!(command.contains("curl -sS -X GET"));
+        assert!(command.contains("http://127.0.0.1/source/data"));
+        assert!(command.contains("%{http_code}"));
+    }
+
+    #[test]
+    fn build_trigger_pipe_container_command_normalizes_invalid_method() {
+        let command =
+            build_trigger_pipe_container_command("/webhook/pipe", "POST; rm -rf /", &json!({}));
+
+        assert!(command.contains("curl -sS -X POST "));
+        assert!(!command.contains("rm -rf"));
+    }
+
+    #[test]
+    fn normalize_trigger_pipe_method_falls_back_to_default() {
+        assert_eq!(normalize_trigger_pipe_method(" patch ", "POST"), "PATCH");
+        assert_eq!(
+            normalize_trigger_pipe_method("POST;echo nope", "POST"),
+            "POST"
+        );
+        assert_eq!(normalize_trigger_pipe_method("", "GET"), "GET");
+    }
+
+    #[test]
+    fn given_http_target_response_when_delivery_succeeds_then_report_includes_transport_and_delivery_status(
+    ) {
+        let response =
+            build_trigger_pipe_target_response("http", Some(202), json!({"accepted": true}));
+
+        assert_eq!(response["transport"], "http");
+        assert_eq!(response["status"], 202);
+        assert_eq!(response["delivered"], true);
+        assert_eq!(response["body"], json!({"accepted": true}));
+    }
+
+    #[test]
+    fn given_target_send_error_when_delivery_fails_then_report_preserves_transport_context() {
+        let response = build_trigger_pipe_target_response("websocket", None, Value::Null);
+
+        assert_eq!(response["transport"], "websocket");
+        assert_eq!(response["status"], Value::Null);
+        assert_eq!(response["delivered"], false);
+        assert_eq!(response["body"], Value::Null);
+    }
+
+    #[test]
+    fn pipe_source_worker_kind_recognizes_rabbitmq_sources() {
+        assert_eq!(
+            pipe_source_worker_kind("rabbitmq"),
+            Some(PipeSourceWorkerKind::Amqp)
+        );
+        assert_eq!(
+            pipe_source_worker_kind("amqp"),
+            Some(PipeSourceWorkerKind::Amqp)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_requires_input_or_source_details() {
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            input_data: None,
+            source_container: None,
+            source_endpoint: "/source/data".into(),
+            source_method: "GET".into(),
+            target_url: None,
+            target_container: Some("target-app".into()),
+            target_endpoint: "/webhook/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should return structured failure");
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.error.as_deref(),
+            Some("trigger_pipe requires input_data or source_container")
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_routes_ws_target() {
+        // Use a port that is not listening so the WS connection fails fast
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-ws-1".into(),
+            input_data: Some(json!({ "key": "value" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some("ws://127.0.0.1:19999".into()),
+            target_container: None,
+            target_endpoint: "/ws-target".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should return structured result");
+
+        // WS connection will fail (nothing listening), so we expect a failed status
+        assert_eq!(result.status, "failed");
+        let error = result.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("WebSocket") || error.contains("Connection refused"),
+            "expected WS connection error, got: {error}"
+        );
+        let body = result.result.expect("trigger_pipe failure result body");
+        assert_eq!(body["target_response"]["transport"], "websocket");
+        assert_eq!(body["target_response"]["delivered"], false);
+        assert_eq!(body["target_response"]["status"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_routes_grpc_target() {
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-grpc-1".into(),
+            input_data: Some(json!({ "key": "value" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some("grpc://127.0.0.1:19998".into()),
+            target_container: None,
+            target_endpoint: "/grpc-target".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should return structured result");
+
+        // gRPC connection will fail (nothing listening), so we expect a failed status
+        assert_eq!(result.status, "failed");
+        let error = result.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("gRPC") || error.contains("connection") || error.contains("connect"),
+            "expected gRPC connection error, got: {error}"
+        );
+        let body = result.result.expect("trigger_pipe failure result body");
+        assert_eq!(body["target_response"]["transport"], "grpc");
+        assert_eq!(body["target_response"]["delivered"], false);
+        assert_eq!(body["target_response"]["status"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_routes_grpcs_target() {
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-grpcs-1".into(),
+            input_data: Some(json!({ "key": "value" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some("grpcs://127.0.0.1:19997".into()),
+            target_container: None,
+            target_endpoint: "/".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should return structured result");
+
+        // grpcs:// should be routed to gRPC transport (fails on connect)
+        assert_eq!(result.status, "failed");
+        let error = result.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("gRPC") || error.contains("connection") || error.contains("connect"),
+            "expected gRPC connection error for grpcs://, got: {error}"
+        );
+        let body = result.result.expect("trigger_pipe failure result body");
+        assert_eq!(body["target_response"]["transport"], "grpc");
+        assert_eq!(body["target_response"]["delivered"], false);
+        assert_eq!(body["target_response"]["status"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_grpc_rejects_empty_pipe_instance_id() {
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "".into(),
+            input_data: Some(json!({ "key": "value" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: Some("grpc://127.0.0.1:19996".into()),
+            target_container: None,
+            target_endpoint: "/".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should return structured result");
+
+        assert_eq!(result.status, "failed");
+        let error = result.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("non-empty"),
+            "expected empty step_id error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_activate_and_trigger_pipe_uses_registered_runtime_config() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/runtime/pipe")
+            .match_body(Matcher::Exact(r#"{"email":"runtime@try.direct"}"#.into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"accepted":true}"#)
+            .create_async()
+            .await;
+
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let activate = ActivatePipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-runtime-1".into(),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some(server.url()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "manual".into(),
+        };
+
+        let activate_result = handle_activate_pipe(&agent_cmd, &activate, &pipe_runtime)
+            .await
+            .expect("activate_pipe should succeed");
+        assert_eq!(activate_result.status, "success");
+        assert_eq!(
+            activate_result
+                .result
+                .as_ref()
+                .and_then(|body| body.get("lifecycle"))
+                .and_then(|body| body.get("state")),
+            Some(&json!("active"))
+        );
+
+        let trigger = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-runtime-1".into(),
+            input_data: Some(json!({ "user": { "email": "runtime@try.direct" } })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: None,
+            target_container: None,
+            target_endpoint: "/".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let trigger_result = handle_trigger_pipe(&agent_cmd, &trigger, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should use registered target");
+
+        mock.assert_async().await;
+        assert_eq!(trigger_result.status, "success");
+        let stored = pipe_runtime.snapshot("dep-123", "pipe-runtime-1").await;
+        assert_eq!(
+            stored.and_then(|snapshot| snapshot.last_triggered_at),
+            trigger_result
+                .result
+                .as_ref()
+                .and_then(|body| body.get("triggered_at"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        );
+        assert_eq!(
+            trigger_result
+                .result
+                .as_ref()
+                .and_then(|body| body.get("lifecycle"))
+                .and_then(|body| body.get("trigger_count")),
+            Some(&json!(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_deactivate_pipe_is_idempotent() {
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let activate = ActivatePipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-runtime-2".into(),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some("https://example.com".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+        let deactivate = DeactivatePipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-runtime-2".into(),
+        };
+
+        handle_activate_pipe(&agent_cmd, &activate, &pipe_runtime)
+            .await
+            .expect("activate_pipe should succeed");
+        let first = handle_deactivate_pipe(&agent_cmd, &deactivate, &pipe_runtime)
+            .await
+            .expect("deactivate_pipe should succeed");
+        let second = handle_deactivate_pipe(&agent_cmd, &deactivate, &pipe_runtime)
+            .await
+            .expect("deactivate_pipe should stay idempotent");
+
+        assert_eq!(first.status, "success");
+        assert_eq!(second.status, "success");
+        assert_eq!(
+            first.result.as_ref().and_then(|body| body.get("removed")),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            second.result.as_ref().and_then(|body| body.get("removed")),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            second
+                .result
+                .as_ref()
+                .and_then(|body| body.get("lifecycle"))
+                .and_then(|body| body.get("state")),
+            Some(&json!("inactive"))
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_pipe_failure_updates_lifecycle_state() {
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let activate = ActivatePipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-runtime-3".into(),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some("ws://127.0.0.1:19995".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        handle_activate_pipe(&agent_cmd, &activate, &pipe_runtime)
+            .await
+            .expect("activate_pipe should succeed");
+
+        let trigger = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "pipe-runtime-3".into(),
+            input_data: Some(json!({ "user": { "email": "runtime@try.direct" } })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_url: None,
+            target_container: None,
+            target_endpoint: "/".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "manual".into(),
+        };
+
+        let trigger_result = handle_trigger_pipe(&agent_cmd, &trigger, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should return structured failure");
+
+        assert_eq!(trigger_result.status, "failed");
+        assert_eq!(
+            trigger_result
+                .result
+                .as_ref()
+                .and_then(|body| body.get("lifecycle"))
+                .and_then(|body| body.get("state")),
+            Some(&json!("failed"))
+        );
+    }
 }
 
 impl std::fmt::Display for ContainerRuntime {
@@ -138,6 +691,9 @@ pub enum StackerCommand {
     ListContainers(ListContainersCommand),
     ConfigureFirewall(ConfigureFirewallCommand),
     ProbeEndpoints(ProbeEndpointsCommand),
+    ActivatePipe(ActivatePipeCommand),
+    DeactivatePipe(DeactivatePipeCommand),
+    TriggerPipe(TriggerPipeCommand),
 }
 
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
@@ -222,6 +778,616 @@ pub struct ErrorSummaryCommand {
     hours: u32,
     #[serde(default = "default_true")]
     redact: bool,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActivatePipeCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    pipe_instance_id: String,
+    #[serde(default)]
+    source_container: Option<String>,
+    #[serde(default = "default_pipe_source_endpoint")]
+    source_endpoint: String,
+    #[serde(default = "default_pipe_source_method")]
+    source_method: String,
+    #[serde(default)]
+    source_broker_url: Option<String>,
+    #[serde(default)]
+    source_queue: Option<String>,
+    #[serde(default)]
+    source_exchange: Option<String>,
+    #[serde(default)]
+    source_routing_key: Option<String>,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    target_container: Option<String>,
+    #[serde(default = "default_pipe_target_endpoint")]
+    target_endpoint: String,
+    #[serde(default = "default_pipe_target_method")]
+    target_method: String,
+    #[serde(default)]
+    field_mapping: Option<Value>,
+    #[serde(default = "default_activate_pipe_trigger_type")]
+    trigger_type: String,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeactivatePipeCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    pipe_instance_id: String,
+}
+
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct TriggerPipeCommand {
+    #[serde(default)]
+    deployment_hash: String,
+    pipe_instance_id: String,
+    #[serde(default)]
+    input_data: Option<Value>,
+    #[serde(default)]
+    source_container: Option<String>,
+    #[serde(default = "default_pipe_source_endpoint")]
+    source_endpoint: String,
+    #[serde(default = "default_pipe_source_method")]
+    source_method: String,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    target_container: Option<String>,
+    #[serde(default = "default_pipe_target_endpoint")]
+    target_endpoint: String,
+    #[serde(default = "default_pipe_target_method")]
+    target_method: String,
+    #[serde(default)]
+    field_mapping: Option<Value>,
+    #[serde(default = "default_pipe_trigger_type")]
+    trigger_type: String,
+}
+
+fn default_pipe_source_endpoint() -> String {
+    "/".to_string()
+}
+
+fn default_pipe_source_method() -> String {
+    "GET".to_string()
+}
+
+fn default_pipe_target_endpoint() -> String {
+    "/".to_string()
+}
+
+fn default_pipe_target_method() -> String {
+    "POST".to_string()
+}
+
+fn normalize_trigger_pipe_method(method: &str, default_method: &str) -> String {
+    let normalized = trimmed(method).to_ascii_uppercase();
+    match normalized.as_str() {
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" => normalized,
+        _ => default_method.to_string(),
+    }
+}
+
+fn default_activate_pipe_trigger_type() -> String {
+    "webhook".to_string()
+}
+
+fn default_pipe_trigger_type() -> String {
+    "manual".to_string()
+}
+
+pub fn default_pipe_runtime_state_path(config_path: Option<&str>) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("PIPE_RUNTIME_STATE_PATH") {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(PathBuf::from(trimmed));
+    }
+
+    if let Some(config_path) = config_path {
+        let config_path = PathBuf::from(config_path);
+        let base_dir = config_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.to_path_buf())
+            .or_else(|| std::env::current_dir().ok());
+        return base_dir.map(|dir| dir.join(".status").join("pipe-runtime-state.json"));
+    }
+
+    std::env::current_dir()
+        .ok()
+        .map(|dir| dir.join(".status").join("pipe-runtime-state.json"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PipeRuntimeKey {
+    deployment_hash: String,
+    pipe_instance_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PipeLifecycleState {
+    Active,
+    Inactive,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PipeLifecycleSnapshot {
+    state: PipeLifecycleState,
+    activated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deactivated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_triggered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    trigger_count: u64,
+    last_updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PipeRegistration {
+    source_container: Option<String>,
+    source_endpoint: String,
+    source_method: String,
+    source_broker_url: Option<String>,
+    source_queue: Option<String>,
+    source_exchange: Option<String>,
+    source_routing_key: Option<String>,
+    target_url: Option<String>,
+    target_container: Option<String>,
+    target_endpoint: String,
+    target_method: String,
+    field_mapping: Option<Value>,
+    trigger_type: String,
+    lifecycle: PipeLifecycleSnapshot,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PipeRuntime {
+    registrations: Arc<RwLock<HashMap<PipeRuntimeKey, PipeRegistration>>>,
+    lifecycle: Arc<RwLock<HashMap<PipeRuntimeKey, PipeLifecycleSnapshot>>>,
+    workers: Arc<RwLock<HashMap<PipeRuntimeKey, AbortHandle>>>,
+    state_path: Arc<RwLock<Option<PathBuf>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedPipeEntry {
+    deployment_hash: String,
+    pipe_instance_id: String,
+    registration: PipeRegistration,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct PersistedPipeRuntime {
+    entries: Vec<PersistedPipeEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct ActivationResult {
+    replaced: bool,
+    registration: PipeRegistration,
+    previous_lifecycle: Option<PipeLifecycleSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct DeactivationResult {
+    removed: bool,
+    lifecycle: PipeLifecycleSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipeSourceWorkerKind {
+    Poll,
+    Websocket,
+    Grpc,
+    Amqp,
+}
+
+impl PipeRuntime {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn configure_persistence(&self, path: Option<PathBuf>) {
+        let mut state_path = self.state_path.write().await;
+        *state_path = path;
+    }
+
+    pub async fn restore_from_disk(&self) -> Result<usize> {
+        let Some(path) = self.state_path.read().await.clone() else {
+            return Ok(0);
+        };
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        let body = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("reading pipe runtime state from {}", path.display()))?;
+        if body.trim().is_empty() {
+            return Ok(0);
+        }
+
+        let persisted: PersistedPipeRuntime = serde_json::from_str(&body)
+            .with_context(|| format!("parsing pipe runtime state from {}", path.display()))?;
+
+        {
+            let mut registrations = self.registrations.write().await;
+            let mut lifecycle = self.lifecycle.write().await;
+            registrations.clear();
+            lifecycle.clear();
+            for entry in &persisted.entries {
+                let key = PipeRuntimeKey {
+                    deployment_hash: entry.deployment_hash.clone(),
+                    pipe_instance_id: entry.pipe_instance_id.clone(),
+                };
+                registrations.insert(key.clone(), entry.registration.clone());
+                lifecycle.insert(key, entry.registration.lifecycle.clone());
+            }
+        }
+
+        for entry in &persisted.entries {
+            self.spawn_source_worker_if_needed(
+                &entry.deployment_hash,
+                &entry.pipe_instance_id,
+                entry.registration.clone(),
+            )
+            .await;
+        }
+
+        Ok(persisted.entries.len())
+    }
+
+    async fn persist_active_registrations(&self) -> Result<()> {
+        let Some(path) = self.state_path.read().await.clone() else {
+            return Ok(());
+        };
+
+        let registrations = self.registrations.read().await;
+        let persisted = PersistedPipeRuntime {
+            entries: registrations
+                .iter()
+                .map(|(key, registration)| PersistedPipeEntry {
+                    deployment_hash: key.deployment_hash.clone(),
+                    pipe_instance_id: key.pipe_instance_id.clone(),
+                    registration: redact_persisted_registration(registration),
+                })
+                .collect(),
+        };
+        drop(registrations);
+
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating pipe runtime state dir {}", parent.display()))?;
+        }
+
+        let body = serde_json::to_vec_pretty(&persisted).context("serializing pipe runtime")?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+
+        let mut file = options
+            .open(&path)
+            .await
+            .with_context(|| format!("opening pipe runtime state {}", path.display()))?;
+        file.write_all(&body)
+            .await
+            .with_context(|| format!("writing pipe runtime state to {}", path.display()))?;
+        file.flush()
+            .await
+            .with_context(|| format!("flushing pipe runtime state {}", path.display()))?;
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+        Ok(())
+    }
+
+    async fn activate(
+        &self,
+        key: PipeRuntimeKey,
+        registration: PipeRegistration,
+    ) -> ActivationResult {
+        let (replaced, previous_lifecycle) = {
+            let mut registrations = self.registrations.write().await;
+            let mut lifecycle = self.lifecycle.write().await;
+            let previous_lifecycle = lifecycle.get(&key).cloned();
+            let replaced = registrations
+                .insert(key.clone(), registration.clone())
+                .is_some();
+            lifecycle.insert(key, registration.lifecycle.clone());
+            (replaced, previous_lifecycle)
+        };
+        if let Err(error) = self.persist_active_registrations().await {
+            warn!(error = %error, "failed to persist active pipe registrations after activate");
+        }
+        ActivationResult {
+            replaced,
+            registration,
+            previous_lifecycle,
+        }
+    }
+
+    async fn deactivate(
+        &self,
+        deployment_hash: &str,
+        pipe_instance_id: &str,
+        deactivated_at: String,
+    ) -> DeactivationResult {
+        let key = PipeRuntimeKey {
+            deployment_hash: deployment_hash.to_string(),
+            pipe_instance_id: pipe_instance_id.to_string(),
+        };
+        let (removed, snapshot) = {
+            let mut registrations = self.registrations.write().await;
+            let mut lifecycle = self.lifecycle.write().await;
+            let removed = registrations.remove(&key).is_some();
+            let mut snapshot = lifecycle
+                .get(&key)
+                .cloned()
+                .unwrap_or(PipeLifecycleSnapshot {
+                    state: PipeLifecycleState::Inactive,
+                    activated_at: deactivated_at.clone(),
+                    deactivated_at: None,
+                    last_triggered_at: None,
+                    last_error: None,
+                    trigger_count: 0,
+                    last_updated_at: deactivated_at.clone(),
+                });
+            snapshot.state = PipeLifecycleState::Inactive;
+            snapshot.deactivated_at = Some(deactivated_at.clone());
+            snapshot.last_updated_at = deactivated_at;
+            lifecycle.insert(key, snapshot.clone());
+            (removed, snapshot)
+        };
+        if let Err(error) = self.persist_active_registrations().await {
+            warn!(error = %error, "failed to persist active pipe registrations after deactivate");
+        }
+        DeactivationResult {
+            removed,
+            lifecycle: snapshot,
+        }
+    }
+
+    async fn resolve(
+        &self,
+        deployment_hash: &str,
+        pipe_instance_id: &str,
+    ) -> Option<PipeRegistration> {
+        let registrations = self.registrations.read().await;
+        registrations
+            .get(&PipeRuntimeKey {
+                deployment_hash: deployment_hash.to_string(),
+                pipe_instance_id: pipe_instance_id.to_string(),
+            })
+            .cloned()
+    }
+
+    async fn mark_triggered(
+        &self,
+        deployment_hash: &str,
+        pipe_instance_id: &str,
+        triggered_at: String,
+    ) {
+        let mut registrations = self.registrations.write().await;
+        if let Some(registration) = registrations.get_mut(&PipeRuntimeKey {
+            deployment_hash: deployment_hash.to_string(),
+            pipe_instance_id: pipe_instance_id.to_string(),
+        }) {
+            registration.lifecycle.state = PipeLifecycleState::Active;
+            registration.lifecycle.last_triggered_at = Some(triggered_at.clone());
+            registration.lifecycle.last_error = None;
+            registration.lifecycle.trigger_count += 1;
+            registration.lifecycle.last_updated_at = triggered_at.clone();
+        }
+        drop(registrations);
+
+        let mut lifecycle = self.lifecycle.write().await;
+        if let Some(snapshot) = lifecycle.get_mut(&PipeRuntimeKey {
+            deployment_hash: deployment_hash.to_string(),
+            pipe_instance_id: pipe_instance_id.to_string(),
+        }) {
+            snapshot.state = PipeLifecycleState::Active;
+            snapshot.last_triggered_at = Some(triggered_at.clone());
+            snapshot.last_error = None;
+            snapshot.trigger_count += 1;
+            snapshot.last_updated_at = triggered_at;
+        }
+    }
+
+    async fn mark_failed(
+        &self,
+        deployment_hash: &str,
+        pipe_instance_id: &str,
+        failed_at: String,
+        error: String,
+    ) {
+        let mut registrations = self.registrations.write().await;
+        if let Some(registration) = registrations.get_mut(&PipeRuntimeKey {
+            deployment_hash: deployment_hash.to_string(),
+            pipe_instance_id: pipe_instance_id.to_string(),
+        }) {
+            registration.lifecycle.state = PipeLifecycleState::Failed;
+            registration.lifecycle.last_error = Some(error.clone());
+            registration.lifecycle.last_updated_at = failed_at.clone();
+        }
+        drop(registrations);
+
+        let mut lifecycle = self.lifecycle.write().await;
+        lifecycle
+            .entry(PipeRuntimeKey {
+                deployment_hash: deployment_hash.to_string(),
+                pipe_instance_id: pipe_instance_id.to_string(),
+            })
+            .and_modify(|snapshot| {
+                snapshot.state = PipeLifecycleState::Failed;
+                snapshot.last_error = Some(error.clone());
+                snapshot.last_updated_at = failed_at.clone();
+            })
+            .or_insert(PipeLifecycleSnapshot {
+                state: PipeLifecycleState::Failed,
+                activated_at: failed_at.clone(),
+                deactivated_at: None,
+                last_triggered_at: None,
+                last_error: Some(error),
+                trigger_count: 0,
+                last_updated_at: failed_at,
+            });
+    }
+
+    async fn snapshot(
+        &self,
+        deployment_hash: &str,
+        pipe_instance_id: &str,
+    ) -> Option<PipeLifecycleSnapshot> {
+        let lifecycle = self.lifecycle.read().await;
+        lifecycle
+            .get(&PipeRuntimeKey {
+                deployment_hash: deployment_hash.to_string(),
+                pipe_instance_id: pipe_instance_id.to_string(),
+            })
+            .cloned()
+    }
+
+    async fn replace_worker(&self, key: PipeRuntimeKey, handle: AbortHandle) {
+        let mut workers = self.workers.write().await;
+        if let Some(existing) = workers.insert(key, handle) {
+            existing.abort();
+        }
+    }
+
+    async fn stop_worker(&self, deployment_hash: &str, pipe_instance_id: &str) {
+        let mut workers = self.workers.write().await;
+        if let Some(existing) = workers.remove(&PipeRuntimeKey {
+            deployment_hash: deployment_hash.to_string(),
+            pipe_instance_id: pipe_instance_id.to_string(),
+        }) {
+            existing.abort();
+        }
+    }
+
+    async fn spawn_source_worker_if_needed(
+        &self,
+        deployment_hash: &str,
+        pipe_instance_id: &str,
+        registration: PipeRegistration,
+    ) {
+        self.stop_worker(deployment_hash, pipe_instance_id).await;
+
+        let Some(kind) = pipe_source_worker_kind(&registration.trigger_type) else {
+            return;
+        };
+
+        let runtime = self.clone();
+        let key = PipeRuntimeKey {
+            deployment_hash: deployment_hash.to_string(),
+            pipe_instance_id: pipe_instance_id.to_string(),
+        };
+        let key_for_task = key.clone();
+        let handle = tokio::spawn(async move {
+            match kind {
+                PipeSourceWorkerKind::Poll => {
+                    run_poll_source_worker(runtime, key_for_task, registration).await
+                }
+                PipeSourceWorkerKind::Websocket => {
+                    run_websocket_source_worker(runtime, key_for_task, registration).await
+                }
+                PipeSourceWorkerKind::Grpc => {
+                    run_grpc_source_worker(runtime, key_for_task, registration).await
+                }
+                PipeSourceWorkerKind::Amqp => {
+                    run_amqp_source_worker(runtime, key_for_task, registration).await
+                }
+            }
+        });
+
+        self.replace_worker(key, handle.abort_handle()).await;
+    }
+
+    pub async fn trigger_registered_payload(
+        &self,
+        deployment_hash: &str,
+        pipe_instance_id: &str,
+        payload: Value,
+        trigger_type: &str,
+    ) -> Result<CommandResult> {
+        let command_id = format!(
+            "pipe-{}-{}",
+            pipe_instance_id,
+            chrono::Utc::now().timestamp_millis()
+        );
+        let agent_cmd = AgentCommand {
+            id: command_id.clone(),
+            command_id,
+            name: "trigger_pipe".to_string(),
+            params: json!({}),
+            deployment_hash: Some(deployment_hash.to_string()),
+            app_code: None,
+        };
+        let trigger = TriggerPipeCommand {
+            deployment_hash: deployment_hash.to_string(),
+            pipe_instance_id: pipe_instance_id.to_string(),
+            input_data: Some(payload),
+            source_container: None,
+            source_endpoint: default_pipe_source_endpoint(),
+            source_method: default_pipe_source_method(),
+            target_url: None,
+            target_container: None,
+            target_endpoint: default_pipe_target_endpoint(),
+            target_method: default_pipe_target_method(),
+            field_mapping: None,
+            trigger_type: trigger_type.to_string(),
+        };
+
+        handle_trigger_pipe(&agent_cmd, &trigger, self).await
+    }
+}
+
+impl PipeLifecycleSnapshot {
+    fn active(activated_at: String) -> Self {
+        Self {
+            state: PipeLifecycleState::Active,
+            activated_at: activated_at.clone(),
+            deactivated_at: None,
+            last_triggered_at: None,
+            last_error: None,
+            trigger_count: 0,
+            last_updated_at: activated_at,
+        }
+    }
+}
+
+impl From<ActivatePipeCommand> for PipeRegistration {
+    fn from(value: ActivatePipeCommand) -> Self {
+        Self {
+            source_container: value.source_container,
+            source_endpoint: value.source_endpoint,
+            source_method: value.source_method,
+            source_broker_url: value.source_broker_url,
+            source_queue: value.source_queue,
+            source_exchange: value.source_exchange,
+            source_routing_key: value.source_routing_key,
+            target_url: value.target_url,
+            target_container: value.target_container,
+            target_endpoint: value.target_endpoint,
+            target_method: value.target_method,
+            field_mapping: value.field_mapping,
+            trigger_type: value.trigger_type,
+            lifecycle: PipeLifecycleSnapshot::active(String::new()),
+        }
+    }
 }
 
 /// Command to fetch app configuration from Vault
@@ -483,6 +1649,9 @@ pub struct ProbeEndpointsCommand {
     /// Timeout per probe request in seconds
     #[serde(default = "default_probe_timeout")]
     probe_timeout: u32,
+    /// Whether to capture sample responses from discovered endpoints
+    #[serde(default)]
+    capture_samples: bool,
 }
 
 fn default_probe_protocols() -> Vec<String> {
@@ -645,6 +1814,27 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             payload.validate()?;
             Ok(Some(StackerCommand::ProbeEndpoints(payload)))
         }
+        "activate_pipe" | "stacker.activate_pipe" => {
+            let payload: ActivatePipeCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid activate_pipe payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::ActivatePipe(payload)))
+        }
+        "deactivate_pipe" | "stacker.deactivate_pipe" => {
+            let payload: DeactivatePipeCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid deactivate_pipe payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::DeactivatePipe(payload)))
+        }
+        "trigger_pipe" | "stacker.trigger_pipe" => {
+            let payload: TriggerPipeCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid trigger_pipe payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::TriggerPipe(payload)))
+        }
         _ => Ok(None),
     }
 }
@@ -653,6 +1843,7 @@ pub async fn execute_stacker_command(
     agent_cmd: &AgentCommand,
     command: &StackerCommand,
     firewall_policy: &firewall::FirewallPolicy,
+    pipe_runtime: &PipeRuntime,
 ) -> Result<CommandResult> {
     // Firewall commands don't require Docker
     if let StackerCommand::ConfigureFirewall(data) = command {
@@ -661,12 +1852,25 @@ pub async fn execute_stacker_command(
 
     #[cfg(feature = "docker")]
     {
-        execute_with_docker(agent_cmd, command, firewall_policy).await
+        execute_with_docker(agent_cmd, command, firewall_policy, pipe_runtime).await
     }
     #[cfg(not(feature = "docker"))]
     {
-        let _ = (agent_cmd, command);
-        bail!("docker feature not enabled for stacker commands")
+        match command {
+            StackerCommand::ActivatePipe(data) => {
+                handle_activate_pipe(agent_cmd, data, pipe_runtime).await
+            }
+            StackerCommand::DeactivatePipe(data) => {
+                handle_deactivate_pipe(agent_cmd, data, pipe_runtime).await
+            }
+            StackerCommand::TriggerPipe(data) => {
+                handle_trigger_pipe(agent_cmd, data, pipe_runtime).await
+            }
+            _ => {
+                let _ = (firewall_policy, pipe_runtime);
+                bail!("docker feature not enabled for stacker commands")
+            }
+        }
     }
 }
 
@@ -948,6 +2152,160 @@ impl ErrorSummaryCommand {
             bail!("deployment_hash is required");
         }
         // app_code is optional for error_summary - if empty, analyze all containers
+        Ok(())
+    }
+}
+
+impl ActivatePipeCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.pipe_instance_id = trimmed(&self.pipe_instance_id);
+        self.source_container = self.source_container.map(|value| trimmed(&value));
+        self.source_endpoint = trimmed(&self.source_endpoint);
+        if self.source_endpoint.is_empty() {
+            self.source_endpoint = default_pipe_source_endpoint();
+        }
+        self.source_method =
+            normalize_trigger_pipe_method(&self.source_method, &default_pipe_source_method());
+        self.source_broker_url = self.source_broker_url.map(|value| trimmed(&value));
+        self.source_queue = self.source_queue.map(|value| trimmed(&value));
+        self.source_exchange = self.source_exchange.map(|value| trimmed(&value));
+        self.source_routing_key = self.source_routing_key.map(|value| trimmed(&value));
+        self.target_url = self.target_url.map(|value| trimmed(&value));
+        self.target_container = self.target_container.map(|value| trimmed(&value));
+        self.target_endpoint = trimmed(&self.target_endpoint);
+        if self.target_endpoint.is_empty() {
+            self.target_endpoint = default_pipe_target_endpoint();
+        }
+        self.target_method =
+            normalize_trigger_pipe_method(&self.target_method, &default_pipe_target_method());
+        self.trigger_type = trimmed(&self.trigger_type).to_lowercase();
+        if self.trigger_type.is_empty() {
+            self.trigger_type = default_activate_pipe_trigger_type();
+        }
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.pipe_instance_id.is_empty() {
+            bail!("pipe_instance_id is required");
+        }
+        if matches!(self.trigger_type.as_str(), "amqp" | "rabbitmq") {
+            if self
+                .source_broker_url
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                bail!("activate_pipe with rabbitmq trigger_type requires source_broker_url");
+            }
+            if self
+                .source_queue
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                bail!("activate_pipe with rabbitmq trigger_type requires source_queue");
+            }
+        }
+        if self
+            .target_url
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+            && self
+                .target_container
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .is_none()
+        {
+            bail!("activate_pipe requires target_url or target_container");
+        }
+        Ok(())
+    }
+}
+
+impl DeactivatePipeCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.pipe_instance_id = trimmed(&self.pipe_instance_id);
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.pipe_instance_id.is_empty() {
+            bail!("pipe_instance_id is required");
+        }
+        Ok(())
+    }
+}
+
+impl TriggerPipeCommand {
+    fn normalize(mut self) -> Self {
+        self.deployment_hash = trimmed(&self.deployment_hash);
+        self.pipe_instance_id = trimmed(&self.pipe_instance_id);
+        self.source_container = self.source_container.map(|value| trimmed(&value));
+        self.source_endpoint = trimmed(&self.source_endpoint);
+        if self.source_endpoint.is_empty() {
+            self.source_endpoint = default_pipe_source_endpoint();
+        }
+        self.source_method =
+            normalize_trigger_pipe_method(&self.source_method, &default_pipe_source_method());
+        self.target_url = self.target_url.map(|value| trimmed(&value));
+        self.target_container = self.target_container.map(|value| trimmed(&value));
+        self.target_endpoint = trimmed(&self.target_endpoint);
+        if self.target_endpoint.is_empty() {
+            self.target_endpoint = "/".to_string();
+        }
+        self.target_method =
+            normalize_trigger_pipe_method(&self.target_method, &default_pipe_target_method());
+        self.trigger_type = trimmed(&self.trigger_type).to_lowercase();
+        if self.trigger_type.is_empty() {
+            self.trigger_type = default_pipe_trigger_type();
+        }
+        self
+    }
+
+    fn with_command_context(mut self, agent_cmd: &AgentCommand) -> Self {
+        if self.deployment_hash.is_empty() {
+            if let Some(hash) = &agent_cmd.deployment_hash {
+                self.deployment_hash = hash.clone();
+            }
+        }
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.deployment_hash.is_empty() {
+            bail!("deployment_hash is required");
+        }
+        if self.pipe_instance_id.is_empty() {
+            bail!("pipe_instance_id is required");
+        }
         Ok(())
     }
 }
@@ -1456,7 +2814,6 @@ pub fn build_compose_command(variant: ComposeVariant) -> (String, Vec<String>) {
     }
 }
 
-#[cfg(feature = "docker")]
 fn base_result(
     agent_cmd: &AgentCommand,
     deployment_hash: &str,
@@ -1476,7 +2833,6 @@ fn base_result(
     }
 }
 
-#[cfg(feature = "docker")]
 fn now_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
@@ -1648,6 +3004,7 @@ async fn execute_with_docker(
     agent_cmd: &AgentCommand,
     command: &StackerCommand,
     firewall_policy: &firewall::FirewallPolicy,
+    pipe_runtime: &PipeRuntime,
 ) -> Result<CommandResult> {
     match command {
         StackerCommand::Health(data) => handle_health(agent_cmd, data).await,
@@ -1670,10 +3027,1160 @@ async fn execute_with_docker(
         StackerCommand::ServerResources(data) => handle_server_resources(agent_cmd, data).await,
         StackerCommand::ListContainers(data) => handle_list_containers(agent_cmd, data).await,
         StackerCommand::ProbeEndpoints(data) => handle_probe_endpoints(agent_cmd, data).await,
+        StackerCommand::ActivatePipe(data) => {
+            handle_activate_pipe(agent_cmd, data, pipe_runtime).await
+        }
+        StackerCommand::DeactivatePipe(data) => {
+            handle_deactivate_pipe(agent_cmd, data, pipe_runtime).await
+        }
+        StackerCommand::TriggerPipe(data) => {
+            handle_trigger_pipe(agent_cmd, data, pipe_runtime).await
+        }
         StackerCommand::ConfigureFirewall(data) => {
             firewall::handle_configure_firewall(agent_cmd, data, firewall_policy).await
         }
     }
+}
+
+fn extract_json_path_value(source: &Value, path: &str) -> Value {
+    let trimmed = path.trim();
+    if !trimmed.starts_with("$.") {
+        return Value::Null;
+    }
+
+    let mut current = source;
+    for segment in trimmed.trim_start_matches("$.").split('.') {
+        if segment.is_empty() {
+            continue;
+        }
+        match current {
+            Value::Object(map) => match map.get(segment) {
+                Some(value) => current = value,
+                None => return Value::Null,
+            },
+            _ => return Value::Null,
+        }
+    }
+
+    current.clone()
+}
+
+fn apply_pipe_field_mapping(source: &Value, field_mapping: Option<&Value>) -> Value {
+    let Some(Value::Object(mapping)) = field_mapping else {
+        return source.clone();
+    };
+
+    if mapping.is_empty() {
+        return source.clone();
+    }
+
+    let mut mapped = serde_json::Map::new();
+    for (key, rule) in mapping {
+        let value = match rule {
+            Value::String(path) if path.starts_with("$.") => extract_json_path_value(source, path),
+            other => other.clone(),
+        };
+        mapped.insert(key.clone(), value);
+    }
+    Value::Object(mapped)
+}
+
+fn build_pipe_target_url(base: &str, endpoint: &str) -> String {
+    let trimmed_base = base.trim_end_matches('/');
+    let trimmed_endpoint = endpoint.trim();
+    if trimmed_endpoint.is_empty() || trimmed_endpoint == "/" {
+        return format!("{}/", trimmed_base);
+    }
+    format!(
+        "{}/{}",
+        trimmed_base,
+        trimmed_endpoint.trim_start_matches('/')
+    )
+}
+
+fn pipe_source_worker_kind(trigger_type: &str) -> Option<PipeSourceWorkerKind> {
+    match trigger_type {
+        "poll" => Some(PipeSourceWorkerKind::Poll),
+        "websocket" | "ws" => Some(PipeSourceWorkerKind::Websocket),
+        "grpc" => Some(PipeSourceWorkerKind::Grpc),
+        "amqp" | "rabbitmq" => Some(PipeSourceWorkerKind::Amqp),
+        _ => None,
+    }
+}
+
+fn pipe_source_poll_interval() -> Duration {
+    std::env::var("PIPE_POLL_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|secs| secs.max(1))
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30))
+}
+
+fn pipe_source_retry_delay() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn trigger_pipe_target_transport(target_mode: &str, target_value: &str) -> &'static str {
+    match target_mode {
+        "container" => "container_http",
+        "external" if target_value.starts_with("ws://") || target_value.starts_with("wss://") => {
+            "websocket"
+        }
+        "external"
+            if target_value.starts_with("grpc://") || target_value.starts_with("grpcs://") =>
+        {
+            "grpc"
+        }
+        _ => "http",
+    }
+}
+
+fn build_trigger_pipe_target_response(transport: &str, status: Option<u16>, body: Value) -> Value {
+    json!({
+        "transport": transport,
+        "status": status,
+        "delivered": status.map(|value| (200..300).contains(&value)).unwrap_or(false),
+        "body": body,
+    })
+}
+
+fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistration {
+    let mut registration = registration.clone();
+    registration.source_broker_url = registration
+        .source_broker_url
+        .as_deref()
+        .map(redact_url_credentials);
+    registration.target_url = registration
+        .target_url
+        .as_deref()
+        .map(redact_url_credentials);
+    registration
+}
+
+fn redact_url_credentials(raw: &str) -> String {
+    let Some((scheme, remainder)) = raw.split_once("://") else {
+        return raw.to_string();
+    };
+    let authority_end = remainder.find('/').unwrap_or(remainder.len());
+    let (authority, rest) = remainder.split_at(authority_end);
+    let Some((_, host)) = authority.rsplit_once('@') else {
+        return raw.to_string();
+    };
+    format!("{scheme}://***@{host}{rest}")
+}
+
+fn registered_pipe_key(deployment_hash: &str, pipe_instance_id: &str) -> PipeRuntimeKey {
+    PipeRuntimeKey {
+        deployment_hash: deployment_hash.to_string(),
+        pipe_instance_id: pipe_instance_id.to_string(),
+    }
+}
+
+fn trigger_has_inline_source(data: &TriggerPipeCommand) -> bool {
+    data.input_data.is_some()
+        || data
+            .source_container
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn trigger_has_inline_target(data: &TriggerPipeCommand) -> bool {
+    data.target_url
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .is_some()
+        || data
+            .target_container
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn merge_trigger_with_registration(
+    data: &TriggerPipeCommand,
+    registration: Option<&PipeRegistration>,
+) -> TriggerPipeCommand {
+    let mut merged = data.clone();
+    if let Some(registration) = registration {
+        if merged
+            .source_container
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            merged.source_container = registration.source_container.clone();
+        }
+        if merged.source_endpoint == default_pipe_source_endpoint() {
+            merged.source_endpoint = registration.source_endpoint.clone();
+        }
+        if merged.source_method == default_pipe_source_method() {
+            merged.source_method = registration.source_method.clone();
+        }
+        if merged
+            .target_url
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            merged.target_url = registration.target_url.clone();
+        }
+        if merged
+            .target_container
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            merged.target_container = registration.target_container.clone();
+        }
+        if merged.target_endpoint == default_pipe_target_endpoint() {
+            merged.target_endpoint = registration.target_endpoint.clone();
+        }
+        if merged.target_method == default_pipe_target_method() {
+            merged.target_method = registration.target_method.clone();
+        }
+        if merged.field_mapping.is_none() {
+            merged.field_mapping = registration.field_mapping.clone();
+        }
+        if merged.trigger_type == default_pipe_trigger_type() {
+            merged.trigger_type = registration.trigger_type.clone();
+        }
+    }
+    merged
+}
+
+#[cfg(feature = "docker")]
+fn shell_escape_single_quotes(value: &str) -> String {
+    value.replace('\'', r#"'\"'\"'"#)
+}
+
+#[cfg(feature = "docker")]
+fn build_trigger_pipe_container_command(endpoint: &str, method: &str, payload: &Value) -> String {
+    let json_payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    let escaped_payload = shell_escape_single_quotes(&json_payload);
+    let normalized_method = normalize_trigger_pipe_method(method, "POST");
+    let url = build_pipe_target_url("http://127.0.0.1", endpoint);
+    let escaped_url = shell_escape_single_quotes(&url);
+    format!(
+        "curl -sS -X {} -H 'Content-Type: application/json' --data-raw '{}' -w '\\n%{{http_code}}' '{}'",
+        normalized_method, escaped_payload, escaped_url
+    )
+}
+
+#[cfg(feature = "docker")]
+fn build_trigger_pipe_source_command(endpoint: &str, method: &str) -> String {
+    let normalized_method = normalize_trigger_pipe_method(method, "GET");
+    let url = build_pipe_target_url("http://127.0.0.1", endpoint);
+    let escaped_url = shell_escape_single_quotes(&url);
+    format!(
+        "curl -sS -X {} -w '\\n%{{http_code}}' '{}'",
+        normalized_method, escaped_url
+    )
+}
+
+async fn send_trigger_pipe_request(
+    url: &str,
+    method: &str,
+    payload: &Value,
+) -> Result<(u16, Value)> {
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("invalid target_method '{}'", method))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building trigger_pipe http client")?;
+
+    let response = client
+        .request(method, url)
+        .json(payload)
+        .send()
+        .await
+        .with_context(|| format!("sending trigger_pipe request to {}", url))?;
+
+    let status = response.status().as_u16();
+    let body_text = response
+        .text()
+        .await
+        .context("reading trigger_pipe response body")?;
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
+}
+
+async fn fetch_external_pipe_source_request(url: &str, method: &str) -> Result<(u16, Value)> {
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("invalid source_method '{}'", method))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building trigger_pipe source http client")?;
+
+    let response = client
+        .request(method, url)
+        .send()
+        .await
+        .with_context(|| format!("fetching trigger_pipe source from {}", url))?;
+
+    let status = response.status().as_u16();
+    let body_text = response
+        .text()
+        .await
+        .context("reading trigger_pipe source response body")?;
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
+}
+
+#[cfg(feature = "docker")]
+async fn fetch_trigger_pipe_source_request(
+    container: &str,
+    endpoint: &str,
+    method: &str,
+) -> Result<(u16, Value)> {
+    let command = build_trigger_pipe_source_command(endpoint, method);
+    let (exit_code, stdout, stderr) = docker::exec_in_container_with_output(container, &command)
+        .await
+        .with_context(|| {
+            format!(
+                "fetching trigger_pipe source inside container {}",
+                container
+            )
+        })?;
+
+    if exit_code != 0 {
+        bail!(
+            "source container request failed with code {}: {}",
+            exit_code,
+            stderr.trim()
+        );
+    }
+
+    let mut lines = stdout.lines().collect::<Vec<_>>();
+    let status_line = lines.pop().unwrap_or("000").trim();
+    let status = status_line.parse::<u16>().unwrap_or(0);
+    let body_text = lines.join("\n");
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
+}
+
+#[cfg(not(feature = "docker"))]
+async fn fetch_trigger_pipe_source_request(
+    _container: &str,
+    _endpoint: &str,
+    _method: &str,
+) -> Result<(u16, Value)> {
+    bail!("source_container requires docker feature")
+}
+
+#[cfg(feature = "docker")]
+async fn send_trigger_pipe_container_request(
+    container: &str,
+    endpoint: &str,
+    method: &str,
+    payload: &Value,
+) -> Result<(u16, Value)> {
+    let command = build_trigger_pipe_container_command(endpoint, method, payload);
+    let (exit_code, stdout, stderr) = docker::exec_in_container_with_output(container, &command)
+        .await
+        .with_context(|| {
+            format!(
+                "sending trigger_pipe request inside container {}",
+                container
+            )
+        })?;
+
+    if exit_code != 0 {
+        bail!(
+            "target container request failed with code {}: {}",
+            exit_code,
+            stderr.trim()
+        );
+    }
+
+    let mut lines = stdout.lines().collect::<Vec<_>>();
+    let status_line = lines.pop().unwrap_or("000").trim();
+    let status = status_line.parse::<u16>().unwrap_or(0);
+    let body_text = lines.join("\n");
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
+}
+
+#[cfg(not(feature = "docker"))]
+async fn send_trigger_pipe_container_request(
+    _container: &str,
+    _endpoint: &str,
+    _method: &str,
+    _payload: &Value,
+) -> Result<(u16, Value)> {
+    bail!("target_container requires docker feature")
+}
+
+async fn run_poll_source_worker(
+    runtime: PipeRuntime,
+    key: PipeRuntimeKey,
+    registration: PipeRegistration,
+) {
+    let interval = pipe_source_poll_interval();
+    info!(
+        deployment_hash = %key.deployment_hash,
+        pipe_instance_id = %key.pipe_instance_id,
+        interval_secs = interval.as_secs(),
+        "pipe poll source worker started"
+    );
+
+    loop {
+        let fetched = match registration.source_container.as_deref() {
+            Some(container) if !container.is_empty() => {
+                fetch_trigger_pipe_source_request(
+                    container,
+                    &registration.source_endpoint,
+                    &registration.source_method,
+                )
+                .await
+            }
+            _ => {
+                fetch_external_pipe_source_request(
+                    &registration.source_endpoint,
+                    &registration.source_method,
+                )
+                .await
+            }
+        };
+
+        match fetched {
+            Ok((status_code, payload)) if (200..300).contains(&status_code) => {
+                if let Err(error) = runtime
+                    .trigger_registered_payload(
+                        &key.deployment_hash,
+                        &key.pipe_instance_id,
+                        payload,
+                        "poll",
+                    )
+                    .await
+                {
+                    warn!(
+                        deployment_hash = %key.deployment_hash,
+                        pipe_instance_id = %key.pipe_instance_id,
+                        error = %error,
+                        "poll source trigger failed"
+                    );
+                }
+            }
+            Ok((status_code, _)) => {
+                runtime
+                    .mark_failed(
+                        &key.deployment_hash,
+                        &key.pipe_instance_id,
+                        now_timestamp(),
+                        format!("poll source failed with status {}", status_code),
+                    )
+                    .await;
+            }
+            Err(error) => {
+                runtime
+                    .mark_failed(
+                        &key.deployment_hash,
+                        &key.pipe_instance_id,
+                        now_timestamp(),
+                        format!("poll source error: {}", error),
+                    )
+                    .await;
+            }
+        }
+
+        tokio::time::sleep(interval).await;
+    }
+}
+
+async fn run_websocket_source_worker(
+    runtime: PipeRuntime,
+    key: PipeRuntimeKey,
+    registration: PipeRegistration,
+) {
+    info!(
+        deployment_hash = %key.deployment_hash,
+        pipe_instance_id = %key.pipe_instance_id,
+        source = %registration.source_endpoint,
+        "pipe websocket source worker started"
+    );
+
+    loop {
+        match crate::transport::websocket::ws_fetch_source(&registration.source_endpoint).await {
+            Ok(payload) => {
+                if let Err(error) = runtime
+                    .trigger_registered_payload(
+                        &key.deployment_hash,
+                        &key.pipe_instance_id,
+                        payload,
+                        "websocket",
+                    )
+                    .await
+                {
+                    warn!(
+                        deployment_hash = %key.deployment_hash,
+                        pipe_instance_id = %key.pipe_instance_id,
+                        error = %error,
+                        "websocket source trigger failed"
+                    );
+                }
+            }
+            Err(error) => {
+                runtime
+                    .mark_failed(
+                        &key.deployment_hash,
+                        &key.pipe_instance_id,
+                        now_timestamp(),
+                        format!("websocket source error: {}", error),
+                    )
+                    .await;
+                debug!(
+                    deployment_hash = %key.deployment_hash,
+                    pipe_instance_id = %key.pipe_instance_id,
+                    error = %error,
+                    "websocket source worker will retry"
+                );
+                tokio::time::sleep(pipe_source_retry_delay()).await;
+            }
+        }
+    }
+}
+
+async fn run_grpc_source_worker(
+    runtime: PipeRuntime,
+    key: PipeRuntimeKey,
+    registration: PipeRegistration,
+) {
+    let grpc_endpoint = if registration.source_endpoint.starts_with("grpcs://") {
+        registration
+            .source_endpoint
+            .replacen("grpcs://", "https://", 1)
+    } else {
+        registration
+            .source_endpoint
+            .replacen("grpc://", "http://", 1)
+    };
+
+    info!(
+        deployment_hash = %key.deployment_hash,
+        pipe_instance_id = %key.pipe_instance_id,
+        endpoint = %grpc_endpoint,
+        "pipe gRPC source worker started"
+    );
+
+    loop {
+        match crate::transport::grpc_client::grpc_fetch_source(
+            &grpc_endpoint,
+            &key.pipe_instance_id,
+            &key.pipe_instance_id,
+        )
+        .await
+        {
+            Ok(payload) => {
+                if let Err(error) = runtime
+                    .trigger_registered_payload(
+                        &key.deployment_hash,
+                        &key.pipe_instance_id,
+                        payload,
+                        "grpc",
+                    )
+                    .await
+                {
+                    warn!(
+                        deployment_hash = %key.deployment_hash,
+                        pipe_instance_id = %key.pipe_instance_id,
+                        error = %error,
+                        "gRPC source trigger failed"
+                    );
+                }
+            }
+            Err(error) => {
+                runtime
+                    .mark_failed(
+                        &key.deployment_hash,
+                        &key.pipe_instance_id,
+                        now_timestamp(),
+                        format!("gRPC source error: {}", error),
+                    )
+                    .await;
+                debug!(
+                    deployment_hash = %key.deployment_hash,
+                    pipe_instance_id = %key.pipe_instance_id,
+                    error = %error,
+                    "gRPC source worker will retry"
+                );
+                tokio::time::sleep(pipe_source_retry_delay()).await;
+            }
+        }
+    }
+}
+
+async fn run_amqp_source_worker(
+    runtime: PipeRuntime,
+    key: PipeRuntimeKey,
+    registration: PipeRegistration,
+) {
+    let broker_url = registration.source_broker_url.clone().unwrap_or_default();
+    let queue = registration.source_queue.clone().unwrap_or_default();
+    let exchange = registration.source_exchange.clone().unwrap_or_default();
+    let routing_key = registration.source_routing_key.clone().unwrap_or_default();
+
+    info!(
+        deployment_hash = %key.deployment_hash,
+        pipe_instance_id = %key.pipe_instance_id,
+        queue = %queue,
+        "pipe AMQP source worker started"
+    );
+
+    loop {
+        match Connection::connect(&broker_url, ConnectionProperties::default()).await {
+            Ok(connection) => match connection.create_channel().await {
+                Ok(channel) => {
+                    if !exchange.is_empty() {
+                        if let Err(error) = channel
+                            .queue_bind(
+                                &queue,
+                                &exchange,
+                                &routing_key,
+                                QueueBindOptions::default(),
+                                FieldTable::default(),
+                            )
+                            .await
+                        {
+                            runtime
+                                .mark_failed(
+                                    &key.deployment_hash,
+                                    &key.pipe_instance_id,
+                                    now_timestamp(),
+                                    format!("AMQP queue bind failed: {}", error),
+                                )
+                                .await;
+                            tokio::time::sleep(pipe_source_retry_delay()).await;
+                            continue;
+                        }
+                    }
+
+                    match channel
+                        .basic_consume(
+                            &queue,
+                            &format!("status-panel-pipe-{}", key.pipe_instance_id),
+                            BasicConsumeOptions::default(),
+                            FieldTable::default(),
+                        )
+                        .await
+                    {
+                        Ok(mut consumer) => {
+                            while let Some(delivery) = consumer.next().await {
+                                match delivery {
+                                    Ok(delivery) => {
+                                        let payload =
+                                            serde_json::from_slice::<Value>(&delivery.data)
+                                                .unwrap_or_else(|_| {
+                                                    Value::String(
+                                                        String::from_utf8_lossy(&delivery.data)
+                                                            .to_string(),
+                                                    )
+                                                });
+                                        if let Err(error) = runtime
+                                            .trigger_registered_payload(
+                                                &key.deployment_hash,
+                                                &key.pipe_instance_id,
+                                                payload,
+                                                "rabbitmq",
+                                            )
+                                            .await
+                                        {
+                                            warn!(
+                                                deployment_hash = %key.deployment_hash,
+                                                pipe_instance_id = %key.pipe_instance_id,
+                                                error = %error,
+                                                "AMQP source trigger failed"
+                                            );
+                                        }
+                                        if let Err(error) =
+                                            delivery.ack(BasicAckOptions::default()).await
+                                        {
+                                            runtime
+                                                .mark_failed(
+                                                    &key.deployment_hash,
+                                                    &key.pipe_instance_id,
+                                                    now_timestamp(),
+                                                    format!("AMQP ack failed: {}", error),
+                                                )
+                                                .await;
+                                            break;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        runtime
+                                            .mark_failed(
+                                                &key.deployment_hash,
+                                                &key.pipe_instance_id,
+                                                now_timestamp(),
+                                                format!("AMQP consume failed: {}", error),
+                                            )
+                                            .await;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            runtime
+                                .mark_failed(
+                                    &key.deployment_hash,
+                                    &key.pipe_instance_id,
+                                    now_timestamp(),
+                                    format!("AMQP consumer setup failed: {}", error),
+                                )
+                                .await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    runtime
+                        .mark_failed(
+                            &key.deployment_hash,
+                            &key.pipe_instance_id,
+                            now_timestamp(),
+                            format!("AMQP channel creation failed: {}", error),
+                        )
+                        .await;
+                }
+            },
+            Err(error) => {
+                runtime
+                    .mark_failed(
+                        &key.deployment_hash,
+                        &key.pipe_instance_id,
+                        now_timestamp(),
+                        format!("AMQP connection failed: {}", error),
+                    )
+                    .await;
+            }
+        }
+
+        tokio::time::sleep(pipe_source_retry_delay()).await;
+    }
+}
+
+async fn handle_activate_pipe(
+    agent_cmd: &AgentCommand,
+    data: &ActivatePipeCommand,
+    pipe_runtime: &PipeRuntime,
+) -> Result<CommandResult> {
+    let mut result = base_result(agent_cmd, &data.deployment_hash, "", "activate_pipe");
+    let activated_at = now_timestamp();
+    let mut registration = PipeRegistration::from(data.clone());
+    registration.lifecycle = PipeLifecycleSnapshot::active(activated_at);
+
+    let activation = pipe_runtime
+        .activate(
+            registered_pipe_key(&data.deployment_hash, &data.pipe_instance_id),
+            registration,
+        )
+        .await;
+
+    result.result = Some(json!({
+        "type": "activate_pipe",
+        "deployment_hash": data.deployment_hash,
+        "pipe_instance_id": data.pipe_instance_id,
+        "active": true,
+        "replaced": activation.replaced,
+        "reactivated": activation.previous_lifecycle.is_some(),
+        "trigger_type": data.trigger_type,
+        "lifecycle": activation.registration.lifecycle,
+    }));
+
+    pipe_runtime
+        .spawn_source_worker_if_needed(
+            &data.deployment_hash,
+            &data.pipe_instance_id,
+            activation.registration,
+        )
+        .await;
+
+    Ok(result)
+}
+
+async fn handle_deactivate_pipe(
+    agent_cmd: &AgentCommand,
+    data: &DeactivatePipeCommand,
+    pipe_runtime: &PipeRuntime,
+) -> Result<CommandResult> {
+    let mut result = base_result(agent_cmd, &data.deployment_hash, "", "deactivate_pipe");
+    let deactivated_at = now_timestamp();
+    let deactivation = pipe_runtime
+        .deactivate(
+            &data.deployment_hash,
+            &data.pipe_instance_id,
+            deactivated_at,
+        )
+        .await;
+    pipe_runtime
+        .stop_worker(&data.deployment_hash, &data.pipe_instance_id)
+        .await;
+
+    result.result = Some(json!({
+        "type": "deactivate_pipe",
+        "deployment_hash": data.deployment_hash,
+        "pipe_instance_id": data.pipe_instance_id,
+        "active": false,
+        "removed": deactivation.removed,
+        "lifecycle": deactivation.lifecycle,
+    }));
+
+    Ok(result)
+}
+
+async fn handle_trigger_pipe(
+    agent_cmd: &AgentCommand,
+    data: &TriggerPipeCommand,
+    pipe_runtime: &PipeRuntime,
+) -> Result<CommandResult> {
+    let mut result = base_result(agent_cmd, &data.deployment_hash, "", "trigger_pipe");
+    let registration = pipe_runtime
+        .resolve(&data.deployment_hash, &data.pipe_instance_id)
+        .await;
+    if registration.is_none()
+        && !trigger_has_inline_source(data)
+        && !trigger_has_inline_target(data)
+    {
+        let error = format!(
+            "pipe_instance_id {} is not active on this agent",
+            data.pipe_instance_id
+        );
+        pipe_runtime
+            .mark_failed(
+                &data.deployment_hash,
+                &data.pipe_instance_id,
+                now_timestamp(),
+                error.clone(),
+            )
+            .await;
+        result.status = "failed".into();
+        result.result = Some(json!({
+            "type": "trigger_pipe",
+            "deployment_hash": data.deployment_hash,
+            "pipe_instance_id": data.pipe_instance_id,
+            "success": false,
+            "source_data": Value::Null,
+            "mapped_data": Value::Null,
+            "target_response": Value::Null,
+            "error": error,
+            "triggered_at": now_timestamp(),
+            "trigger_type": data.trigger_type,
+        }));
+        result.error = Some(error);
+        return Ok(result);
+    }
+
+    let resolved = merge_trigger_with_registration(data, registration.as_ref());
+    let source_data = match resolved.input_data.clone() {
+        Some(value) => value,
+        None => match resolved
+            .source_container
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            Some(container) => match fetch_trigger_pipe_source_request(
+                container,
+                &resolved.source_endpoint,
+                &resolved.source_method,
+            )
+            .await
+            {
+                Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+                    response_body
+                }
+                Ok((status_code, response_body)) => {
+                    let error = format!("source fetch failed with status {}", status_code);
+                    pipe_runtime
+                        .mark_failed(
+                            &data.deployment_hash,
+                            &data.pipe_instance_id,
+                            now_timestamp(),
+                            error.clone(),
+                        )
+                        .await;
+                    result.status = "failed".into();
+                    result.result = Some(json!({
+                        "type": "trigger_pipe",
+                        "deployment_hash": data.deployment_hash,
+                        "pipe_instance_id": data.pipe_instance_id,
+                        "success": false,
+                        "source_data": response_body,
+                        "mapped_data": Value::Null,
+                        "target_response": Value::Null,
+                        "error": error,
+                        "triggered_at": now_timestamp(),
+                        "trigger_type": resolved.trigger_type,
+                        "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                    }));
+                    result.error = Some(error);
+                    return Ok(result);
+                }
+                Err(err) => {
+                    let error = format!("failed to fetch trigger_pipe source: {}", err);
+                    pipe_runtime
+                        .mark_failed(
+                            &data.deployment_hash,
+                            &data.pipe_instance_id,
+                            now_timestamp(),
+                            error.clone(),
+                        )
+                        .await;
+                    result.status = "failed".into();
+                    result.result = Some(json!({
+                        "type": "trigger_pipe",
+                        "deployment_hash": data.deployment_hash,
+                        "pipe_instance_id": data.pipe_instance_id,
+                        "success": false,
+                        "source_data": Value::Null,
+                        "mapped_data": Value::Null,
+                        "target_response": Value::Null,
+                        "error": error,
+                        "triggered_at": now_timestamp(),
+                        "trigger_type": resolved.trigger_type,
+                        "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                    }));
+                    result.error = Some(error);
+                    return Ok(result);
+                }
+            },
+            None => {
+                let error = "trigger_pipe requires input_data or source_container";
+                pipe_runtime
+                    .mark_failed(
+                        &data.deployment_hash,
+                        &data.pipe_instance_id,
+                        now_timestamp(),
+                        error.to_string(),
+                    )
+                    .await;
+                result.status = "failed".into();
+                result.result = Some(json!({
+                    "type": "trigger_pipe",
+                    "deployment_hash": data.deployment_hash,
+                    "pipe_instance_id": data.pipe_instance_id,
+                    "success": false,
+                    "source_data": Value::Null,
+                    "mapped_data": Value::Null,
+                    "target_response": Value::Null,
+                    "error": error,
+                    "triggered_at": now_timestamp(),
+                    "trigger_type": resolved.trigger_type,
+                    "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                }));
+                result.error = Some(error.into());
+                return Ok(result);
+            }
+        },
+    };
+
+    let mapped_data = apply_pipe_field_mapping(&source_data, resolved.field_mapping.as_ref());
+    let target = match (
+        resolved
+            .target_url
+            .as_deref()
+            .filter(|value| !value.is_empty()),
+        resolved
+            .target_container
+            .as_deref()
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(value), _) => Ok((
+            "external",
+            build_pipe_target_url(value, &resolved.target_endpoint),
+        )),
+        (None, Some(value)) => Ok(("container", value.to_string())),
+        (None, None) => {
+            let error = "trigger_pipe requires target_url or target_container";
+            pipe_runtime
+                .mark_failed(
+                    &data.deployment_hash,
+                    &data.pipe_instance_id,
+                    now_timestamp(),
+                    error.to_string(),
+                )
+                .await;
+            result.status = "failed".into();
+            result.result = Some(json!({
+                "type": "trigger_pipe",
+                "deployment_hash": data.deployment_hash,
+                "pipe_instance_id": data.pipe_instance_id,
+                "success": false,
+                "source_data": source_data,
+                "mapped_data": mapped_data,
+                "target_response": Value::Null,
+                "error": error,
+                "triggered_at": now_timestamp(),
+                "trigger_type": resolved.trigger_type,
+                "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+            }));
+            result.error = Some(error.into());
+            Err(())
+        }
+    };
+    if target.is_err() {
+        return Ok(result);
+    }
+    let (target_mode, target_value) = target.unwrap();
+    let target_transport = trigger_pipe_target_transport(target_mode, &target_value);
+
+    let send_result = match target_mode {
+        "external" => {
+            if target_value.starts_with("ws://") || target_value.starts_with("wss://") {
+                crate::transport::websocket::ws_send_target(&target_value, &mapped_data)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            } else if target_value.starts_with("grpc://") || target_value.starts_with("grpcs://") {
+                let grpc_endpoint = if target_value.starts_with("grpcs://") {
+                    target_value.replacen("grpcs://", "https://", 1)
+                } else {
+                    target_value.replacen("grpc://", "http://", 1)
+                };
+                let step_id = data.pipe_instance_id.trim();
+                if step_id.is_empty() {
+                    Err(anyhow::anyhow!(
+                        "trigger_pipe gRPC target requires a non-empty pipe_instance_id for step_id"
+                    ))
+                } else {
+                    crate::transport::grpc_client::grpc_send_target(
+                        &grpc_endpoint,
+                        &data.pipe_instance_id,
+                        step_id,
+                        &mapped_data,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+                }
+            } else {
+                send_trigger_pipe_request(&target_value, &resolved.target_method, &mapped_data)
+                    .await
+            }
+        }
+        "container" => {
+            send_trigger_pipe_container_request(
+                &target_value,
+                &resolved.target_endpoint,
+                &resolved.target_method,
+                &mapped_data,
+            )
+            .await
+        }
+        _ => unreachable!(),
+    };
+
+    match send_result {
+        Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+            let triggered_at = now_timestamp();
+            pipe_runtime
+                .mark_triggered(
+                    &data.deployment_hash,
+                    &data.pipe_instance_id,
+                    triggered_at.clone(),
+                )
+                .await;
+            result.status = "success".into();
+            result.result = Some(json!({
+                "type": "trigger_pipe",
+                "deployment_hash": data.deployment_hash,
+                "pipe_instance_id": data.pipe_instance_id,
+                "success": true,
+                "source_data": source_data,
+                "mapped_data": mapped_data,
+                "target_response": build_trigger_pipe_target_response(
+                    target_transport,
+                    Some(status_code),
+                    response_body,
+                ),
+                "triggered_at": triggered_at,
+                "trigger_type": resolved.trigger_type,
+                "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+            }));
+        }
+        Ok((status_code, response_body)) => {
+            let error = format!("target request failed with status {}", status_code);
+            pipe_runtime
+                .mark_failed(
+                    &data.deployment_hash,
+                    &data.pipe_instance_id,
+                    now_timestamp(),
+                    error.clone(),
+                )
+                .await;
+            result.status = "failed".into();
+            result.result = Some(json!({
+                "type": "trigger_pipe",
+                "deployment_hash": data.deployment_hash,
+                "pipe_instance_id": data.pipe_instance_id,
+                "success": false,
+                "source_data": source_data,
+                "mapped_data": mapped_data,
+                "target_response": build_trigger_pipe_target_response(
+                    target_transport,
+                    Some(status_code),
+                    response_body,
+                ),
+                "error": error,
+                "triggered_at": now_timestamp(),
+                "trigger_type": resolved.trigger_type,
+                "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+            }));
+            result.error = Some(error);
+        }
+        Err(err) => {
+            let error = err.to_string();
+            pipe_runtime
+                .mark_failed(
+                    &data.deployment_hash,
+                    &data.pipe_instance_id,
+                    now_timestamp(),
+                    error.clone(),
+                )
+                .await;
+            result.status = "failed".into();
+            result.result = Some(json!({
+                "type": "trigger_pipe",
+                "deployment_hash": data.deployment_hash,
+                "pipe_instance_id": data.pipe_instance_id,
+                "success": false,
+                "source_data": source_data,
+                "mapped_data": mapped_data,
+                "target_response": build_trigger_pipe_target_response(
+                    target_transport,
+                    None,
+                    Value::Null,
+                ),
+                "error": error,
+                "triggered_at": now_timestamp(),
+                "trigger_type": resolved.trigger_type,
+                "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+            }));
+            result.error = Some(error);
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(feature = "docker")]
@@ -4649,7 +7156,7 @@ async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
 }
 
 #[cfg(any(feature = "docker", test))]
-fn extract_openapi_operations(spec: &Value) -> Vec<Value> {
+fn extract_openapi_operations(spec: &Value, capture_samples: bool) -> Vec<Value> {
     let mut operations = Vec::new();
 
     if let Some(paths) = spec.get("paths").and_then(|p| p.as_object()) {
@@ -4673,18 +7180,88 @@ fn extract_openapi_operations(spec: &Value) -> Vec<Value> {
                     // Extract field names from request body schema
                     let fields = extract_request_fields(spec, details);
 
-                    operations.push(json!({
+                    let mut op = json!({
                         "path": path,
                         "method": method_upper,
                         "summary": summary,
                         "fields": fields,
-                    }));
+                    });
+
+                    // Extract sample response from OpenAPI spec examples
+                    if capture_samples {
+                        if let Some(sample) = extract_response_example(spec, details) {
+                            op["sample_response"] = sample;
+                        }
+                    }
+
+                    operations.push(op);
                 }
             }
         }
     }
 
     operations
+}
+
+/// Extract a sample response from an OpenAPI operation's response schema.
+/// Looks for: responses -> 200 -> content -> application/json -> example/schema/examples
+#[cfg(any(feature = "docker", test))]
+fn extract_response_example(spec: &Value, operation: &Value) -> Option<Value> {
+    let responses = operation.get("responses")?;
+
+    // Try 200, 201, then default
+    let response = responses
+        .get("200")
+        .or_else(|| responses.get("201"))
+        .or_else(|| responses.get("default"))?;
+
+    // OpenAPI 3.x: content -> application/json -> example or schema -> example
+    if let Some(content) = response.get("content") {
+        if let Some(json_content) = content.get("application/json") {
+            // Direct example on the media type
+            if let Some(example) = json_content.get("example") {
+                return Some(example.clone());
+            }
+            // Examples (named) — take the first one
+            if let Some(examples) = json_content.get("examples").and_then(|e| e.as_object()) {
+                if let Some((_, first)) = examples.iter().next() {
+                    if let Some(value) = first.get("value") {
+                        return Some(value.clone());
+                    }
+                }
+            }
+            // Schema example
+            if let Some(schema) = json_content.get("schema") {
+                if let Some(example) = schema.get("example") {
+                    return Some(example.clone());
+                }
+                // Resolve $ref if present
+                if let Some(ref_path) = schema.get("$ref").and_then(|r| r.as_str()) {
+                    if let Some(resolved) = resolve_ref(spec, ref_path) {
+                        if let Some(example) = resolved.get("example") {
+                            return Some(example.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Swagger 2.x: examples -> application/json
+    if let Some(examples) = response.get("examples") {
+        if let Some(json_example) = examples.get("application/json") {
+            return Some(json_example.clone());
+        }
+    }
+
+    // Swagger 2.x: schema -> example
+    if let Some(schema) = response.get("schema") {
+        if let Some(example) = schema.get("example") {
+            return Some(example.clone());
+        }
+    }
+
+    None
 }
 
 #[cfg(any(feature = "docker", test))]
@@ -4882,7 +7459,8 @@ async fn handle_probe_endpoints(
                                 if !protocols_detected.contains(&"openapi".to_string()) {
                                     protocols_detected.push("openapi".to_string());
                                 }
-                                let operations = extract_openapi_operations(&spec);
+                                let operations =
+                                    extract_openapi_operations(&spec, data.capture_samples);
                                 endpoints.push(json!({
                                     "protocol": "openapi",
                                     "base_url": format!("http://{}:{}", data.app_code, port),
@@ -4949,12 +7527,48 @@ async fn handle_probe_endpoints(
                             if !protocols_detected.contains(&"rest".to_string()) {
                                 protocols_detected.push("rest".to_string());
                             }
-                            endpoints.push(json!({
+
+                            // Capture sample response body for REST endpoints
+                            let mut sample_response = None;
+                            if data.capture_samples && code == "200" {
+                                let escaped_url = shell_escape_single_quotes(&format!(
+                                    "http://localhost:{}{}",
+                                    port, path
+                                ));
+                                let body_cmd = format!(
+                                    "curl -sf -m {} '{}' 2>/dev/null || true",
+                                    data.probe_timeout, escaped_url
+                                );
+                                if let Ok(Ok((0, body, _))) = tokio::time::timeout(
+                                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
+                                    docker::exec_in_container_with_output(&target_name, &body_cmd),
+                                )
+                                .await
+                                {
+                                    let body = body.trim();
+                                    if !body.is_empty() {
+                                        // Try to parse as JSON; fall back to string
+                                        sample_response = Some(
+                                            serde_json::from_str::<Value>(body)
+                                                .unwrap_or_else(|_| json!(body)),
+                                        );
+                                    }
+                                }
+                            }
+
+                            let mut ep = json!({
                                 "protocol": "rest",
                                 "base_url": format!("http://{}:{}", data.app_code, port),
                                 "spec_url": path,
                                 "operations": [],
-                            }));
+                            });
+
+                            // Attach sample_response at endpoint level for REST heuristic
+                            if let Some(sample) = sample_response {
+                                ep["sample_response"] = sample;
+                            }
+
+                            endpoints.push(ep);
                         }
                     }
                     _ => continue,
@@ -4980,6 +7594,74 @@ async fn handle_probe_endpoints(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    fn fixture_path(path: &str) -> PathBuf {
+        let relative_path = match path {
+            "activate_pipe.webhook.command.json" => {
+                "../shared-fixtures/pipe-contract/activate_pipe.webhook.command.json"
+            }
+            "activate_pipe.rabbitmq.command.json" => {
+                "../shared-fixtures/pipe-contract/activate_pipe.rabbitmq.command.json"
+            }
+            "deactivate_pipe.command.json" => {
+                "../shared-fixtures/pipe-contract/deactivate_pipe.command.json"
+            }
+            "trigger_pipe.manual.command.json" => {
+                "../shared-fixtures/pipe-contract/trigger_pipe.manual.command.json"
+            }
+            "trigger_pipe.replay.command.json" => {
+                "../shared-fixtures/pipe-contract/trigger_pipe.replay.command.json"
+            }
+            other => panic!("unknown fixture: {}", other),
+        };
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path)
+    }
+
+    fn shared_fixtures_available() -> bool {
+        fixture_path("activate_pipe.webhook.command.json").exists()
+    }
+
+    fn fixture(path: &str) -> Value {
+        let fixture_path = fixture_path(path);
+        let body = std::fs::read_to_string(&fixture_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read fixture {} at {}: {}",
+                path,
+                fixture_path.display(),
+                error
+            )
+        });
+
+        serde_json::from_str(&body).expect("fixture should be valid json")
+    }
+
+    struct EnvGuard {
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&str]) -> Self {
+            let vars = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            Self { vars }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, original) in &self.vars {
+                match original {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     macro_rules! stacker_test {
         ($name:ident, $cmd_name:expr, $payload:expr, $variant:path) => {
@@ -5000,6 +7682,375 @@ mod tests {
                 }
             }
         };
+    }
+
+    #[test]
+    fn parses_activate_pipe_shared_webhook_fixture() {
+        if !shared_fixtures_available() {
+            eprintln!("skipping shared fixture test: shared fixtures are unavailable");
+            return;
+        }
+        let cmd = AgentCommand {
+            id: "cmd-activate-fixture".into(),
+            command_id: "cmd-activate-fixture".into(),
+            name: "activate_pipe".into(),
+            params: json!({ "params": fixture("activate_pipe.webhook.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(data.source_container.as_deref(), Some("source-app"));
+                assert_eq!(data.trigger_type, "webhook");
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_activate_pipe_shared_rabbitmq_fixture() {
+        if !shared_fixtures_available() {
+            eprintln!("skipping shared fixture test: shared fixtures are unavailable");
+            return;
+        }
+        let cmd = AgentCommand {
+            id: "cmd-activate-rabbit-fixture".into(),
+            command_id: "cmd-activate-rabbit-fixture".into(),
+            name: "activate_pipe".into(),
+            params: json!({ "params": fixture("activate_pipe.rabbitmq.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(data.trigger_type, "rabbitmq");
+                assert_eq!(data.source_queue.as_deref(), Some("events.queue"));
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_deactivate_pipe_shared_fixture() {
+        if !shared_fixtures_available() {
+            eprintln!("skipping shared fixture test: shared fixtures are unavailable");
+            return;
+        }
+        let cmd = AgentCommand {
+            id: "cmd-deactivate-fixture".into(),
+            command_id: "cmd-deactivate-fixture".into(),
+            name: "deactivate_pipe".into(),
+            params: json!({ "params": fixture("deactivate_pipe.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::DeactivatePipe(data)) => {
+                assert_eq!(
+                    data.pipe_instance_id,
+                    "11111111-1111-1111-1111-111111111111"
+                );
+            }
+            other => panic!("Expected DeactivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_trigger_pipe_shared_manual_fixture() {
+        if !shared_fixtures_available() {
+            eprintln!("skipping shared fixture test: shared fixtures are unavailable");
+            return;
+        }
+        let cmd = AgentCommand {
+            id: "cmd-trigger-fixture".into(),
+            command_id: "cmd-trigger-fixture".into(),
+            name: "trigger_pipe".into(),
+            params: json!({ "params": fixture("trigger_pipe.manual.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.trigger_type, "manual");
+                assert_eq!(data.target_url.as_deref(), Some("https://example.com"));
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_trigger_pipe_shared_replay_fixture() {
+        if !shared_fixtures_available() {
+            eprintln!("skipping shared fixture test: shared fixtures are unavailable");
+            return;
+        }
+        let cmd = AgentCommand {
+            id: "cmd-trigger-replay-fixture".into(),
+            command_id: "cmd-trigger-replay-fixture".into(),
+            name: "trigger_pipe".into(),
+            params: json!({ "params": fixture("trigger_pipe.replay.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.trigger_type, "replay");
+                assert_eq!(data.input_data, Some(json!({ "invoice_id": "inv-replay" })));
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipe_runtime_persists_and_restores_active_registration() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("pipe-runtime.json");
+
+        let runtime = PipeRuntime::new();
+        runtime
+            .configure_persistence(Some(state_path.clone()))
+            .await;
+
+        let mut registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-restore".into(),
+            pipe_instance_id: "pipe-restore-1".into(),
+            source_container: Some("source-app".into()),
+            source_endpoint: "/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some("https://example.com".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "email": "$.user.email" })),
+            trigger_type: "webhook".into(),
+        });
+        registration.lifecycle = PipeLifecycleSnapshot::active("2026-01-01T00:00:00Z".into());
+
+        runtime
+            .activate(
+                PipeRuntimeKey {
+                    deployment_hash: "dep-restore".into(),
+                    pipe_instance_id: "pipe-restore-1".into(),
+                },
+                registration,
+            )
+            .await;
+
+        let restored = PipeRuntime::new();
+        restored.configure_persistence(Some(state_path)).await;
+        let count = restored.restore_from_disk().await.unwrap();
+
+        assert_eq!(count, 1);
+        let registration = restored
+            .resolve("dep-restore", "pipe-restore-1")
+            .await
+            .expect("registration should restore");
+        assert_eq!(
+            registration.target_url.as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(registration.trigger_type, "webhook");
+
+        let snapshot = restored
+            .snapshot("dep-restore", "pipe-restore-1")
+            .await
+            .expect("lifecycle should restore");
+        assert_eq!(snapshot.state, PipeLifecycleState::Active);
+        assert_eq!(snapshot.activated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn pipe_runtime_deactivate_removes_persisted_registration() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("pipe-runtime.json");
+
+        let runtime = PipeRuntime::new();
+        runtime
+            .configure_persistence(Some(state_path.clone()))
+            .await;
+
+        let mut registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-deactivate".into(),
+            pipe_instance_id: "pipe-deactivate-1".into(),
+            source_container: Some("source-app".into()),
+            source_endpoint: "/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some("https://example.com".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "webhook".into(),
+        });
+        registration.lifecycle = PipeLifecycleSnapshot::active("2026-01-01T00:00:00Z".into());
+
+        runtime
+            .activate(
+                PipeRuntimeKey {
+                    deployment_hash: "dep-deactivate".into(),
+                    pipe_instance_id: "pipe-deactivate-1".into(),
+                },
+                registration,
+            )
+            .await;
+
+        runtime
+            .deactivate(
+                "dep-deactivate",
+                "pipe-deactivate-1",
+                "2026-01-01T00:05:00Z".into(),
+            )
+            .await;
+
+        let restored = PipeRuntime::new();
+        restored.configure_persistence(Some(state_path)).await;
+        let count = restored.restore_from_disk().await.unwrap();
+
+        assert_eq!(count, 0);
+        assert!(restored
+            .resolve("dep-deactivate", "pipe-deactivate-1")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn pipe_runtime_restore_restarts_poll_worker() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("pipe-runtime.json");
+
+        let runtime = PipeRuntime::new();
+        runtime
+            .configure_persistence(Some(state_path.clone()))
+            .await;
+
+        let mut registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-poll".into(),
+            pipe_instance_id: "pipe-poll-1".into(),
+            source_container: None,
+            source_endpoint: "http://127.0.0.1:1/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_url: Some("https://example.com".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "poll".into(),
+        });
+        registration.lifecycle = PipeLifecycleSnapshot::active("2026-01-01T00:00:00Z".into());
+
+        runtime
+            .activate(
+                PipeRuntimeKey {
+                    deployment_hash: "dep-poll".into(),
+                    pipe_instance_id: "pipe-poll-1".into(),
+                },
+                registration,
+            )
+            .await;
+
+        let restored = PipeRuntime::new();
+        restored.configure_persistence(Some(state_path)).await;
+        let count = restored.restore_from_disk().await.unwrap();
+        assert_eq!(count, 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let workers = restored.workers.read().await;
+        assert_eq!(workers.len(), 1);
+        drop(workers);
+        restored.stop_worker("dep-poll", "pipe-poll-1").await;
+    }
+
+    #[test]
+    fn default_pipe_runtime_state_path_uses_config_directory() {
+        let path = default_pipe_runtime_state_path(Some("/tmp/status/config.json")).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/status/.status/pipe-runtime-state.json")
+        );
+    }
+
+    #[test]
+    fn pipe_source_poll_interval_clamps_zero_to_one_second() {
+        let _env = EnvGuard::new(&["PIPE_POLL_INTERVAL_SECS"]);
+        std::env::set_var("PIPE_POLL_INTERVAL_SECS", "0");
+
+        assert_eq!(pipe_source_poll_interval(), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn pipe_runtime_persistence_redacts_credentials() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("pipe-runtime.json");
+
+        let runtime = PipeRuntime::new();
+        runtime
+            .configure_persistence(Some(state_path.clone()))
+            .await;
+
+        let mut registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-secret".into(),
+            pipe_instance_id: "pipe-secret-1".into(),
+            source_container: None,
+            source_endpoint: "/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: Some("amqp://guest:guest@localhost:5672/%2f".into()),
+            source_queue: Some("events.queue".into()),
+            source_exchange: Some("events.exchange".into()),
+            source_routing_key: Some("events.created".into()),
+            target_url: Some("https://user:token@example.com/hooks".into()),
+            target_container: None,
+            target_endpoint: "/runtime/pipe".into(),
+            target_method: "POST".into(),
+            field_mapping: None,
+            trigger_type: "rabbitmq".into(),
+        });
+        registration.lifecycle = PipeLifecycleSnapshot::active("2026-01-01T00:00:00Z".into());
+
+        runtime
+            .activate(
+                PipeRuntimeKey {
+                    deployment_hash: "dep-secret".into(),
+                    pipe_instance_id: "pipe-secret-1".into(),
+                },
+                registration,
+            )
+            .await;
+
+        let body = tokio::fs::read_to_string(&state_path).await.unwrap();
+        assert!(!body.contains("guest:guest"));
+        assert!(!body.contains("user:token"));
+        assert!(body.contains("amqp://***@localhost:5672/%2f"));
+        assert!(body.contains("https://***@example.com/hooks"));
+
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     stacker_test!(
@@ -5150,6 +8201,66 @@ mod tests {
         StackerCommand::ListContainers
     );
     stacker_test!(
+        parses_activate_pipe_command,
+        "activate_pipe",
+        json!({
+            "params": {
+                "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                "target_url": "https://example.com"
+            }
+        }),
+        StackerCommand::ActivatePipe
+    );
+
+    #[test]
+    fn activate_pipe_defaults_trigger_type_to_webhook() {
+        let cmd = AgentCommand {
+            id: "cmd-activate-default".into(),
+            command_id: "cmd-activate-default".into(),
+            name: "activate_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "target_url": "https://example.com"
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.trigger_type, "webhook");
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
+    stacker_test!(
+        parses_deactivate_pipe_command,
+        "deactivate_pipe",
+        json!({
+            "params": {
+                "pipe_instance_id": "11111111-1111-1111-1111-111111111111"
+            }
+        }),
+        StackerCommand::DeactivatePipe
+    );
+    stacker_test!(
+        parses_trigger_pipe_command,
+        "trigger_pipe",
+        json!({
+            "params": {
+                "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                "input_data": {
+                    "invoice_id": "inv-1"
+                }
+            }
+        }),
+        StackerCommand::TriggerPipe
+    );
+    stacker_test!(
         parses_stacker_list_containers_command,
         "stacker.list_containers",
         json!({
@@ -5173,6 +8284,203 @@ mod tests {
 
         let parsed = parse_stacker_command(&cmd).unwrap();
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parses_trigger_pipe_external_target_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-trigger".into(),
+            command_id: "cmd-trigger".into(),
+            name: "trigger_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "target_url": "https://example.com",
+                    "target_endpoint": "/webhook/pipe",
+                    "target_method": "post",
+                    "field_mapping": { "email": "$.user.email" },
+                    "trigger_type": "manual",
+                    "input_data": { "user": { "email": "dev@try.direct" } }
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(data.target_url.as_deref(), Some("https://example.com"));
+                assert_eq!(data.target_endpoint, "/webhook/pipe");
+                assert_eq!(data.target_method, "POST");
+                assert_eq!(data.trigger_type, "manual");
+                assert_eq!(data.field_mapping, Some(json!({ "email": "$.user.email" })));
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_trigger_pipe_internal_target_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-trigger".into(),
+            command_id: "cmd-trigger".into(),
+            name: "trigger_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "target_container": "target-app",
+                    "target_endpoint": "/hooks/pipe",
+                    "target_method": "post",
+                    "field_mapping": { "email": "$.user.email" },
+                    "input_data": { "user": { "email": "dev@try.direct" } }
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.target_container.as_deref(), Some("target-app"));
+                assert_eq!(data.target_endpoint, "/hooks/pipe");
+                assert_eq!(data.target_method, "POST");
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_trigger_pipe_source_fetch_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-trigger".into(),
+            command_id: "cmd-trigger".into(),
+            name: "trigger_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "source_container": "source-app",
+                    "source_endpoint": "/source/data",
+                    "source_method": "get",
+                    "target_container": "target-app",
+                    "target_endpoint": "/hooks/pipe",
+                    "target_method": "post"
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.source_container.as_deref(), Some("source-app"));
+                assert_eq!(data.source_endpoint, "/source/data");
+                assert_eq!(data.source_method, "GET");
+                assert_eq!(data.target_container.as_deref(), Some("target-app"));
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_activate_pipe_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-activate".into(),
+            command_id: "cmd-activate".into(),
+            name: "activate_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111",
+                    "target_url": "https://example.com",
+                    "target_endpoint": "/runtime/pipe",
+                    "target_method": "post",
+                    "field_mapping": { "email": "$.user.email" },
+                    "trigger_type": "webhook"
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(data.target_url.as_deref(), Some("https://example.com"));
+                assert_eq!(data.target_endpoint, "/runtime/pipe");
+                assert_eq!(data.target_method, "POST");
+                assert_eq!(data.trigger_type, "webhook");
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_activate_pipe_rabbitmq_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-activate-amqp".into(),
+            command_id: "cmd-activate-amqp".into(),
+            name: "activate_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "pipe-amqp-1",
+                    "source_broker_url": "amqp://guest:guest@localhost:5672/%2f",
+                    "source_queue": "events.queue",
+                    "source_exchange": "events.exchange",
+                    "source_routing_key": "events.created",
+                    "target_url": "https://example.com",
+                    "trigger_type": "rabbitmq"
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.trigger_type, "rabbitmq");
+                assert_eq!(
+                    data.source_broker_url.as_deref(),
+                    Some("amqp://guest:guest@localhost:5672/%2f")
+                );
+                assert_eq!(data.source_queue.as_deref(), Some("events.queue"));
+                assert_eq!(data.source_exchange.as_deref(), Some("events.exchange"));
+                assert_eq!(data.source_routing_key.as_deref(), Some("events.created"));
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_deactivate_pipe_fields() {
+        let cmd = AgentCommand {
+            id: "cmd-deactivate".into(),
+            command_id: "cmd-deactivate".into(),
+            name: "deactivate_pipe".into(),
+            params: json!({
+                "params": {
+                    "pipe_instance_id": "11111111-1111-1111-1111-111111111111"
+                }
+            }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::DeactivatePipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(
+                    data.pipe_instance_id,
+                    "11111111-1111-1111-1111-111111111111"
+                );
+            }
+            other => panic!("Expected DeactivatePipe command, got {:?}", other),
+        }
     }
 
     // --- ContainerRuntime tests ---
@@ -6001,6 +9309,7 @@ mod probe_endpoints_command_tests {
             container: Some("  crm-web  ".to_string()),
             protocols: vec!["  OpenAPI  ".to_string(), " REST ".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert_eq!(normalized.deployment_hash, "abc123");
@@ -6017,6 +9326,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec![],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
@@ -6030,6 +9340,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string(), "  ".to_string(), "".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert_eq!(normalized.protocols, vec!["openapi"]);
@@ -6043,6 +9354,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["  ".to_string(), "".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
@@ -6056,6 +9368,7 @@ mod probe_endpoints_command_tests {
             container: Some("   ".to_string()),
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let normalized = cmd.normalize();
         assert!(normalized.container.is_none());
@@ -6071,6 +9384,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let agent_cmd = AgentCommand {
             id: "test-id".into(),
@@ -6092,6 +9406,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let agent_cmd = AgentCommand {
             id: "test-id".into(),
@@ -6113,6 +9428,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let agent_cmd = AgentCommand {
             id: "test-id".into(),
@@ -6137,6 +9453,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let result = cmd.validate();
         assert!(result.is_err());
@@ -6151,6 +9468,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let result = cmd.validate();
         assert!(result.is_err());
@@ -6165,6 +9483,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string(), "invalid_proto".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         let result = cmd.validate();
         assert!(result.is_err());
@@ -6188,6 +9507,7 @@ mod probe_endpoints_command_tests {
                 "rest".to_string(),
             ],
             probe_timeout: 5,
+            capture_samples: false,
         };
         assert!(cmd.validate().is_ok());
     }
@@ -6200,6 +9520,7 @@ mod probe_endpoints_command_tests {
             container: None,
             protocols: vec!["openapi".to_string()],
             probe_timeout: 5,
+            capture_samples: false,
         };
         assert!(cmd.validate().is_ok());
     }
@@ -6234,7 +9555,7 @@ mod probe_endpoints_command_tests {
             }
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert_eq!(ops.len(), 2);
 
         // Find the GET operation
@@ -6270,7 +9591,7 @@ mod probe_endpoints_command_tests {
             }
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0]["method"], "GET");
     }
@@ -6282,7 +9603,7 @@ mod probe_endpoints_command_tests {
             "paths": {}
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert!(ops.is_empty());
     }
 
@@ -6293,7 +9614,7 @@ mod probe_endpoints_command_tests {
             "info": { "title": "test" }
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert!(ops.is_empty());
     }
 
@@ -6308,9 +9629,190 @@ mod probe_endpoints_command_tests {
             }
         });
 
-        let ops = extract_openapi_operations(&spec);
+        let ops = extract_openapi_operations(&spec, false);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0]["summary"], "");
+    }
+
+    #[test]
+    fn extract_openapi_operations_capture_samples_from_example() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/v1/posts": {
+                    "get": {
+                        "summary": "List posts",
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "example": [
+                                            {"id": 1, "title": "Hello World", "author": 42}
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Without capture_samples
+        let ops = extract_openapi_operations(&spec, false);
+        assert_eq!(ops.len(), 1);
+        assert!(ops[0].get("sample_response").is_none());
+
+        // With capture_samples
+        let ops = extract_openapi_operations(&spec, true);
+        assert_eq!(ops.len(), 1);
+        let sample = &ops[0]["sample_response"];
+        assert!(sample.is_array());
+        assert_eq!(sample[0]["id"], 1);
+        assert_eq!(sample[0]["title"], "Hello World");
+    }
+
+    #[test]
+    fn extract_openapi_operations_capture_samples_from_schema_example() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/users": {
+                    "get": {
+                        "summary": "Get users",
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "example": {"id": 1, "name": "Alice"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec, true);
+        assert_eq!(ops[0]["sample_response"]["name"], "Alice");
+    }
+
+    #[test]
+    fn extract_openapi_operations_capture_samples_swagger2() {
+        let spec = json!({
+            "swagger": "2.0",
+            "paths": {
+                "/api/items": {
+                    "get": {
+                        "summary": "List items",
+                        "responses": {
+                            "200": {
+                                "examples": {
+                                    "application/json": [
+                                        {"id": 1, "name": "Widget"}
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec, true);
+        assert_eq!(ops[0]["sample_response"][0]["name"], "Widget");
+    }
+
+    #[test]
+    fn extract_openapi_operations_capture_samples_with_ref() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/api/posts": {
+                    "get": {
+                        "summary": "List posts",
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "#/components/schemas/PostList"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "PostList": {
+                        "type": "array",
+                        "example": [{"id": 1, "title": "First Post"}]
+                    }
+                }
+            }
+        });
+
+        let ops = extract_openapi_operations(&spec, true);
+        assert_eq!(ops[0]["sample_response"][0]["title"], "First Post");
+    }
+
+    #[test]
+    fn probe_endpoints_command_capture_samples_defaults_false() {
+        let cmd: ProbeEndpointsCommand = serde_json::from_value(json!({
+            "app_code": "wordpress"
+        }))
+        .unwrap();
+        assert!(!cmd.capture_samples);
+    }
+
+    #[test]
+    fn probe_endpoints_command_capture_samples_true() {
+        let cmd: ProbeEndpointsCommand = serde_json::from_value(json!({
+            "app_code": "wordpress",
+            "capture_samples": true
+        }))
+        .unwrap();
+        assert!(cmd.capture_samples);
+    }
+
+    #[test]
+    fn extract_response_example_from_direct_example() {
+        let spec = json!({});
+        let operation = json!({
+            "responses": {
+                "200": {
+                    "content": {
+                        "application/json": {
+                            "example": {"id": 1, "name": "Test"}
+                        }
+                    }
+                }
+            }
+        });
+        let sample = extract_response_example(&spec, &operation);
+        assert!(sample.is_some());
+        assert_eq!(sample.unwrap()["name"], "Test");
+    }
+
+    #[test]
+    fn extract_response_example_returns_none_when_missing() {
+        let spec = json!({});
+        let operation = json!({
+            "responses": {
+                "200": {
+                    "description": "Success"
+                }
+            }
+        });
+        let sample = extract_response_example(&spec, &operation);
+        assert!(sample.is_none());
     }
 
     // ==================== EXTRACT_REQUEST_FIELDS TESTS ====================
