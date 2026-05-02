@@ -4785,10 +4785,8 @@ fn extract_html_forms(html: &str, page_path: &str) -> Vec<Value> {
         for attr_cap in attr_re.captures_iter(attrs_str) {
             match attr_cap[1].to_lowercase().as_str() {
                 "id" => id = attr_cap[2].to_string(),
-                "name" => {
-                    if id.is_empty() {
-                        id = attr_cap[2].to_string();
-                    }
+                "name" if id.is_empty() => {
+                    id = attr_cap[2].to_string();
                 }
                 "action" => action = attr_cap[2].to_string(),
                 "method" => method = attr_cap[2].to_uppercase(),
