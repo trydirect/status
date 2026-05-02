@@ -140,13 +140,17 @@ fn build_wait_command_url(
     timeout_secs: u64,
     priority: Option<&str>,
 ) -> String {
-    format!(
-        "{}/api/v1/agent/commands/wait/{}?timeout={}&priority={}",
-        base_url,
-        deployment_hash,
-        timeout_secs,
-        priority.unwrap_or("normal")
-    )
+    let mut url = format!(
+        "{}/api/v1/agent/commands/wait/{}?timeout={}",
+        base_url, deployment_hash, timeout_secs
+    );
+
+    if let Some(priority) = priority.filter(|value| !value.is_empty()) {
+        url.push_str("&priority=");
+        url.push_str(priority);
+    }
+
+    url
 }
 
 fn create_http_client() -> Result<Client> {
@@ -828,11 +832,11 @@ mod tests {
     }
 
     #[test]
-    fn build_wait_command_url_default_priority() {
+    fn build_wait_command_url_omits_priority_when_unset() {
         let url = build_wait_command_url("https://example.com", "dep-1", 60, None);
         assert_eq!(
             url,
-            "https://example.com/api/v1/agent/commands/wait/dep-1?timeout=60&priority=normal"
+            "https://example.com/api/v1/agent/commands/wait/dep-1?timeout=60"
         );
     }
 
