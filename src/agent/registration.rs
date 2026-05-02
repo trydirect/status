@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::{debug, info};
 
+const STATUS_PANEL_CAPABILITY: &str = "status_panel";
+const NPM_CREDENTIAL_SOURCE_VAULT: &str = "npm_credential_source=vault";
+
 #[derive(Debug, Serialize)]
 pub struct RegistrationRequest {
     pub purchase_token: String,
@@ -40,6 +43,7 @@ pub struct LinkAgentRequest {
     pub session_token: String,
     pub deployment_id: String,
     pub server_fingerprint: ServerFingerprint,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -120,6 +124,54 @@ pub fn collect_fingerprint() -> ServerFingerprint {
     }
 }
 
+pub async fn collect_capabilities(default_compose_agent_enabled: bool) -> Vec<String> {
+    let compose_agent = std::env::var("COMPOSE_AGENT_ENABLED")
+        .ok()
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(default_compose_agent_enabled);
+
+    let mut features = vec![
+        STATUS_PANEL_CAPABILITY.to_string(),
+        "monitoring".to_string(),
+        NPM_CREDENTIAL_SOURCE_VAULT.to_string(),
+    ];
+
+    if cfg!(feature = "docker") {
+        features.push("docker".to_string());
+        features.push("compose".to_string());
+        features.push("logs".to_string());
+        features.push("restart".to_string());
+    }
+
+    if compose_agent {
+        features.push("compose_agent".to_string());
+    }
+
+    #[cfg(feature = "docker")]
+    {
+        if crate::commands::stacker::detect_kata_runtime().await {
+            features.push("kata".to_string());
+        }
+    }
+
+    features
+}
+
+fn marketplace_registration_url(dashboard_url: &str) -> String {
+    format!(
+        "{}/api/v1/marketplace/agents/register",
+        dashboard_url.trim_end_matches('/')
+    )
+}
+
+fn agent_link_url(stacker_url: &str) -> String {
+    format!("{}/api/v1/agent/link", stacker_url.trim_end_matches('/'))
+}
+
+fn agent_login_url(stacker_url: &str) -> String {
+    format!("{}/api/v1/agent/login", stacker_url.trim_end_matches('/'))
+}
+
 /// Register this agent with the Stacker Server using a purchase token.
 pub async fn register_with_stacker(
     dashboard_url: &str,
@@ -142,7 +194,7 @@ pub async fn register_with_stacker(
         stack_id: stack_id.to_string(),
     };
 
-    let url = format!("{}/api/v1/agents/register", dashboard_url);
+    let url = marketplace_registration_url(dashboard_url);
     info!(url = %url, stack_id = %stack_id, "sending registration request to Stacker");
 
     let client = reqwest::Client::new();
@@ -193,7 +245,7 @@ pub async fn login_to_stacker(
         password: password.to_string(),
     };
 
-    let url = format!("{}/api/v1/auth/login", stacker_url);
+    let url = agent_login_url(stacker_url);
     info!(url = %url, email = %email, "sending login request to Stacker");
 
     let client = reqwest::Client::new();
@@ -219,8 +271,10 @@ pub async fn link_agent_to_deployment(
     stacker_url: &str,
     session_token: &str,
     deployment_id: &str,
+    default_compose_agent_enabled: bool,
 ) -> Result<RegistrationResponse, Box<dyn std::error::Error>> {
     let fingerprint = collect_fingerprint();
+    let capabilities = collect_capabilities(default_compose_agent_enabled).await;
     debug!(
         hostname = %fingerprint.hostname,
         deployment_id = %deployment_id,
@@ -231,9 +285,10 @@ pub async fn link_agent_to_deployment(
         session_token: session_token.to_string(),
         deployment_id: deployment_id.to_string(),
         server_fingerprint: fingerprint,
+        capabilities,
     };
 
-    let url = format!("{}/api/v1/agents/link", stacker_url);
+    let url = agent_link_url(stacker_url);
     info!(url = %url, deployment_id = %deployment_id, "sending link request to Stacker");
 
     let client = reqwest::Client::new();
@@ -285,5 +340,40 @@ mod tests {
         assert_eq!(parsed["agent_token"], "tok-secret");
         assert_eq!(parsed["deployment_hash"], "hash-abc");
         assert_eq!(parsed["dashboard_url"], "https://stacker.try.direct");
+    }
+
+    #[test]
+    fn marketplace_registration_url_uses_marketplace_scope() {
+        assert_eq!(
+            marketplace_registration_url("https://stacker.try.direct/"),
+            "https://stacker.try.direct/api/v1/marketplace/agents/register"
+        );
+    }
+
+    #[test]
+    fn agent_link_url_uses_singular_agent_scope() {
+        assert_eq!(
+            agent_link_url("https://stacker.try.direct/"),
+            "https://stacker.try.direct/api/v1/agent/link"
+        );
+    }
+
+    #[test]
+    fn agent_login_url_uses_agent_scope() {
+        assert_eq!(
+            agent_login_url("https://stacker.try.direct/"),
+            "https://stacker.try.direct/api/v1/agent/login"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_capabilities_includes_vault_proxy_marker() {
+        let capabilities = collect_capabilities(false).await;
+        assert!(capabilities
+            .iter()
+            .any(|cap| cap == STATUS_PANEL_CAPABILITY));
+        assert!(capabilities
+            .iter()
+            .any(|cap| cap == NPM_CREDENTIAL_SOURCE_VAULT));
     }
 }

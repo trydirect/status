@@ -56,6 +56,9 @@ STATUS_PANEL_PASSWORD=
 # ── Vault (optional) ────────────────────────────────────────────────
 # VAULT_ADDRESS=http://127.0.0.1:8200
 # VAULT_TOKEN=
+# STACKER_SERVER_ID=
+# STATUS_PANEL_PROXY_OWNER=true
+# NPM_ALLOW_ENV_FALLBACK=false
 
 # ── Self-update (optional) ──────────────────────────────────────────
 # UPDATE_SERVER_URL=

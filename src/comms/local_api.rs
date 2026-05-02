@@ -1404,6 +1404,7 @@ async fn link_select_handler(
         &stacker_url,
         &req.session_token,
         &req.deployment_id,
+        state.config.compose_agent_enabled,
     )
     .await
     {

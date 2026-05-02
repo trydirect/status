@@ -19,8 +19,8 @@
 - [x] Support unlinking from dashboard (agent continues to work standalone)
 - [x] **Login-based linking flow (Entry Point C):**
   - User logs in with TryDirect email + password from Status Panel UI
-  - Status Panel calls Stacker: `POST /api/v1/auth/login { email, password }` → returns `session_token` + user's deployments
-  - User selects a deployment from the list → Status Panel calls Stacker: `POST /api/v1/agents/link { session_token, deployment_id, server_fingerprint }`
+  - Status Panel calls Stacker: `POST /api/v1/agent/login { email, password }` → returns `session_token` + user's deployments
+  - User selects a deployment from the list → Status Panel calls Stacker: `POST /api/v1/agent/link { session_token, deployment_id, server_fingerprint, capabilities }`
   - Stacker validates session, checks user owns the deployment, issues `agent_id` + `agent_token`
   - No purchase_token needed — user's identity is the trust anchor
   - `purchase_token` flow retained only for headless Entry Point B (curl one-liner)

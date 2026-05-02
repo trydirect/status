@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - production
+      - dev
       - testing
     tags:
       - 'v*'
@@ -204,6 +205,7 @@ jobs:
       github.ref == 'refs/heads/production' ||
       github.ref == 'refs/heads/master' ||
       github.ref == 'refs/heads/testing' ||
+      github.ref == 'refs/heads/dev' ||
       startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Checkout repository

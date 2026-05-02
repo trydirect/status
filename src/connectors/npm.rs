@@ -8,6 +8,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::security::vault_client::NpmCredentials;
+
 /// Configuration for connecting to Nginx Proxy Manager
 #[derive(Debug, Clone)]
 pub struct NpmConfig {
@@ -19,14 +21,28 @@ pub struct NpmConfig {
     pub password: String,
 }
 
-impl Default for NpmConfig {
-    fn default() -> Self {
+impl NpmConfig {
+    pub fn new(host: String, email: String, password: String) -> Self {
         Self {
-            host: std::env::var("NPM_HOST")
-                .unwrap_or_else(|_| "http://nginx-proxy-manager:81".to_string()),
-            email: std::env::var("NPM_EMAIL").unwrap_or_else(|_| "admin@example.com".to_string()),
-            password: std::env::var("NPM_PASSWORD").unwrap_or_else(|_| "changeme".to_string()),
+            host,
+            email,
+            password,
         }
+    }
+
+    pub fn from_credentials(credentials: &NpmCredentials) -> Self {
+        Self::new(
+            credentials.host().to_string(),
+            credentials.email().to_string(),
+            credentials.password().to_string(),
+        )
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let host = std::env::var("NPM_HOST").ok()?;
+        let email = std::env::var("NPM_EMAIL").ok()?;
+        let password = std::env::var("NPM_PASSWORD").ok()?;
+        Some(Self::new(host, email, password))
     }
 }
 
@@ -77,17 +93,13 @@ impl NpmClient {
     }
 
     /// Create a new NPM client with default configuration from environment
-    pub fn from_env() -> Self {
-        Self::new(NpmConfig::default())
+    pub fn from_env() -> Option<Self> {
+        NpmConfig::from_env().map(Self::new)
     }
 
     /// Create a new NPM client with custom host/credentials
     pub fn with_credentials(host: String, email: String, password: String) -> Self {
-        Self::new(NpmConfig {
-            host,
-            email,
-            password,
-        })
+        Self::new(NpmConfig::new(host, email, password))
     }
 
     /// Authenticate with NPM and store the token
@@ -110,8 +122,8 @@ impl NpmClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("NPM authentication failed: {} - {}", status, body);
+            let _ = response.text().await;
+            anyhow::bail!("NPM authentication failed with status {}", status);
         }
 
         let token_data: Value = response
@@ -204,7 +216,7 @@ impl NpmClient {
                 forward_port: request.forward_port,
             })
         } else {
-            let message = format!("Failed to create proxy host: {} - {:?}", status, body);
+            let message = format!("Failed to create proxy host (status {})", status);
             tracing::error!(%message);
 
             Ok(ProxyHostResult {
@@ -277,8 +289,8 @@ impl NpmClient {
                 })
             } else {
                 let status = delete_response.status();
-                let body = delete_response.text().await.unwrap_or_default();
-                let message = format!("Failed to delete proxy host: {} - {}", status, body);
+                let _ = delete_response.text().await;
+                let message = format!("Failed to delete proxy host (status {})", status);
 
                 Ok(ProxyHostResult {
                     success: false,
@@ -341,9 +353,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_npm_config_default() {
-        let config = NpmConfig::default();
-        assert!(config.host.contains("nginx-proxy-manager"));
+    fn test_npm_config_from_env_requires_all_values() {
+        std::env::remove_var("NPM_HOST");
+        std::env::remove_var("NPM_EMAIL");
+        std::env::remove_var("NPM_PASSWORD");
+
+        assert!(NpmConfig::from_env().is_none());
+
+        std::env::set_var("NPM_HOST", "http://npm.local");
+        std::env::set_var("NPM_EMAIL", "ops@example.com");
+        std::env::set_var("NPM_PASSWORD", "secret");
+
+        let config = NpmConfig::from_env().expect("env-backed config");
+        assert_eq!(config.host, "http://npm.local");
+        assert_eq!(config.email, "ops@example.com");
+        assert_eq!(config.password, "secret");
     }
 
     #[test]
