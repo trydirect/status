@@ -1515,6 +1515,135 @@ fn make_error(code: &str, message: impl Into<String>, details: Option<String>) -
 }
 
 #[cfg(feature = "docker")]
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "0" | "false" | "no" | "off" => false,
+            "1" | "true" | "yes" | "on" => true,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+#[cfg(feature = "docker")]
+fn proxy_owner_enabled() -> bool {
+    env_flag_enabled("STATUS_PANEL_PROXY_OWNER", true)
+}
+
+#[cfg(feature = "docker")]
+fn npm_env_fallback_enabled() -> bool {
+    env_flag_enabled("NPM_ALLOW_ENV_FALLBACK", false)
+}
+
+#[cfg(feature = "docker")]
+fn resolve_server_id(
+) -> std::result::Result<String, crate::security::vault_client::NpmCredentialError> {
+    std::env::var("STACKER_SERVER_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(crate::security::vault_client::NpmCredentialError::MissingServerId)
+}
+
+#[cfg(feature = "docker")]
+fn configure_proxy_error(
+    error: &crate::security::vault_client::NpmCredentialError,
+) -> CommandError {
+    let details = match error {
+        crate::security::vault_client::NpmCredentialError::MissingSecret { path }
+        | crate::security::vault_client::NpmCredentialError::InvalidPayload { path, .. }
+        | crate::security::vault_client::NpmCredentialError::UnknownAuthMode { path, .. } => {
+            Some(path.clone())
+        }
+        crate::security::vault_client::NpmCredentialError::ExistingHostConflict { domain } => {
+            Some(domain.clone())
+        }
+        _ => None,
+    };
+
+    make_error(error.code(), error.operator_message(), details)
+}
+
+#[cfg(feature = "docker")]
+async fn resolve_npm_config(
+    data: &ConfigureProxyCommand,
+) -> std::result::Result<
+    crate::connectors::npm::NpmConfig,
+    crate::security::vault_client::NpmCredentialError,
+> {
+    use crate::connectors::npm::NpmConfig;
+    use crate::security::vault_client::{NpmCredentialError, VaultClient};
+
+    match (&data.npm_host, &data.npm_email, &data.npm_password) {
+        (Some(host), Some(email), Some(password)) => {
+            return Ok(NpmConfig::new(
+                host.clone(),
+                email.clone(),
+                password.clone(),
+            ));
+        }
+        (None, None, None) => {}
+        _ => return Err(NpmCredentialError::InvalidOverride),
+    }
+
+    if let Some(vault_client) = VaultClient::from_env().map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            "Failed to initialize Vault client for configure_proxy"
+        );
+        NpmCredentialError::VaultUnavailable
+    })? {
+        let server_id = resolve_server_id()?;
+        let credentials = vault_client.fetch_npm_credentials(&server_id).await?;
+        return Ok(NpmConfig::from_credentials(&credentials));
+    }
+
+    if npm_env_fallback_enabled() {
+        return NpmConfig::from_env().ok_or_else(|| NpmCredentialError::MissingSecret {
+            path: "NPM_HOST/NPM_EMAIL/NPM_PASSWORD".to_string(),
+        });
+    }
+
+    Err(NpmCredentialError::MissingVaultConfiguration)
+}
+
+#[cfg(feature = "docker")]
+fn extract_proxy_domains(existing_host: &Value) -> Vec<String> {
+    let mut domains = existing_host["domain_names"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    domains.sort();
+    domains
+}
+
+#[cfg(feature = "docker")]
+fn proxy_host_matches(
+    existing_host: &Value,
+    request: &crate::connectors::npm::ProxyHostRequest,
+) -> bool {
+    let mut requested_domains = request.domain_names.clone();
+    requested_domains.sort();
+
+    let existing_ssl_enabled = existing_host
+        .get("certificate_id")
+        .map(|value| !value.is_null() && value.as_i64().unwrap_or_default() != 0)
+        .unwrap_or(false);
+
+    extract_proxy_domains(existing_host) == requested_domains
+        && existing_host["forward_host"].as_str().unwrap_or_default() == request.forward_host
+        && existing_host["forward_port"].as_u64().unwrap_or_default() as u16 == request.forward_port
+        && existing_host["ssl_forced"].as_bool().unwrap_or(false) == request.ssl_forced
+        && existing_host["http2_support"].as_bool().unwrap_or(false) == request.http2_support
+        && existing_ssl_enabled == request.ssl_enabled
+}
+
+#[cfg(feature = "docker")]
 async fn execute_with_docker(
     agent_cmd: &AgentCommand,
     command: &StackerCommand,
@@ -3899,6 +4028,7 @@ async fn handle_configure_proxy(
     data: &ConfigureProxyCommand,
 ) -> Result<CommandResult> {
     use crate::connectors::npm::{NpmClient, ProxyHostRequest};
+    use crate::security::vault_client::NpmCredentialError;
 
     let mut result = base_result(
         agent_cmd,
@@ -3907,18 +4037,43 @@ async fn handle_configure_proxy(
         "configure_proxy",
     );
 
-    // Create NPM client with provided or default credentials
-    let npm_host = data.npm_host.clone().unwrap_or_else(|| {
-        std::env::var("NPM_HOST").unwrap_or_else(|_| "http://nginx-proxy-manager:81".to_string())
-    });
-    let npm_email = data.npm_email.clone().unwrap_or_else(|| {
-        std::env::var("NPM_EMAIL").unwrap_or_else(|_| "admin@example.com".to_string())
-    });
-    let npm_password = data.npm_password.clone().unwrap_or_else(|| {
-        std::env::var("NPM_PASSWORD").unwrap_or_else(|_| "changeme".to_string())
-    });
+    if !proxy_owner_enabled() {
+        result.result = Some(json!({
+            "type": "configure_proxy",
+            "action": data.action,
+            "deployment_hash": data.deployment_hash,
+            "app_code": data.app_code,
+            "status": "skipped",
+            "reason": "not_proxy_owner",
+            "managed": false,
+        }));
+        return Ok(result);
+    }
 
-    let mut npm_client = NpmClient::with_credentials(npm_host, npm_email, npm_password);
+    let config = match resolve_npm_config(data).await {
+        Ok(config) => config,
+        Err(error) => {
+            let command_error = configure_proxy_error(&error);
+            result.status = if matches!(error, NpmCredentialError::NotProxyOwner) {
+                "success".to_string()
+            } else {
+                "error".to_string()
+            };
+            result.error = Some(command_error.message.clone());
+            result.result = Some(json!({
+                "type": "configure_proxy",
+                "action": data.action,
+                "deployment_hash": data.deployment_hash,
+                "app_code": data.app_code,
+                "status": if result.status == "success" { "skipped" } else { "error" },
+                "error_code": command_error.code,
+                "message": command_error.message,
+            }));
+            return Ok(result);
+        }
+    };
+
+    let mut npm_client = NpmClient::new(config);
 
     // Determine forward_host (default to app_code if not specified)
     let forward_host = data
@@ -3937,6 +4092,47 @@ async fn handle_configure_proxy(
                 http2_support: data.http2_support,
             };
 
+            if let Some(existing_host) = npm_client
+                .find_proxy_host_by_domain(&data.domain_names[0])
+                .await?
+            {
+                if proxy_host_matches(&existing_host, &request) {
+                    result.result = Some(json!({
+                        "type": "configure_proxy",
+                        "action": data.action,
+                        "deployment_hash": data.deployment_hash,
+                        "app_code": data.app_code,
+                        "status": "success",
+                        "unchanged": true,
+                        "proxy_host_id": existing_host["id"].as_i64(),
+                        "domain_names": data.domain_names,
+                        "forward_host": forward_host,
+                        "forward_port": data.forward_port,
+                        "ssl_enabled": data.ssl_enabled,
+                        "created_at": now_timestamp(),
+                    }));
+                    return Ok(result);
+                }
+
+                let conflict = NpmCredentialError::ExistingHostConflict {
+                    domain: data.domain_names[0].clone(),
+                };
+                let error = configure_proxy_error(&conflict);
+                result.status = "error".to_string();
+                result.error = Some(error.message.clone());
+                result.result = Some(json!({
+                    "type": "configure_proxy",
+                    "action": data.action,
+                    "deployment_hash": data.deployment_hash,
+                    "app_code": data.app_code,
+                    "status": "error",
+                    "error_code": error.code,
+                    "message": error.message,
+                    "proxy_host_id": existing_host["id"].as_i64(),
+                }));
+                return Ok(result);
+            }
+
             match npm_client.create_proxy_host(&request).await {
                 Ok(proxy_result) => {
                     if proxy_result.success {
@@ -3951,6 +4147,7 @@ async fn handle_configure_proxy(
                             "forward_host": forward_host,
                             "forward_port": data.forward_port,
                             "ssl_enabled": data.ssl_enabled,
+                            "unchanged": false,
                             "created_at": now_timestamp(),
                         }));
                     } else {
@@ -5176,6 +5373,105 @@ mod write_config_tests {
         let metadata = fs::metadata(&file_path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+}
+
+#[cfg(all(test, feature = "docker"))]
+mod configure_proxy_resolution_tests {
+    use super::*;
+
+    fn sample_configure_proxy() -> ConfigureProxyCommand {
+        ConfigureProxyCommand {
+            deployment_hash: "dep-123".to_string(),
+            app_code: "my-app".to_string(),
+            action: "create".to_string(),
+            domain_names: vec!["app.example.com".to_string()],
+            forward_host: Some("my-app".to_string()),
+            forward_port: 8080,
+            ssl_enabled: true,
+            ssl_forced: true,
+            http2_support: true,
+            npm_host: None,
+            npm_email: None,
+            npm_password: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_npm_config_uses_env_fallback_only_when_enabled() {
+        std::env::remove_var("VAULT_ADDRESS");
+        std::env::remove_var("VAULT_TOKEN");
+        std::env::remove_var("VAULT_AGENT_PATH_PREFIX");
+        std::env::remove_var("STACKER_SERVER_ID");
+        std::env::set_var("NPM_HOST", "http://npm.local");
+        std::env::set_var("NPM_EMAIL", "ops@example.com");
+        std::env::set_var("NPM_PASSWORD", "secret");
+        std::env::set_var("NPM_ALLOW_ENV_FALLBACK", "true");
+
+        let config = resolve_npm_config(&sample_configure_proxy())
+            .await
+            .expect("env fallback config");
+        assert_eq!(config.host, "http://npm.local");
+        assert_eq!(config.email, "ops@example.com");
+        assert_eq!(config.password, "secret");
+
+        std::env::remove_var("NPM_ALLOW_ENV_FALLBACK");
+        let error = resolve_npm_config(&sample_configure_proxy())
+            .await
+            .expect_err("fallback disabled");
+        assert!(matches!(
+            error,
+            crate::security::vault_client::NpmCredentialError::MissingVaultConfiguration
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_npm_config_rejects_partial_override() {
+        let mut command = sample_configure_proxy();
+        command.npm_host = Some("http://npm.local".to_string());
+        command.npm_email = Some("ops@example.com".to_string());
+
+        let error = resolve_npm_config(&command)
+            .await
+            .expect_err("partial override should fail");
+        assert!(matches!(
+            error,
+            crate::security::vault_client::NpmCredentialError::InvalidOverride
+        ));
+    }
+
+    #[test]
+    fn proxy_host_match_requires_same_effective_configuration() {
+        let request = crate::connectors::npm::ProxyHostRequest {
+            domain_names: vec!["app.example.com".to_string()],
+            forward_host: "my-app".to_string(),
+            forward_port: 8080,
+            ssl_enabled: true,
+            ssl_forced: true,
+            http2_support: true,
+        };
+
+        let matching = json!({
+            "id": 7,
+            "domain_names": ["app.example.com"],
+            "forward_host": "my-app",
+            "forward_port": 8080,
+            "ssl_forced": true,
+            "http2_support": true,
+            "certificate_id": 3
+        });
+        assert!(proxy_host_matches(&matching, &request));
+
+        let conflict = json!({
+            "id": 7,
+            "domain_names": ["app.example.com"],
+            "forward_host": "my-app",
+            "forward_port": 9090,
+            "ssl_forced": true,
+            "http2_support": true,
+            "certificate_id": 3
+        });
+        assert!(!proxy_host_matches(&conflict, &request));
     }
 }
 

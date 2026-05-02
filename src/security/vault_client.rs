@@ -48,10 +48,15 @@
 //!   tenant isolation and audit trails for secret access.
 
 use anyhow::{Context, Result};
-use reqwest::Client;
+use async_trait::async_trait;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 // =============================================================================
 // Vault Response Types
@@ -79,6 +84,172 @@ struct VaultKvData {
 #[derive(Debug, Deserialize, Default)]
 struct VaultTokenData {
     token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct VaultLookupSelfResponse {
+    #[serde(default)]
+    data: VaultLookupSelfData,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct VaultLookupSelfData {
+    ttl: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct VaultNpmSecretEnvelope {
+    #[serde(default)]
+    data: VaultNpmSecretData,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct VaultNpmSecretData {
+    #[serde(default)]
+    data: VaultNpmSecretPayload,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct VaultNpmSecretPayload {
+    schema_version: Option<u32>,
+    host: Option<String>,
+    email: Option<String>,
+    password: Option<String>,
+    auth_mode: Option<String>,
+    #[allow(dead_code)]
+    proxy_instance: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct NpmCredentials {
+    host: String,
+    email: String,
+    password: String,
+}
+
+impl fmt::Debug for NpmCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NpmCredentials")
+            .field("host", &self.host)
+            .field("email", &"[REDACTED]")
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for NpmCredentials {
+    fn drop(&mut self) {
+        self.host.zeroize();
+        self.email.zeroize();
+        self.password.zeroize();
+    }
+}
+
+impl NpmCredentials {
+    pub fn new(host: String, email: String, password: String) -> Self {
+        Self {
+            host,
+            email,
+            password,
+        }
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum NpmCredentialError {
+    #[error("Vault secret is missing at {path}")]
+    MissingSecret { path: String },
+    #[error("Vault secret at {path} is invalid: {reason}")]
+    InvalidPayload { path: String, reason: String },
+    #[error("Vault is unavailable")]
+    VaultUnavailable,
+    #[error("Vault authentication was revoked")]
+    AuthRevoked,
+    #[error("This agent is not the proxy owner")]
+    NotProxyOwner,
+    #[error("Vault is not configured for NPM credential resolution")]
+    MissingVaultConfiguration,
+    #[error("STACKER_SERVER_ID is not configured")]
+    MissingServerId,
+    #[error("Unsupported NPM auth mode `{auth_mode}` at {path}")]
+    UnknownAuthMode { path: String, auth_mode: String },
+    #[error("Incomplete configure_proxy credential override")]
+    InvalidOverride,
+    #[error("Legacy NPM_* env fallback is disabled")]
+    EnvFallbackDisabled,
+    #[error("Existing proxy host does not match requested configuration for {domain}")]
+    ExistingHostConflict { domain: String },
+}
+
+impl NpmCredentialError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::MissingSecret { .. } => "npm_credentials_missing",
+            Self::InvalidPayload { .. } => "npm_credentials_invalid",
+            Self::VaultUnavailable => "vault_unavailable",
+            Self::AuthRevoked => "vault_auth_revoked",
+            Self::NotProxyOwner => "not_proxy_owner",
+            Self::MissingVaultConfiguration => "vault_not_configured",
+            Self::MissingServerId => "missing_server_id",
+            Self::UnknownAuthMode { .. } => "npm_auth_mode_invalid",
+            Self::InvalidOverride => "npm_override_incomplete",
+            Self::EnvFallbackDisabled => "npm_env_fallback_disabled",
+            Self::ExistingHostConflict { .. } => "npm_existing_conflict",
+        }
+    }
+
+    pub fn operator_message(&self) -> String {
+        match self {
+            Self::MissingSecret { path } => {
+                format!("NPM credentials are missing from Vault at {}", path)
+            }
+            Self::InvalidPayload { path, .. } => {
+                format!("NPM credentials in Vault are invalid at {}", path)
+            }
+            Self::VaultUnavailable => {
+                "Vault is unavailable while resolving NPM credentials".to_string()
+            }
+            Self::AuthRevoked => {
+                "Vault token is no longer authorized to read NPM credentials".to_string()
+            }
+            Self::NotProxyOwner => {
+                "This agent is not designated to manage shared proxy state".to_string()
+            }
+            Self::MissingVaultConfiguration => {
+                "Vault-backed proxy credential resolution is not configured on this agent"
+                    .to_string()
+            }
+            Self::MissingServerId => {
+                "STACKER_SERVER_ID must be configured for Vault-backed proxy access".to_string()
+            }
+            Self::UnknownAuthMode { path, .. } => {
+                format!("NPM credentials at {} use an unsupported auth_mode", path)
+            }
+            Self::InvalidOverride => {
+                "configure_proxy override requires npm_host, npm_email, and npm_password together"
+                    .to_string()
+            }
+            Self::EnvFallbackDisabled => {
+                "Legacy NPM_* environment fallback is disabled on this agent".to_string()
+            }
+            Self::ExistingHostConflict { domain } => format!(
+                "Existing proxy host for {} does not match the requested configuration",
+                domain
+            ),
+        }
+    }
 }
 
 // =============================================================================
@@ -162,6 +333,73 @@ fn default_file_mode() -> String {
     "0644".to_string()
 }
 
+#[derive(Debug, Clone)]
+struct VaultHttpResponse {
+    status: StatusCode,
+    body: String,
+}
+
+impl VaultHttpResponse {
+    fn json<T: for<'de> Deserialize<'de>>(&self) -> Result<T> {
+        serde_json::from_str(&self.body).context("parsing Vault JSON response")
+    }
+}
+
+#[async_trait]
+trait VaultTransport: Send + Sync {
+    async fn get(&self, url: &str, token: &str) -> Result<VaultHttpResponse>;
+    async fn post_json(
+        &self,
+        url: &str,
+        token: &str,
+        payload: &serde_json::Value,
+    ) -> Result<VaultHttpResponse>;
+}
+
+#[derive(Debug, Default)]
+struct ReqwestVaultTransport;
+
+#[async_trait]
+impl VaultTransport for ReqwestVaultTransport {
+    async fn get(&self, url: &str, token: &str) -> Result<VaultHttpResponse> {
+        let response = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .context("creating HTTP client")?
+            .get(url)
+            .header("X-Vault-Token", token)
+            .send()
+            .await
+            .context("sending Vault GET request")?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Ok(VaultHttpResponse { status, body })
+    }
+
+    async fn post_json(
+        &self,
+        url: &str,
+        token: &str,
+        payload: &serde_json::Value,
+    ) -> Result<VaultHttpResponse> {
+        let response = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .context("creating HTTP client")?
+            .post(url)
+            .header("X-Vault-Token", token)
+            .json(payload)
+            .send()
+            .await
+            .context("sending Vault POST request")?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Ok(VaultHttpResponse { status, body })
+    }
+}
+
 // =============================================================================
 // Vault Client Implementation
 // =============================================================================
@@ -189,7 +427,7 @@ fn default_file_mode() -> String {
 /// ### 4. Error Handling
 /// Errors are logged without exposing secret content. Status codes are
 /// reported to help with debugging without leaking sensitive information.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VaultClient {
     /// Base URL of the Vault server (e.g., https://vault.example.com:8200).
     /// Security: Should use HTTPS in production to encrypt traffic.
@@ -202,6 +440,17 @@ pub struct VaultClient {
     prefix: String,
     /// HTTP client with configured timeouts and TLS.
     http_client: reqwest::Client,
+    transport: Arc<dyn VaultTransport>,
+}
+
+impl fmt::Debug for VaultClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VaultClient")
+            .field("base_url", &self.base_url)
+            .field("prefix", &self.prefix)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl VaultClient {
@@ -249,6 +498,7 @@ impl VaultClient {
                     token: tok,
                     prefix: pref,
                     http_client,
+                    transport: Arc::new(ReqwestVaultTransport),
                 }))
             }
             _ => {
@@ -256,6 +506,192 @@ impl VaultClient {
                 debug!("Vault not configured (missing VAULT_ADDRESS, VAULT_TOKEN, or VAULT_AGENT_PATH_PREFIX)");
                 Ok(None)
             }
+        }
+    }
+
+    #[cfg(test)]
+    fn with_transport(
+        base_url: String,
+        token: String,
+        prefix: String,
+        transport: Arc<dyn VaultTransport>,
+    ) -> Self {
+        let http_client = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("http client");
+
+        Self {
+            base_url,
+            token,
+            prefix,
+            http_client,
+            transport,
+        }
+    }
+
+    fn kv_v2_prefix(&self) -> String {
+        let trimmed = self.prefix.trim_matches('/');
+        if let Some(rest) = trimmed.strip_prefix("secret/data/") {
+            format!("secret/data/{}", rest)
+        } else if let Some(rest) = trimmed.strip_prefix("secret/") {
+            format!("secret/data/{}", rest)
+        } else {
+            format!("secret/data/{}", trimmed)
+        }
+    }
+
+    pub fn npm_credentials_path(&self, server_id: &str) -> String {
+        format!(
+            "{}/hosts/{}/npm_credentials",
+            self.kv_v2_prefix(),
+            server_id.trim()
+        )
+    }
+
+    fn npm_credentials_url(&self, server_id: &str) -> String {
+        format!(
+            "{}/v1/{}",
+            self.base_url,
+            self.npm_credentials_path(server_id)
+        )
+    }
+
+    async fn lookup_token_ttl(&self) -> Result<Option<u64>> {
+        let url = format!("{}/v1/auth/token/lookup-self", self.base_url);
+        let response = self.transport.get(&url, &self.token).await?;
+        if !response.status.is_success() {
+            return Ok(None);
+        }
+
+        let lookup: VaultLookupSelfResponse = response.json()?;
+        Ok(lookup.data.ttl)
+    }
+
+    async fn renew_self(&self) -> Result<()> {
+        let url = format!("{}/v1/auth/token/renew-self", self.base_url);
+        let response = self
+            .transport
+            .post_json(&url, &self.token, &serde_json::json!({}))
+            .await?;
+
+        if !response.status.is_success() {
+            anyhow::bail!("Vault token renewal failed with status {}", response.status);
+        }
+
+        Ok(())
+    }
+
+    async fn prepare_token_for_secret_read(&self) {
+        match self.lookup_token_ttl().await {
+            Ok(Some(ttl)) if ttl < 60 => {
+                if let Err(error) = self.renew_self().await {
+                    warn!(error = %error, "Vault token renewal failed before NPM credential read");
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "Vault token TTL lookup failed before NPM credential read");
+            }
+        }
+    }
+
+    fn parse_npm_credentials_payload(
+        payload: VaultNpmSecretPayload,
+        path: &str,
+    ) -> std::result::Result<NpmCredentials, NpmCredentialError> {
+        if payload.schema_version != Some(1) {
+            return Err(NpmCredentialError::InvalidPayload {
+                path: path.to_string(),
+                reason: "schema_version must be 1".to_string(),
+            });
+        }
+
+        if let Some(auth_mode) = payload.auth_mode {
+            if auth_mode != "email_password" {
+                return Err(NpmCredentialError::UnknownAuthMode {
+                    path: path.to_string(),
+                    auth_mode,
+                });
+            }
+        }
+
+        let host = payload
+            .host
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| NpmCredentialError::InvalidPayload {
+                path: path.to_string(),
+                reason: "host is required".to_string(),
+            })?;
+        let email = payload
+            .email
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| NpmCredentialError::InvalidPayload {
+                path: path.to_string(),
+                reason: "email is required".to_string(),
+            })?;
+        let password = payload
+            .password
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| NpmCredentialError::InvalidPayload {
+                path: path.to_string(),
+                reason: "password is required".to_string(),
+            })?;
+
+        Ok(NpmCredentials::new(host, email, password))
+    }
+
+    #[tracing::instrument(name = "Fetch NPM credentials from Vault", skip_all)]
+    pub async fn fetch_npm_credentials(
+        &self,
+        server_id: &str,
+    ) -> std::result::Result<NpmCredentials, NpmCredentialError> {
+        self.prepare_token_for_secret_read().await;
+
+        let path = self.npm_credentials_path(server_id);
+        let url = self.npm_credentials_url(server_id);
+        let mut renewed_after_auth_failure = false;
+
+        loop {
+            let response = self
+                .transport
+                .get(&url, &self.token)
+                .await
+                .map_err(|error| {
+                    warn!(path = %path, error = %error, "Vault NPM credential lookup failed");
+                    NpmCredentialError::VaultUnavailable
+                })?;
+
+            match response.status {
+                StatusCode::NOT_FOUND => {
+                    return Err(NpmCredentialError::MissingSecret { path });
+                }
+                StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED => {
+                    if renewed_after_auth_failure {
+                        return Err(NpmCredentialError::AuthRevoked);
+                    }
+                    renewed_after_auth_failure = true;
+                    self.renew_self()
+                        .await
+                        .map_err(|_| NpmCredentialError::AuthRevoked)?;
+                    continue;
+                }
+                status if !status.is_success() => {
+                    warn!(path = %path, status = %status, "Vault returned an unexpected status");
+                    return Err(NpmCredentialError::VaultUnavailable);
+                }
+                _ => {}
+            }
+
+            let envelope: VaultNpmSecretEnvelope = response.json().map_err(|error| {
+                warn!(path = %path, error = %error, "Invalid Vault NPM credential envelope");
+                NpmCredentialError::InvalidPayload {
+                    path: path.clone(),
+                    reason: "response envelope is malformed".to_string(),
+                }
+            })?;
+
+            return Self::parse_npm_credentials_payload(envelope.data.data, &path);
         }
     }
 
@@ -905,6 +1341,52 @@ impl VaultClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct StubTransport {
+        responses: Mutex<VecDeque<VaultHttpResponse>>,
+        requested_urls: Mutex<Vec<String>>,
+    }
+
+    impl StubTransport {
+        fn new(responses: Vec<VaultHttpResponse>) -> Self {
+            Self {
+                responses: Mutex::new(VecDeque::from(responses)),
+                requested_urls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requested_urls(&self) -> Vec<String> {
+            self.requested_urls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl VaultTransport for StubTransport {
+        async fn get(&self, url: &str, _token: &str) -> Result<VaultHttpResponse> {
+            self.requested_urls.lock().unwrap().push(url.to_string());
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .context("missing stubbed GET response")
+        }
+
+        async fn post_json(
+            &self,
+            url: &str,
+            _token: &str,
+            _payload: &serde_json::Value,
+        ) -> Result<VaultHttpResponse> {
+            self.requested_urls.lock().unwrap().push(url.to_string());
+            Ok(VaultHttpResponse {
+                status: StatusCode::OK,
+                body: "{}".to_string(),
+            })
+        }
+    }
 
     /// Test that VaultClient::from_env returns None when Vault is not configured.
     /// This ensures graceful degradation in development/testing environments.
@@ -918,5 +1400,122 @@ mod tests {
         let result = VaultClient::from_env();
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn npm_credentials_path_converts_prefix_to_kv_v2_path() {
+        let transport: Arc<dyn VaultTransport> = Arc::new(StubTransport::new(Vec::new()));
+        let client = VaultClient::with_transport(
+            "http://vault.test".to_string(),
+            "token".to_string(),
+            "secret/base/status_panel".to_string(),
+            transport,
+        );
+
+        assert_eq!(
+            client.npm_credentials_path("server-123"),
+            "secret/data/base/status_panel/hosts/server-123/npm_credentials"
+        );
+    }
+
+    fn npm_fixture_payload() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/npm_credentials/v1_email_password.json"
+        ))
+        .expect("npm credential fixture should be valid json")
+    }
+
+    #[tokio::test]
+    async fn fetch_npm_credentials_reads_expected_fixture_shape() {
+        let fixture = npm_fixture_payload();
+        let transport = Arc::new(StubTransport::new(vec![
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: r#"{"data":{"ttl":3600}}"#.to_string(),
+            },
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: serde_json::json!({
+                    "data": {
+                        "data": fixture,
+                        "metadata": { "version": 1 }
+                    }
+                })
+                .to_string(),
+            },
+        ]));
+        let client = VaultClient::with_transport(
+            "http://vault.test".to_string(),
+            "token".to_string(),
+            "secret/base/status_panel".to_string(),
+            transport.clone(),
+        );
+
+        let credentials = client
+            .fetch_npm_credentials("server-123")
+            .await
+            .expect("credentials");
+
+        assert_eq!(credentials.host(), "http://nginx-proxy-manager:81");
+        assert_eq!(credentials.email(), "admin@example.com");
+        assert_eq!(credentials.password(), "secret");
+        assert!(transport.requested_urls().iter().any(|url| url
+            .ends_with("/v1/secret/data/base/status_panel/hosts/server-123/npm_credentials")));
+    }
+
+    #[tokio::test]
+    async fn fetch_npm_credentials_reports_missing_secret() {
+        let transport: Arc<dyn VaultTransport> = Arc::new(StubTransport::new(vec![
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: r#"{"data":{"ttl":3600}}"#.to_string(),
+            },
+            VaultHttpResponse {
+                status: StatusCode::NOT_FOUND,
+                body: "{}".to_string(),
+            },
+        ]));
+        let client = VaultClient::with_transport(
+            "http://vault.test".to_string(),
+            "token".to_string(),
+            "secret/base/status_panel".to_string(),
+            transport,
+        );
+
+        let error = client
+            .fetch_npm_credentials("server-123")
+            .await
+            .expect_err("missing secret");
+
+        assert!(matches!(error, NpmCredentialError::MissingSecret { .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_npm_credentials_rejects_unknown_auth_mode() {
+        let mut fixture = npm_fixture_payload();
+        fixture["auth_mode"] = serde_json::Value::String("api_token".to_string());
+        let transport: Arc<dyn VaultTransport> = Arc::new(StubTransport::new(vec![
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: r#"{"data":{"ttl":3600}}"#.to_string(),
+            },
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: serde_json::json!({ "data": { "data": fixture } }).to_string(),
+            },
+        ]));
+        let client = VaultClient::with_transport(
+            "http://vault.test".to_string(),
+            "token".to_string(),
+            "secret/base/status_panel".to_string(),
+            transport,
+        );
+
+        let error = client
+            .fetch_npm_credentials("server-123")
+            .await
+            .expect_err("auth mode validation");
+
+        assert!(matches!(error, NpmCredentialError::UnknownAuthMode { .. }));
     }
 }

@@ -197,6 +197,9 @@ The agent accepts signed commands from the Stacker dashboard covering the full l
 
 ## Configuration
 
+`STATUS_PANEL_USERNAME` / `STATUS_PANEL_PASSWORD` only control the Status Panel UI. `configure_proxy`
+uses a separate Nginx Proxy Manager credential resolved from Vault with `STACKER_SERVER_ID`.
+
 | Environment Variable | Description |
 |---------------------|-------------|
 | `STATUS_PANEL_USERNAME` | **Required.** Login username |
@@ -205,6 +208,9 @@ The agent accepts signed commands from the Stacker dashboard covering the full l
 | `AGENT_TOKEN` | Authentication token for signed requests |
 | `DASHBOARD_URL` | Remote dashboard URL |
 | `VAULT_ADDRESS` | HashiCorp Vault server URL |
+| `STACKER_SERVER_ID` | Stable server UUID used to resolve host-scoped NPM credentials in Vault |
+| `STATUS_PANEL_PROXY_OWNER` | Set `true` on the single agent allowed to manage shared proxy state |
+| `NPM_ALLOW_ENV_FALLBACK` | Temporary migration switch for legacy `NPM_*` env credentials |
 | `UPDATE_SERVER_URL` | Remote update server for version checks |
 | `UPDATE_EXPECTED_SHA256` | Expected SHA256 hash for self-update binary |
 | `COMPOSE_AGENT_ENABLED` | Enable compose-agent mode |

@@ -1091,25 +1091,8 @@ async fn capabilities_handler(State(state): State<SharedState>) -> impl IntoResp
         .or_else(|| state.config.control_plane.clone())
         .unwrap_or_else(|| "status_panel".to_string());
 
-    // Basic capability set; extend if docker feature is enabled
-    let mut features = vec!["monitoring".to_string()];
-    if cfg!(feature = "docker") {
-        features.push("docker".to_string());
-        features.push("compose".to_string());
-        features.push("logs".to_string());
-        features.push("restart".to_string());
-    }
-    if compose_agent {
-        features.push("compose_agent".to_string());
-    }
-
-    // Detect Kata Containers runtime availability
-    #[cfg(feature = "docker")]
-    {
-        if crate::commands::stacker::detect_kata_runtime().await {
-            features.push("kata".to_string());
-        }
-    }
+    let features =
+        crate::agent::registration::collect_capabilities(state.config.compose_agent_enabled).await;
 
     let resp = CapabilitiesResponse {
         compose_agent,
@@ -1368,6 +1351,7 @@ async fn link_select_handler(
         &stacker_url,
         &req.session_token,
         &req.deployment_id,
+        state.config.compose_agent_enabled,
     )
     .await
     {
