@@ -491,6 +491,7 @@ pub async fn report_result_with_retry(
     status: &str,
     result: &Option<serde_json::Value>,
     error: &Option<String>,
+    errors: &Option<Vec<CommandError>>,
     completed_at: &str,
     executed_by: Option<&str>,
 ) -> Result<()> {
@@ -518,6 +519,12 @@ pub async fn report_result_with_retry(
             .map(|e| Value::String(e.clone()))
             .unwrap_or(Value::Null),
     );
+    if let Some(errs) = errors {
+        body.insert(
+            "errors".into(),
+            serde_json::to_value(errs).context("Failed to encode command errors")?,
+        );
+    }
 
     debug!(url = %url, body = ?body, "reporting result with retry");
 
@@ -690,6 +697,7 @@ mod tests {
             details: Some("Failed to connect to NPM".to_string()),
         }]);
         let completed_at = "2023-11-15T10:05:00Z";
+        let executed_by = None;
 
         let mut payload = serde_json::Map::new();
         payload.insert("command_id".to_string(), json!(command_id));
@@ -757,6 +765,7 @@ mod tests {
         let status = "success";
         let result: Option<serde_json::Value> = None;
         let error = None;
+        let errors: Option<Vec<CommandError>> = None;
         let completed_at = "2023-11-15T10:00:00Z";
         let executed_by = Some("compose_agent");
 
@@ -811,6 +820,7 @@ mod tests {
             status,
             &result,
             &error,
+            &errors,
             completed_at,
             executed_by,
         )
