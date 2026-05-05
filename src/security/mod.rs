@@ -10,5 +10,6 @@ pub mod validation;
 
 // Vault integration for token rotation
 pub mod token_cache;
+pub mod token_provider;
 pub mod token_refresh;
 pub mod vault_client;

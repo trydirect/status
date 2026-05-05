@@ -7,6 +7,7 @@ use tracing::info;
 
 /// Application version from Cargo.toml
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const DISPLAY_VERSION: &str = env!("STATUS_DISPLAY_VERSION");
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 /// Check that `path` points to a readable file. Prints a friendly error and
@@ -161,7 +162,7 @@ fn print_banner() {
 }
 
 #[derive(Parser)]
-#[command(name = "status", version, about = "")]
+#[command(name = "status", version = DISPLAY_VERSION, about = "")]
 struct AppCli {
     /// Run in daemon mode (background)
     #[arg(long)]
@@ -178,6 +179,13 @@ struct AppCli {
     /// Subcommands
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+fn is_direct_version_request() -> bool {
+    matches!(
+        std::env::args().skip(1).collect::<Vec<_>>().as_slice(),
+        [flag] if flag == "--version" || flag == "-V"
+    )
 }
 
 #[derive(Subcommand)]
@@ -281,14 +289,17 @@ fn run_daemon() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if is_direct_version_request() {
+        println!("{}", DISPLAY_VERSION);
+        return Ok(());
+    }
+
     // Load environment variables from .env if present
     let _ = dotenv();
     utils::logging::init();
 
-    // Show startup banner
-    print_banner();
-
     let args = AppCli::parse();
+    print_banner();
     if args.daemon {
         run_daemon()?;
     }
@@ -302,7 +313,7 @@ async fn main() -> Result<()> {
                 info!("Starting local API server on port {port}");
             }
             let config = agent::config::Config::from_file(&args.config)?;
-            comms::local_api::serve(config, port, with_ui).await?;
+            comms::local_api::serve(config, &args.config, port, with_ui).await?;
         }
         #[cfg(feature = "docker")]
         Some(Commands::Containers) => {

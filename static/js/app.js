@@ -58,4 +58,94 @@ document.addEventListener('DOMContentLoaded', () => {
             if (e.target === overlay) overlay.classList.remove('open');
         });
     });
+
+    // ---- Notification bell ----
+    const bell = document.getElementById('notification-bell');
+    const bellBadge = document.getElementById('bell-badge');
+    const dropdown = document.getElementById('notification-dropdown');
+    const notifList = document.getElementById('notification-list');
+    const markAllBtn = document.getElementById('mark-all-read');
+
+    if (bell && dropdown) {
+        bell.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = dropdown.classList.toggle('open');
+            if (isOpen) fetchNotifications();
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!dropdown.contains(e.target) && !bell.contains(e.target)) {
+                dropdown.classList.remove('open');
+            }
+        });
+
+        if (markAllBtn) {
+            markAllBtn.addEventListener('click', async () => {
+                try {
+                    await fetch('/api/v1/notifications/read', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ all: true }),
+                    });
+                    fetchNotifications();
+                    pollUnreadCount();
+                } catch (_) {}
+            });
+        }
+
+        function notifIcon(kind) {
+            switch (kind) {
+                case 'stack_update_available':
+                    return '<span class="material-icons-outlined notif-icon update">system_update</span>';
+                case 'stack_published':
+                    return '<span class="material-icons-outlined notif-icon publish">new_releases</span>';
+                default:
+                    return '<span class="material-icons-outlined notif-icon system">info</span>';
+            }
+        }
+
+        async function fetchNotifications() {
+            try {
+                const resp = await fetch('/api/v1/notifications');
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (!data.notifications || data.notifications.length === 0) {
+                    notifList.innerHTML = '<div class="notification-empty">No notifications</div>';
+                    return;
+                }
+                notifList.innerHTML = data.notifications.map(n =>
+                    `<div class="notification-item ${n.read ? '' : 'unread'}">
+                        ${notifIcon(n.kind)}
+                        <div class="notif-body">
+                            <p class="notif-title">${escapeHtml(n.title)}</p>
+                            <p class="notif-message">${escapeHtml(n.message)}</p>
+                        </div>
+                    </div>`
+                ).join('');
+            } catch (_) {}
+        }
+
+        async function pollUnreadCount() {
+            try {
+                const resp = await fetch('/api/v1/notifications/unread-count');
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const count = data.unread_count || 0;
+                if (bellBadge) {
+                    bellBadge.textContent = count > 99 ? '99+' : String(count);
+                    bellBadge.classList.toggle('has-unread', count > 0);
+                }
+            } catch (_) {}
+        }
+
+        function escapeHtml(str) {
+            const d = document.createElement('div');
+            d.textContent = str;
+            return d.innerHTML;
+        }
+
+        // Initial poll + periodic refresh
+        pollUnreadCount();
+        setInterval(pollUnreadCount, 60000);
+    }
 });
