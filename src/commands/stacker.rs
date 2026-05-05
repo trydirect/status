@@ -4060,6 +4060,7 @@ async fn handle_configure_proxy(
                 "error".to_string()
             };
             result.error = Some(command_error.message.clone());
+            result.errors = Some(vec![command_error.clone()]);
             result.result = Some(json!({
                 "type": "configure_proxy",
                 "action": data.action,
@@ -4068,6 +4069,7 @@ async fn handle_configure_proxy(
                 "status": if result.status == "success" { "skipped" } else { "error" },
                 "error_code": command_error.code,
                 "message": command_error.message,
+                "details": command_error.details,
             }));
             return Ok(result);
         }
@@ -4120,6 +4122,7 @@ async fn handle_configure_proxy(
                 let error = configure_proxy_error(&conflict);
                 result.status = "error".to_string();
                 result.error = Some(error.message.clone());
+                result.errors = Some(vec![error.clone()]);
                 result.result = Some(json!({
                     "type": "configure_proxy",
                     "action": data.action,
@@ -4128,6 +4131,7 @@ async fn handle_configure_proxy(
                     "status": "error",
                     "error_code": error.code,
                     "message": error.message,
+                    "details": error.details,
                     "proxy_host_id": existing_host["id"].as_i64(),
                 }));
                 return Ok(result);
@@ -4154,6 +4158,16 @@ async fn handle_configure_proxy(
                         let error = make_error("npm_create_failed", &proxy_result.message, None);
                         result.status = "error".to_string();
                         result.error = Some(error.message.clone());
+                        result.errors = Some(vec![error.clone()]);
+                        result.result = Some(json!({
+                            "type": "configure_proxy",
+                            "action": data.action,
+                            "deployment_hash": data.deployment_hash,
+                            "app_code": data.app_code,
+                            "status": "error",
+                            "error_code": error.code,
+                            "message": error.message,
+                        }));
                     }
                 }
                 Err(e) => {
@@ -4161,6 +4175,17 @@ async fn handle_configure_proxy(
                         make_error("npm_error", "NPM operation failed", Some(e.to_string()));
                     result.status = "error".to_string();
                     result.error = Some(error.message.clone());
+                    result.errors = Some(vec![error.clone()]);
+                    result.result = Some(json!({
+                        "type": "configure_proxy",
+                        "action": data.action,
+                        "deployment_hash": data.deployment_hash,
+                        "app_code": data.app_code,
+                        "status": "error",
+                        "error_code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    }));
                 }
             }
         }
@@ -4181,12 +4206,33 @@ async fn handle_configure_proxy(
                     let error = make_error("npm_delete_failed", &proxy_result.message, None);
                     result.status = "error".to_string();
                     result.error = Some(error.message.clone());
+                    result.errors = Some(vec![error.clone()]);
+                    result.result = Some(json!({
+                        "type": "configure_proxy",
+                        "action": "delete",
+                        "deployment_hash": data.deployment_hash,
+                        "app_code": data.app_code,
+                        "status": "error",
+                        "error_code": error.code,
+                        "message": error.message,
+                    }));
                 }
             }
             Err(e) => {
                 let error = make_error("npm_error", "NPM operation failed", Some(e.to_string()));
                 result.status = "error".to_string();
                 result.error = Some(error.message.clone());
+                result.errors = Some(vec![error.clone()]);
+                result.result = Some(json!({
+                    "type": "configure_proxy",
+                    "action": "delete",
+                    "deployment_hash": data.deployment_hash,
+                    "app_code": data.app_code,
+                    "status": "error",
+                    "error_code": error.code,
+                    "message": error.message,
+                    "details": error.details,
+                }));
             }
         },
         _ => {

@@ -310,6 +310,6 @@ mod tests {
         assert!(time_to_warning.is_some());
         // Should be approximately 80 seconds (soft timeout)
         let secs = time_to_warning.unwrap().as_secs();
-        assert!(secs >= 79 && secs <= 80);
+        assert!((79..=80).contains(&secs));
     }
 }

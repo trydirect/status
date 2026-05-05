@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use sha2::{Digest, Sha256};
 use status_panel::commands::{get_update_status, start_update_job, UpdatePhase};
 use std::collections::HashMap;

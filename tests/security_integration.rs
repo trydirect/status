@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use axum::http::{Request, StatusCode};
 use axum::{body::Body, Router};
 use base64::{engine::general_purpose, Engine};
