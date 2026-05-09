@@ -2814,6 +2814,16 @@ pub fn build_compose_command(variant: ComposeVariant) -> (String, Vec<String>) {
     }
 }
 
+#[cfg(feature = "docker")]
+fn compose_target_service(app_code: &str) -> Vec<String> {
+    let trimmed = app_code.trim();
+    if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        vec![trimmed.to_string()]
+    }
+}
+
 fn base_result(
     agent_cmd: &AgentCommand,
     deployment_hash: &str,
@@ -5601,12 +5611,11 @@ async fn handle_deploy_app(
         for arg in &compose_base_args {
             pull_cmd.arg(arg);
         }
-        // Don't specify service name - pull ALL services defined in compose file
-        // The compose file may have services with different names than app_code
         let pull_result = pull_cmd
             .arg("-f")
             .arg(&compose_file)
             .arg("pull")
+            .args(compose_target_service(&data.app_code))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -5641,8 +5650,6 @@ async fn handle_deploy_app(
             "Force recreating: stopping existing container"
         );
 
-        // Don't specify service name - stop ALL services defined in compose file
-        // The compose file may have services with different names than app_code
         let mut stop_cmd = Command::new(&compose_program);
         for arg in &compose_base_args {
             stop_cmd.arg(arg);
@@ -5651,6 +5658,7 @@ async fn handle_deploy_app(
             .arg("-f")
             .arg(&compose_file)
             .arg("stop")
+            .args(compose_target_service(&data.app_code))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -5664,6 +5672,7 @@ async fn handle_deploy_app(
             .arg(&compose_file)
             .arg("rm")
             .arg("-f")
+            .args(compose_target_service(&data.app_code))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -5681,14 +5690,12 @@ async fn handle_deploy_app(
     for arg in &compose_base_args {
         compose_cmd.arg(arg);
     }
-    // Don't specify service name - deploy ALL services defined in compose file
-    // The compose file may have services with different names than app_code
-    // Also removed --no-deps since we want all services to start properly
     compose_cmd
         .arg("-f")
         .arg(&compose_file)
         .arg("up")
         .arg("-d")
+        .args(compose_target_service(&data.app_code))
         .current_dir(&compose_dir);
 
     // Add environment variables if provided
@@ -8686,6 +8693,16 @@ services:
         // Should not crash; YAML is valid but has no services
         let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
         assert!(doc.get("services").is_none());
+    }
+
+    #[test]
+    fn compose_target_service_selects_requested_app_only() {
+        assert_eq!(compose_target_service("device-api"), vec!["device-api"]);
+    }
+
+    #[test]
+    fn compose_target_service_ignores_blank_app_code() {
+        assert!(compose_target_service("  ").is_empty());
     }
 }
 
