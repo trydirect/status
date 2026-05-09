@@ -211,6 +211,8 @@ The agent accepts signed commands from the Stacker dashboard covering the full l
 
 `STATUS_PANEL_USERNAME` / `STATUS_PANEL_PASSWORD` only control the Status Panel UI. `configure_proxy`
 uses a separate Nginx Proxy Manager credential resolved from Vault with `STACKER_SERVER_ID`.
+When Stacker sends `ssl_enabled=false` (for example via `stacker agent configure-proxy --no-ssl`),
+the agent creates a plain HTTP proxy host and does not send Let's Encrypt metadata to NPM.
 
 | Environment Variable | Description |
 |---------------------|-------------|
