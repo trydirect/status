@@ -8768,7 +8768,10 @@ services:
             resolve_compose_paths_in_base(dir.path(), "deployment_test", "device-api");
 
         assert_eq!(compose_dir, project_dir.to_string_lossy());
-        assert_eq!(compose_file, project_dir.join("compose.yml").to_string_lossy());
+        assert_eq!(
+            compose_file,
+            project_dir.join("compose.yml").to_string_lossy()
+        );
     }
 }
 
