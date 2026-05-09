@@ -2733,22 +2733,57 @@ fn trimmed(value: &str) -> String {
 
 #[cfg(feature = "docker")]
 fn resolve_compose_paths(deployment_hash: &str, app_code: &str) -> (String, String) {
-    use std::path::Path;
-
     if let Ok(dir) = std::env::var("COMPOSE_PROJECT_DIR") {
-        let file = format!("{}/docker-compose.yml", dir);
-        return (dir, file);
+        let dir_path = std::path::Path::new(&dir);
+        let file = resolve_compose_file_in_dir(dir_path)
+            .unwrap_or_else(|| dir_path.join("docker-compose.yml"));
+        return (dir, file.to_string_lossy().to_string());
     }
 
-    let hash_dir = format!("/home/trydirect/{}", deployment_hash);
-    let hash_file = format!("{}/docker-compose.yml", hash_dir);
-    if Path::new(&hash_file).exists() {
-        return (hash_dir, hash_file);
+    resolve_compose_paths_in_base(
+        std::path::Path::new("/home/trydirect"),
+        deployment_hash,
+        app_code,
+    )
+}
+
+#[cfg(feature = "docker")]
+fn resolve_compose_paths_in_base(
+    base_dir: &std::path::Path,
+    deployment_hash: &str,
+    app_code: &str,
+) -> (String, String) {
+    for candidate in [deployment_hash, "project", app_code] {
+        let dir = base_dir.join(candidate);
+        if let Some(file) = resolve_compose_file_in_dir(&dir) {
+            return (
+                dir.to_string_lossy().to_string(),
+                file.to_string_lossy().to_string(),
+            );
+        }
+        if candidate == app_code {
+            let fallback = dir.join("docker-compose.yml");
+            return (
+                dir.to_string_lossy().to_string(),
+                fallback.to_string_lossy().to_string(),
+            );
+        }
     }
 
-    let app_dir = format!("/home/trydirect/{}", app_code);
-    let app_file = format!("{}/docker-compose.yml", app_dir);
-    (app_dir, app_file)
+    unreachable!("app_code fallback always returns")
+}
+
+#[cfg(feature = "docker")]
+fn resolve_compose_file_in_dir(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    [
+        "compose.yml",
+        "compose.yaml",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+    ]
+    .iter()
+    .map(|file_name| dir.join(file_name))
+    .find(|path| path.exists())
 }
 
 /// Represents which compose command variant is available on the system.
@@ -8703,6 +8738,37 @@ services:
     #[test]
     fn compose_target_service_ignores_blank_app_code() {
         assert!(compose_target_service("  ").is_empty());
+    }
+
+    #[test]
+    fn resolve_compose_paths_prefers_project_compose_over_app_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+
+        let (compose_dir, compose_file) =
+            resolve_compose_paths_in_base(dir.path(), "deployment_test", "device-api");
+
+        assert_eq!(compose_dir, project_dir.to_string_lossy());
+        assert_eq!(
+            compose_file,
+            project_dir.join("docker-compose.yml").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn resolve_compose_paths_accepts_project_compose_yml() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("compose.yml"), "services: {}\n").unwrap();
+
+        let (compose_dir, compose_file) =
+            resolve_compose_paths_in_base(dir.path(), "deployment_test", "device-api");
+
+        assert_eq!(compose_dir, project_dir.to_string_lossy());
+        assert_eq!(compose_file, project_dir.join("compose.yml").to_string_lossy());
     }
 }
 
