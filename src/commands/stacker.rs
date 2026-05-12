@@ -2888,6 +2888,20 @@ fn errors_value(errors: &[CommandError]) -> Value {
 }
 
 #[cfg(feature = "docker")]
+fn finish_success_with_warnings(
+    result: &mut CommandResult,
+    mut body: Value,
+    warnings: &[CommandError],
+) {
+    body["warnings"] = if warnings.is_empty() {
+        json!(null)
+    } else {
+        errors_value(warnings)
+    };
+    result.result = Some(body);
+}
+
+#[cfg(feature = "docker")]
 fn redact_message(message: &str, enabled: bool) -> (String, bool) {
     if !enabled || message.is_empty() {
         return (message.to_string(), false);
@@ -5780,13 +5794,9 @@ async fn handle_deploy_app(
                     "runtime": effective_runtime.to_string(),
                     "deployed_at": now_timestamp(),
                     "output": stdout.trim(),
-                    "warnings": if errors.is_empty() { json!(null) } else { errors_value(&errors) },
                 });
 
-                result.result = Some(body);
-                if !errors.is_empty() {
-                    result.errors = Some(errors);
-                }
+                finish_success_with_warnings(&mut result, body, &errors);
             } else {
                 let error = make_error(
                     "deploy_failed",
@@ -8087,6 +8097,34 @@ mod tests {
         std::env::set_var("PIPE_POLL_INTERVAL_SECS", "0");
 
         assert_eq!(pipe_source_poll_interval(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn success_warnings_do_not_mark_command_as_failed() {
+        let mut result = CommandResult {
+            status: "success".into(),
+            ..CommandResult::default()
+        };
+        let warning = make_error(
+            "pull_warning",
+            "Image pull had issues, but compose used a local image",
+            None,
+        );
+
+        finish_success_with_warnings(
+            &mut result,
+            json!({
+                "type": "deploy_app",
+                "status": "deployed"
+            }),
+            std::slice::from_ref(&warning),
+        );
+
+        assert!(result.errors.is_none());
+        assert_eq!(
+            result.result.as_ref().unwrap()["warnings"][0]["code"],
+            "pull_warning"
+        );
     }
 
     #[tokio::test]
