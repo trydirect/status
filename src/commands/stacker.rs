@@ -8099,6 +8099,7 @@ mod tests {
         assert_eq!(pipe_source_poll_interval(), Duration::from_secs(1));
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn success_warnings_do_not_mark_command_as_failed() {
         let mut result = CommandResult {
