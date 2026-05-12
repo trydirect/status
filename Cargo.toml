@@ -53,6 +53,7 @@ dotenvy = "0.15"
 # Runtime Rust version info
 rustc_version_runtime = "0.3"
 zeroize = "1"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }
@@ -68,7 +69,6 @@ protoc-bin-vendored = "3"
 [dev-dependencies]
 assert_cmd = "2.0"
 tokio-test = "0.4"
-tempfile = "3"
 mockito = "1"
 tower = "0.5"
 http-body-util = "0.1"

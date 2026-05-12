@@ -22,6 +22,8 @@ use std::sync::Arc;
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
+#[cfg(feature = "docker")]
+use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
@@ -1452,6 +1454,26 @@ pub struct DeployAppCommand {
     /// Container runtime to use: "runc" (default) or "kata" for microVM isolation
     #[serde(default)]
     runtime: Option<ContainerRuntime>,
+    /// Optional private registry credentials for authenticated image pulls.
+    #[serde(default)]
+    registry_auth: Option<RegistryAuthCommand>,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct RegistryAuthCommand {
+    registry: String,
+    username: String,
+    password: String,
+}
+
+impl std::fmt::Debug for RegistryAuthCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryAuthCommand")
+            .field("registry", &self.registry)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Command to remove an app container and associated config
@@ -1507,6 +1529,9 @@ pub struct DeployWithConfigsCommand {
     /// Container runtime to use: "runc" (default) or "kata" for microVM isolation
     #[serde(default)]
     runtime: Option<ContainerRuntime>,
+    /// Optional private registry credentials for authenticated image pulls.
+    #[serde(default)]
+    registry_auth: Option<RegistryAuthCommand>,
 }
 
 /// Command to detect configuration drift between Vault and deployed files
@@ -5741,13 +5766,24 @@ async fn handle_deploy_app(
             "Pulling docker image for service"
         );
 
+        let docker_auth_dir: Option<tempfile::TempDir> =
+            match prepare_registry_auth_for_pull(data.registry_auth.as_ref()).await {
+                Ok(dir) => dir,
+                Err(message) => {
+                    errors.push(make_error("pull_auth_warning", message, None));
+                    None
+                }
+            };
+
         let mut pull_cmd = Command::new(&compose_program);
         for arg in &compose_base_args {
             pull_cmd.arg(arg);
         }
-        let pull_result = pull_cmd
-            .arg("-f")
-            .arg(&compose_file)
+        if let Some(auth_dir) = docker_auth_dir.as_ref() {
+            pull_cmd.env("DOCKER_CONFIG", auth_dir.path());
+        }
+        let pull_result = pull_cmd.arg("-f").arg(&compose_file);
+        let pull_result = pull_result
             .arg("pull")
             .args(compose_target_service(&data.app_code))
             .current_dir(&compose_dir)
@@ -5934,6 +5970,68 @@ async fn handle_deploy_app(
     }
 
     Ok(result)
+}
+
+#[cfg(feature = "docker")]
+async fn prepare_registry_auth_for_pull(
+    registry_auth: Option<&RegistryAuthCommand>,
+) -> Result<Option<tempfile::TempDir>, String> {
+    let Some(registry_auth) = registry_auth else {
+        return Ok(None);
+    };
+
+    let auth_dir = tempfile::tempdir().map_err(|error| {
+        format!(
+            "Failed to create temporary Docker auth directory: {}",
+            error
+        )
+    })?;
+
+    let mut login_cmd = Command::new("docker");
+    login_cmd
+        .arg("login")
+        .arg(&registry_auth.registry)
+        .arg("--username")
+        .arg(&registry_auth.username)
+        .arg("--password-stdin")
+        .env("DOCKER_CONFIG", auth_dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = login_cmd
+        .spawn()
+        .map_err(|error| format!("Failed to start docker login: {}", error))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(registry_auth.password.as_bytes())
+            .await
+            .map_err(|error| format!("Failed to send docker registry password: {}", error))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| format!("Failed to wait for docker login: {}", error))?;
+
+    if output.status.success() {
+        Ok(Some(auth_dir))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            "docker login failed with no output".to_string()
+        };
+        Err(format!(
+            "Private registry authentication failed for {}: {}",
+            registry_auth.registry, detail
+        ))
+    }
 }
 
 /// Handle remove_app command - stop and remove a service container and purge config
@@ -6469,6 +6567,7 @@ async fn handle_deploy_with_configs(
         force_recreate: data.force_recreate,
         config_files: None, // Configs already written in step 1 from Vault
         runtime: data.runtime.clone(),
+        registry_auth: data.registry_auth.clone(),
     };
 
     let deploy_result = handle_deploy_app(agent_cmd, &deploy_cmd).await?;
@@ -8214,6 +8313,22 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "docker")]
+    #[test]
+    fn registry_auth_debug_redacts_password() {
+        let auth = RegistryAuthCommand {
+            registry: "docker.io".into(),
+            username: "optimum".into(),
+            password: "supersecret".into(),
+        };
+
+        let rendered = format!("{:?}", auth);
+        assert!(rendered.contains("docker.io"));
+        assert!(rendered.contains("optimum"));
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("supersecret"));
+    }
+
     #[tokio::test]
     async fn pipe_runtime_persistence_redacts_credentials() {
         let dir = tempdir().unwrap();
@@ -8323,6 +8438,20 @@ mod tests {
             "image": "testimage:latest",
             "pull": true,
             "force_recreate": false
+        }),
+        StackerCommand::DeployApp
+    );
+    stacker_test!(
+        parses_deploy_app_command_with_registry_auth,
+        "deploy_app",
+        json!({
+            "deployment_hash": "testhash",
+            "app_code": "testapp",
+            "registry_auth": {
+                "registry": "docker.io",
+                "username": "optimum",
+                "password": "supersecret"
+            }
         }),
         StackerCommand::DeployApp
     );
