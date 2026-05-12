@@ -2733,11 +2733,8 @@ fn trimmed(value: &str) -> String {
 
 #[cfg(feature = "docker")]
 fn resolve_compose_paths(deployment_hash: &str, app_code: &str) -> (String, String) {
-    if let Ok(dir) = std::env::var("COMPOSE_PROJECT_DIR") {
-        let dir_path = std::path::Path::new(&dir);
-        let file = resolve_compose_file_in_dir(dir_path)
-            .unwrap_or_else(|| dir_path.join("docker-compose.yml"));
-        return (dir, file.to_string_lossy().to_string());
+    if let Some(paths) = resolve_compose_paths_from_env() {
+        return paths;
     }
 
     resolve_compose_paths_in_base(
@@ -2745,6 +2742,94 @@ fn resolve_compose_paths(deployment_hash: &str, app_code: &str) -> (String, Stri
         deployment_hash,
         app_code,
     )
+}
+
+#[cfg(feature = "docker")]
+async fn resolve_compose_paths_for_service(
+    deployment_hash: &str,
+    app_code: &str,
+) -> (String, String) {
+    if let Some(paths) = resolve_compose_paths_from_env() {
+        return paths;
+    }
+    if let Some(paths) = resolve_compose_paths_from_container_labels(app_code).await {
+        return paths;
+    }
+
+    resolve_compose_paths(deployment_hash, app_code)
+}
+
+#[cfg(feature = "docker")]
+fn resolve_compose_paths_from_env() -> Option<(String, String)> {
+    let dir = std::env::var("COMPOSE_PROJECT_DIR").ok()?;
+    let dir_path = std::path::Path::new(&dir);
+    let file = resolve_compose_file_in_dir(dir_path)
+        .unwrap_or_else(|| dir_path.join("docker-compose.yml"));
+    Some((dir, file.to_string_lossy().to_string()))
+}
+
+#[cfg(feature = "docker")]
+async fn resolve_compose_paths_from_container_labels(app_code: &str) -> Option<(String, String)> {
+    use tokio::process::Command;
+
+    let output = Command::new("docker")
+        .arg("ps")
+        .arg("-a")
+        .arg("--filter")
+        .arg(format!("label=com.docker.compose.service={}", app_code))
+        .arg("--format")
+        .arg("{{.Label \"com.docker.compose.project.working_dir\"}}\t{{.Label \"com.docker.compose.project.config_files\"}}")
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(compose_paths_from_label_line)
+}
+
+#[cfg(feature = "docker")]
+fn compose_paths_from_label_line(line: &str) -> Option<(String, String)> {
+    let mut parts = line.splitn(2, '\t');
+    let working_dir = parts.next()?.trim();
+    let config_files = parts.next().unwrap_or_default().trim();
+    compose_paths_from_label_values(working_dir, config_files)
+}
+
+#[cfg(feature = "docker")]
+fn compose_paths_from_label_values(
+    working_dir: &str,
+    config_files: &str,
+) -> Option<(String, String)> {
+    if working_dir.is_empty() {
+        return None;
+    }
+
+    let dir_path = std::path::Path::new(working_dir);
+    let labeled_file = config_files
+        .split(',')
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                dir_path.join(path)
+            }
+        });
+
+    let file = labeled_file
+        .filter(|path| path.exists())
+        .or_else(|| resolve_compose_file_in_dir(dir_path))?;
+
+    Some((
+        dir_path.to_string_lossy().to_string(),
+        file.to_string_lossy().to_string(),
+    ))
 }
 
 #[cfg(feature = "docker")]
@@ -5356,8 +5441,8 @@ async fn handle_deploy_app(
     let mut errors: Vec<CommandError> = Vec::new();
 
     // Determine the compose working directory
-    // Standard TryDirect deployments use /home/trydirect/<deployment_hash>
-    let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
+    let (compose_dir, compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
 
     // If compose_content is provided, write it to disk (for new deployments)
     if let Some(compose_content) = &data.compose_content {
@@ -5868,7 +5953,8 @@ async fn handle_remove_app(
     );
     let mut errors: Vec<CommandError> = Vec::new();
 
-    let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
+    let (compose_dir, compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
     let compose_exists = Path::new(&compose_file).exists();
 
     // Track whether container was successfully removed
@@ -8811,6 +8897,40 @@ services:
             compose_file,
             project_dir.join("compose.yml").to_string_lossy()
         );
+    }
+
+    #[test]
+    fn compose_paths_from_labels_use_initial_deployment_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let deploy_dir = dir.path().join("opt").join("syncopia");
+        std::fs::create_dir_all(&deploy_dir).unwrap();
+        let compose_file = deploy_dir.join("compose.yml");
+        std::fs::write(&compose_file, "services: {}\n").unwrap();
+
+        let (compose_dir, resolved_file) = compose_paths_from_label_values(
+            deploy_dir.to_str().unwrap(),
+            compose_file.to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(compose_dir, deploy_dir.to_string_lossy());
+        assert_eq!(resolved_file, compose_file.to_string_lossy());
+    }
+
+    #[test]
+    fn compose_paths_from_labels_resolve_relative_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let deploy_dir = dir.path().join("deployment");
+        std::fs::create_dir_all(&deploy_dir).unwrap();
+        let compose_file = deploy_dir.join("docker-compose.yml");
+        std::fs::write(&compose_file, "services: {}\n").unwrap();
+
+        let (compose_dir, resolved_file) =
+            compose_paths_from_label_values(deploy_dir.to_str().unwrap(), "docker-compose.yml")
+                .unwrap();
+
+        assert_eq!(compose_dir, deploy_dir.to_string_lossy());
+        assert_eq!(resolved_file, compose_file.to_string_lossy());
     }
 }
 

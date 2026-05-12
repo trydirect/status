@@ -32,6 +32,7 @@ services:
      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
      # Mount host path for compose and config files
      - /home/trydirect:/home/trydirect
+     - /opt:/opt
     env_file:
       - .env
     environment:
