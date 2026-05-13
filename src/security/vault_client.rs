@@ -325,6 +325,22 @@ pub struct AppConfig {
     /// Optional: owner group for chown after file creation.
     /// Security: Enables group-based access control for shared configurations.
     pub group: Option<String>,
+    /// Whether a drifted existing file may be overwritten.
+    #[serde(default)]
+    pub force_overwrite: bool,
+    /// Optional drift check policy for runtime config files such as .env.
+    #[serde(default)]
+    pub drift_check: Option<AppConfigDriftCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfigDriftCheck {
+    /// Whether the agent must compare the existing file hash before writing.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Where the expected hash should be read from.
+    #[serde(default)]
+    pub hash_source: Option<String>,
 }
 
 /// Default file mode for non-sensitive configuration files.
@@ -1053,6 +1069,16 @@ impl VaultClient {
             .get("group")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let force_overwrite = data
+            .get("force_overwrite")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let drift_check = data
+            .get("drift_check")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .context("parsing config drift_check")?;
 
         // Log metadata but never the actual content
         info!(
@@ -1067,6 +1093,8 @@ impl VaultClient {
             file_mode,
             owner,
             group,
+            force_overwrite,
+            drift_check,
         })
     }
 

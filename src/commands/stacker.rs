@@ -1448,6 +1448,9 @@ pub struct DeployAppCommand {
     /// Whether to remove existing container before deploying
     #[serde(default)]
     force_recreate: bool,
+    /// Whether to overwrite drifted runtime config files such as .env
+    #[serde(default)]
+    force_config_overwrite: bool,
     /// Optional: config files to write before deploying (uses existing AppConfig struct)
     #[serde(default)]
     config_files: Option<Vec<crate::security::vault_client::AppConfig>>,
@@ -5160,6 +5163,8 @@ async fn handle_apply_config(
             file_mode: "0644".to_string(),
             owner: None,
             group: None,
+            force_overwrite: false,
+            drift_check: None,
         }
     } else {
         // Fetch from Vault
@@ -5401,11 +5406,21 @@ async fn ensure_env_files_exist(
 /// Write config file to disk with proper permissions
 #[cfg(feature = "docker")]
 pub async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig) -> Result<()> {
+    write_config_to_disk_with_force(config, false).await
+}
+
+#[cfg(feature = "docker")]
+async fn write_config_to_disk_with_force(
+    config: &crate::security::vault_client::AppConfig,
+    force_overwrite: bool,
+) -> Result<()> {
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     let path = Path::new(&config.destination_path);
+    let effective_force = force_overwrite || config.force_overwrite;
 
     // Check if the destination path exists as a directory (Docker sometimes creates these)
     // If so, remove it first so we can write the file
@@ -5425,18 +5440,48 @@ pub async fn write_config_to_disk(config: &crate::security::vault_client::AppCon
         fs::create_dir_all(parent).context(format!("Failed to create directory: {:?}", parent))?;
     }
 
-    // Write the content
-    fs::write(path, &config.content)
-        .context(format!("Failed to write file: {}", config.destination_path))?;
+    enforce_config_drift_policy(config, path, effective_force)?;
 
-    // Set file permissions
-    if let Ok(mode) = u32::from_str_radix(config.file_mode.trim_start_matches('0'), 8) {
-        let permissions = fs::Permissions::from_mode(mode);
-        fs::set_permissions(path, permissions).context(format!(
-            "Failed to set permissions on: {}",
+    let temp_path = sibling_temp_path(path)?;
+    let write_result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .context(format!(
+                "Failed to create temp file: {}",
+                temp_path.display()
+            ))?;
+        file.write_all(config.content.as_bytes())
+            .context("Failed to write config temp file")?;
+        file.sync_all().context("Failed to sync config temp file")?;
+
+        if let Ok(mode) = u32::from_str_radix(config.file_mode.trim_start_matches('0'), 8) {
+            let permissions = fs::Permissions::from_mode(mode);
+            fs::set_permissions(&temp_path, permissions).context(format!(
+                "Failed to set permissions on: {}",
+                temp_path.display()
+            ))?;
+        }
+
+        fs::rename(&temp_path, path).context(format!(
+            "Failed to atomically move config into place: {}",
             config.destination_path
         ))?;
+
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
     }
+    write_result?;
 
     tracing::info!(
         path = %config.destination_path,
@@ -5446,6 +5491,121 @@ pub async fn write_config_to_disk(config: &crate::security::vault_client::AppCon
     );
 
     Ok(())
+}
+
+#[cfg(feature = "docker")]
+fn enforce_config_drift_policy(
+    config: &crate::security::vault_client::AppConfig,
+    path: &std::path::Path,
+    force_overwrite: bool,
+) -> Result<()> {
+    let Some(drift_check) = &config.drift_check else {
+        return Ok(());
+    };
+    if !drift_check.enabled {
+        return Ok(());
+    }
+    if drift_check.hash_source.as_deref() != Some("stacker-render-header") {
+        return Ok(());
+    }
+
+    let expected_hash = stacker_render_hash(&config.content).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Runtime env drift check requested but stacker-render hash header is missing for {}",
+            config.destination_path
+        )
+    })?;
+
+    if !path.exists() || path.is_dir() {
+        return Ok(());
+    }
+
+    let current_content = std::fs::read_to_string(path).context(format!(
+        "Failed to read existing config for drift check: {}",
+        config.destination_path
+    ))?;
+    let actual_hash = env_body_hash(&current_content);
+
+    if actual_hash == expected_hash {
+        return Ok(());
+    }
+
+    if force_overwrite {
+        tracing::warn!(
+            path = %config.destination_path,
+            expected_hash = %expected_hash,
+            actual_hash = %actual_hash,
+            "Forcing overwrite of drifted runtime config"
+        );
+        return Ok(());
+    }
+
+    bail!(
+        "Runtime env drift detected for {}: expected hash {}, found {}; rerun with --force to overwrite",
+        config.destination_path,
+        expected_hash,
+        actual_hash
+    );
+}
+
+#[cfg(feature = "docker")]
+fn is_env_config_file(config: &crate::security::vault_client::AppConfig) -> bool {
+    config.content_type == "env" || config.destination_path.ends_with("/.env")
+}
+
+#[cfg(feature = "docker")]
+fn is_runtime_config_drift_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("Runtime env drift detected")
+        || message.contains("Runtime env drift check requested")
+}
+
+#[cfg(feature = "docker")]
+fn stacker_render_hash(content: &str) -> Option<String> {
+    let header = content.lines().next()?;
+    if !header.starts_with("# stacker-render ") {
+        return None;
+    }
+    header
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("hash="))
+        .map(str::to_string)
+}
+
+#[cfg(feature = "docker")]
+fn env_body_hash(content: &str) -> String {
+    let body = content
+        .strip_prefix("# stacker-render ")
+        .and_then(|_| content.split_once('\n').map(|(_, body)| body))
+        .unwrap_or(content);
+    sha256_hex(body.as_bytes())
+}
+
+#[cfg(feature = "docker")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(bytes);
+    format!("{:x}", digest)
+}
+
+#[cfg(feature = "docker")]
+fn sibling_temp_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no file name: {}", path.display()))?;
+    let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+
+    Ok(parent.join(format!(
+        ".{}.tmp.{}.{}",
+        file_name,
+        std::process::id(),
+        suffix
+    )))
 }
 
 /// Handle deploy_app command - uses docker compose to deploy a new app/service
@@ -5587,6 +5747,12 @@ async fn handle_deploy_app(
         }
     }
 
+    let has_env_config_file = data
+        .config_files
+        .as_ref()
+        .map(|configs| configs.iter().any(is_env_config_file))
+        .unwrap_or(false);
+
     // Write config files if provided (e.g., telegraf.conf, nginx.conf, etc.)
     if let Some(config_files) = &data.config_files {
         for config in config_files {
@@ -5595,15 +5761,24 @@ async fn handle_deploy_app(
                 destination = %config.destination_path,
                 "Writing config file from command payload"
             );
-            if let Err(e) = write_config_to_disk(config).await {
-                errors.push(make_error(
+            if let Err(e) =
+                write_config_to_disk_with_force(config, data.force_config_overwrite).await
+            {
+                let error = make_error(
                     "config_write_warning",
                     format!(
                         "Failed to write config file {}: {}",
                         config.destination_path, e
                     ),
                     None,
-                ));
+                );
+                if is_runtime_config_drift_error(&e) {
+                    result.status = "failed".into();
+                    result.error = Some(error.message.clone());
+                    result.errors = Some(vec![error]);
+                    return Ok(result);
+                }
+                errors.push(error);
                 // Continue with other configs, don't fail entirely
             }
         }
@@ -5611,8 +5786,8 @@ async fn handle_deploy_app(
 
     // Fetch .env from Vault if env_vars not provided in command payload
     // This ensures user-edited .env content from Stacker is applied
-    let env_from_vault = if data.env_vars.is_none()
-        || data.env_vars.as_ref().map(|v| v.is_empty()).unwrap_or(true)
+    let env_from_vault = if !has_env_config_file
+        && (data.env_vars.is_none() || data.env_vars.as_ref().map(|v| v.is_empty()).unwrap_or(true))
     {
         match VaultClient::from_env() {
             Ok(Some(vault_client)) => {
@@ -5660,21 +5835,29 @@ async fn handle_deploy_app(
 
     // Write .env from Vault if fetched
     if let Some(env_config) = env_from_vault {
-        let env_file_path = format!("{}/.env", compose_dir);
         tracing::info!(
             app_code = %data.app_code,
-            env_file = %env_file_path,
+            env_file = %env_config.destination_path,
             "Writing .env file from Vault"
         );
-        if let Err(e) = tokio::fs::write(&env_file_path, &env_config.content).await {
-            errors.push(make_error(
+        if let Err(e) =
+            write_config_to_disk_with_force(&env_config, data.force_config_overwrite).await
+        {
+            let error = make_error(
                 "env_file_warning",
                 format!("Failed to write .env file from Vault: {}", e),
                 None,
-            ));
+            );
+            if is_runtime_config_drift_error(&e) {
+                result.status = "failed".into();
+                result.error = Some(error.message.clone());
+                result.errors = Some(vec![error]);
+                return Ok(result);
+            }
+            errors.push(error);
         } else {
             tracing::info!(
-                env_file = %env_file_path,
+                env_file = %env_config.destination_path,
                 ".env file from Vault written successfully"
             );
         }
@@ -6565,6 +6748,7 @@ async fn handle_deploy_with_configs(
         env_vars: None,
         pull: data.pull,
         force_recreate: data.force_recreate,
+        force_config_overwrite: data.force_recreate,
         config_files: None, // Configs already written in step 1 from Vault
         runtime: data.runtime.clone(),
         registry_auth: data.registry_auth.clone(),
@@ -9066,32 +9250,49 @@ services:
 #[cfg(all(test, feature = "docker"))]
 mod write_config_tests {
     use super::write_config_to_disk;
-    use crate::security::vault_client::AppConfig;
+    use crate::security::vault_client::{AppConfig, AppConfigDriftCheck};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    fn app_config(path: String, content: String) -> AppConfig {
+        AppConfig {
+            content,
+            content_type: "env".to_string(),
+            destination_path: path,
+            file_mode: "0600".to_string(),
+            owner: None,
+            group: None,
+            force_overwrite: false,
+            drift_check: None,
+        }
+    }
+
+    fn stacker_env(body: &str) -> String {
+        format!(
+            "# stacker-render version=1 hash={} generated_at=2026-05-13T00:00:00Z inputs=base\n{}",
+            super::sha256_hex(body.as_bytes()),
+            body
+        )
+    }
+
+    fn enable_drift_check(config: &mut AppConfig) {
+        config.drift_check = Some(AppConfigDriftCheck {
+            enabled: true,
+            hash_source: Some("stacker-render-header".to_string()),
+        });
+    }
 
     #[tokio::test]
     async fn test_write_config_to_disk_creates_file_and_sets_permissions() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.conf");
         let file_path_str = file_path.to_str().unwrap().to_string();
-        let config = AppConfig {
-            content: "key=value".to_string(),
-            content_type: "env".to_string(),
-            destination_path: file_path_str.clone(),
-            file_mode: "0600".to_string(),
-            owner: None,
-            group: None,
-        };
+        let config = app_config(file_path_str.clone(), "key=value".to_string());
 
         write_config_to_disk(&config)
             .await
             .expect("write should succeed");
-
-        println!("Test config written to: {}", file_path_str);
-        // Pause for 10 seconds to allow manual inspection
-        std::thread::sleep(std::time::Duration::from_secs(10));
 
         let written = fs::read_to_string(&file_path).expect("file should exist");
         assert_eq!(written, "key=value");
@@ -9099,6 +9300,49 @@ mod write_config_tests {
         let metadata = fs::metadata(&file_path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_rejects_drift_without_force() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(&file_path, stacker_env("OLD=value\n")).unwrap();
+
+        let mut config = app_config(
+            file_path.to_string_lossy().to_string(),
+            stacker_env("NEW=value\n"),
+        );
+        enable_drift_check(&mut config);
+
+        let error = write_config_to_disk(&config)
+            .await
+            .expect_err("drift should be rejected");
+
+        assert!(error.to_string().contains("Runtime env drift detected"));
+        let written = fs::read_to_string(&file_path).expect("file should remain");
+        assert!(written.contains("OLD=value"));
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_allows_forced_drift_overwrite() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(&file_path, stacker_env("OLD=value\n")).unwrap();
+
+        let mut config = app_config(
+            file_path.to_string_lossy().to_string(),
+            stacker_env("NEW=value\n"),
+        );
+        config.force_overwrite = true;
+        enable_drift_check(&mut config);
+
+        write_config_to_disk(&config)
+            .await
+            .expect("forced drift overwrite should succeed");
+
+        let written = fs::read_to_string(&file_path).expect("file should exist");
+        assert!(written.contains("NEW=value"));
+        assert!(!written.contains("OLD=value"));
     }
 }
 
