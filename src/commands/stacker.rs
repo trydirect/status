@@ -1080,10 +1080,7 @@ impl PipeRuntime {
         let mut options = tokio::fs::OpenOptions::new();
         options.create(true).write(true).truncate(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
+        options.mode(0o600);
 
         let mut file = options
             .open(&path)
