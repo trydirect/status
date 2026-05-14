@@ -16,7 +16,7 @@ use std::collections::HashMap;
 #[cfg(feature = "docker")]
 use std::collections::HashSet;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "docker")]
@@ -1080,7 +1080,10 @@ impl PipeRuntime {
         let mut options = tokio::fs::OpenOptions::new();
         options.create(true).write(true).truncate(true);
         #[cfg(unix)]
-        options.mode(0o600);
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
 
         let mut file = options
             .open(&path)
@@ -5641,7 +5644,10 @@ fn backup_existing_file_if_changed(
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    options.mode(metadata.permissions().mode() & 0o777);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(metadata.permissions().mode() & 0o777);
+    }
 
     {
         use std::io::Write as _;
