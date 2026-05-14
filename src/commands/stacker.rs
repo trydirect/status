@@ -16,7 +16,7 @@ use std::collections::HashMap;
 #[cfg(feature = "docker")]
 use std::collections::HashSet;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "docker")]
@@ -40,6 +40,8 @@ use super::firewall::{self, ConfigureFirewallCommand};
 
 const LOGS_DEFAULT_LIMIT: usize = 400;
 const LOGS_MAX_LIMIT: usize = 1000;
+#[cfg(feature = "docker")]
+const MANAGED_FILE_BACKUP_KEEP: usize = 5;
 
 /// Container runtime selection for hardware-level isolation.
 /// Defaults to `Runc` (standard Linux containers). `Kata` provides microVM-based isolation
@@ -5444,6 +5446,8 @@ async fn write_config_to_disk_with_force(
 
     let temp_path = sibling_temp_path(path)?;
     let write_result = (|| -> Result<()> {
+        backup_existing_file_if_changed(path, config.content.as_bytes())?;
+
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -5608,6 +5612,136 @@ fn sibling_temp_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
     )))
 }
 
+#[cfg(feature = "docker")]
+fn backup_existing_file_if_changed(
+    path: &std::path::Path,
+    replacement: &[u8],
+) -> Result<Option<std::path::PathBuf>> {
+    if !path.exists() || path.is_dir() {
+        return Ok(None);
+    }
+
+    let current = std::fs::read(path).with_context(|| {
+        format!(
+            "Failed to read existing file for backup: {}",
+            path.display()
+        )
+    })?;
+    if current == replacement {
+        return Ok(None);
+    }
+
+    let metadata = std::fs::metadata(path).with_context(|| {
+        format!(
+            "Failed to stat existing file for backup: {}",
+            path.display()
+        )
+    })?;
+    let backup_path = sibling_backup_path(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(metadata.permissions().mode() & 0o777);
+
+    {
+        use std::io::Write as _;
+
+        let mut backup = options.open(&backup_path).with_context(|| {
+            format!(
+                "Failed to create backup {} before overwriting {}",
+                backup_path.display(),
+                path.display()
+            )
+        })?;
+        backup.write_all(&current).with_context(|| {
+            format!(
+                "Failed to write backup {} before overwriting {}",
+                backup_path.display(),
+                path.display()
+            )
+        })?;
+        backup
+            .sync_all()
+            .with_context(|| format!("Failed to sync backup: {}", backup_path.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::set_permissions(&backup_path, metadata.permissions());
+    }
+
+    prune_sibling_backups(path, MANAGED_FILE_BACKUP_KEEP)?;
+
+    tracing::warn!(
+        path = %path.display(),
+        backup = %backup_path.display(),
+        "Created managed file backup before overwrite"
+    );
+
+    Ok(Some(backup_path))
+}
+
+#[cfg(feature = "docker")]
+fn sibling_backup_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no file name: {}", path.display()))?;
+    let now = Utc::now();
+    let stamp = now.format("%Y%m%dT%H%M%SZ");
+    let nanos = now.timestamp_nanos_opt().unwrap_or_default();
+
+    Ok(parent.join(format!(
+        "{}.stacker-bak-{}-{}-{}",
+        file_name,
+        stamp,
+        std::process::id(),
+        nanos
+    )))
+}
+
+#[cfg(feature = "docker")]
+fn prune_sibling_backups(path: &std::path::Path, keep: usize) -> Result<()> {
+    if keep == 0 {
+        return Ok(());
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no file name: {}", path.display()))?;
+    let prefix = format!("{file_name}.stacker-bak-");
+
+    let mut backups = std::fs::read_dir(parent)
+        .with_context(|| format!("Failed to list backup directory: {}", parent.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if name.starts_with(&prefix) {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    backups.sort();
+    let remove_count = backups.len().saturating_sub(keep);
+    for backup in backups.into_iter().take(remove_count) {
+        std::fs::remove_file(&backup)
+            .with_context(|| format!("Failed to remove old backup: {}", backup.display()))?;
+    }
+
+    Ok(())
+}
+
 /// Handle deploy_app command - uses docker compose to deploy a new app/service
 #[cfg(feature = "docker")]
 async fn handle_deploy_app(
@@ -5680,6 +5814,23 @@ async fn handle_deploy_app(
         }
 
         // Write the compose file
+        if let Err(e) = backup_existing_file_if_changed(
+            std::path::Path::new(&compose_file),
+            final_compose.as_bytes(),
+        ) {
+            let error = make_error(
+                "compose_backup_failed",
+                format!(
+                    "Failed to back up docker-compose.yml before overwrite: {}",
+                    e
+                ),
+                None,
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
         if let Err(e) = tokio::fs::write(&compose_file, &final_compose).await {
             let error = make_error(
                 "compose_write_failed",
@@ -5705,7 +5856,20 @@ async fn handle_deploy_app(
                     if kata_available {
                         if let Ok(existing) = tokio::fs::read_to_string(&compose_file).await {
                             let injected = inject_runtime_into_compose(&existing, runtime);
-                            if let Err(e) = tokio::fs::write(&compose_file, &injected).await {
+                            if let Err(e) = backup_existing_file_if_changed(
+                                std::path::Path::new(&compose_file),
+                                injected.as_bytes(),
+                            ) {
+                                errors.push(make_error(
+                                    "runtime_inject_warning",
+                                    format!(
+                                        "Failed to back up compose file before runtime injection: {}",
+                                        e
+                                    ),
+                                    None,
+                                ));
+                            } else if let Err(e) = tokio::fs::write(&compose_file, &injected).await
+                            {
                                 errors.push(make_error(
                                     "runtime_inject_warning",
                                     format!(
@@ -5882,7 +6046,16 @@ async fn handle_deploy_app(
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            if let Err(e) = tokio::fs::write(&env_file_path, &env_content).await {
+            if let Err(e) = backup_existing_file_if_changed(
+                std::path::Path::new(&env_file_path),
+                env_content.as_bytes(),
+            ) {
+                errors.push(make_error(
+                    "env_file_warning",
+                    format!("Failed to back up .env file before overwrite: {}", e),
+                    None,
+                ));
+            } else if let Err(e) = tokio::fs::write(&env_file_path, &env_content).await {
                 errors.push(make_error(
                     "env_file_warning",
                     format!("Failed to write .env file: {}", e),
@@ -9283,6 +9456,24 @@ mod write_config_tests {
         });
     }
 
+    fn sibling_backups(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        let prefix = format!("{file_name}.stacker-bak-");
+        let mut backups = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        backups.sort();
+        backups
+    }
+
     #[tokio::test]
     async fn test_write_config_to_disk_creates_file_and_sets_permissions() {
         let dir = tempdir().unwrap();
@@ -9343,6 +9534,72 @@ mod write_config_tests {
         let written = fs::read_to_string(&file_path).expect("file should exist");
         assert!(written.contains("NEW=value"));
         assert!(!written.contains("OLD=value"));
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_backs_up_existing_file_before_overwrite() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(&file_path, "OLD=value\n").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let config = app_config(
+            file_path.to_string_lossy().to_string(),
+            "NEW=value\n".to_string(),
+        );
+
+        write_config_to_disk(&config)
+            .await
+            .expect("write should succeed");
+
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "NEW=value\n");
+        let backups = sibling_backups(&file_path);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "OLD=value\n");
+        assert_eq!(
+            fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_skips_backup_when_content_is_unchanged() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(&file_path, "SAME=value\n").unwrap();
+
+        let config = app_config(
+            file_path.to_string_lossy().to_string(),
+            "SAME=value\n".to_string(),
+        );
+
+        write_config_to_disk(&config)
+            .await
+            .expect("write should succeed");
+
+        assert!(sibling_backups(&file_path).is_empty());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "SAME=value\n");
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_retains_only_recent_backups() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+
+        for index in 0..7 {
+            fs::write(&file_path, format!("VALUE={index}\n")).unwrap();
+            let config = app_config(
+                file_path.to_string_lossy().to_string(),
+                format!("VALUE={}\n", index + 1),
+            );
+            write_config_to_disk(&config)
+                .await
+                .expect("write should succeed");
+        }
+
+        let backups = sibling_backups(&file_path);
+        assert_eq!(backups.len(), super::MANAGED_FILE_BACKUP_KEEP);
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "VALUE=7\n");
     }
 }
 

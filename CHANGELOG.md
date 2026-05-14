@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+### Added
+- `deploy_app` now creates adjacent `.stacker-bak-*` backups before overwriting managed compose, env, or config bundle files, retaining the five most recent backups per file.
+
 ### Changed
 - Nginx Proxy Manager proxy-host creation now includes the Let's Encrypt account email only when SSL is requested.
 - Failed NPM proxy-host creation results preserve the NPM response status and error message for clearer CLI feedback.

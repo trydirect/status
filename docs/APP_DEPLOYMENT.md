@@ -142,3 +142,23 @@ path "{prefix}/*" {
 1. Should template fetching support private repos (with token)?
 2. How to handle versioning/rollback of configs and deployments?
 3. Should we support dry-run/preview before applying changes?
+
+### Managed File Backups
+
+Before `deploy_app` overwrites a managed file, Status Panel now creates an adjacent
+backup when the existing content differs from the incoming content. This applies to
+the active compose file, runtime-injected compose updates, command-supplied `.env`
+files, and config bundle files written from Vault or command payloads.
+
+Backup files use the pattern `<name>.stacker-bak-<timestamp>-<pid>-<nanos>` and
+are stored next to the original file, for example:
+
+```text
+/home/trydirect/project/docker-compose.yml
+/home/trydirect/project/docker-compose.yml.stacker-bak-20260514T081500Z-1234-1789123456789
+```
+
+Status Panel keeps the five most recent backups per managed file and skips backup
+creation when the incoming content is identical. Backups preserve the original file
+permissions where the operating system allows it, which is important for `.env`
+and other secret-bearing files.
