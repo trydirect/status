@@ -5554,7 +5554,7 @@ fn enforce_config_drift_policy(
 
 #[cfg(feature = "docker")]
 fn is_env_config_file(config: &crate::security::vault_client::AppConfig) -> bool {
-    config.content_type == "env" || config.destination_path.ends_with("/.env")
+    config.content_type == "env" || config.destination_path.ends_with(".env")
 }
 
 #[cfg(feature = "docker")]
@@ -9494,6 +9494,21 @@ mod write_config_tests {
         let metadata = fs::metadata(&file_path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn test_is_env_config_file_matches_relative_dot_env_destination() {
+        let config = app_config(".env".to_string(), "KEY=value\n".to_string());
+        assert!(super::is_env_config_file(&config));
+    }
+
+    #[test]
+    fn test_is_env_config_file_matches_absolute_dot_env_destination() {
+        let config = app_config(
+            "/home/trydirect/project/.env".to_string(),
+            "KEY=value\n".to_string(),
+        );
+        assert!(super::is_env_config_file(&config));
     }
 
     #[tokio::test]
