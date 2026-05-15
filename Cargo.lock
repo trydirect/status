@@ -3204,7 +3204,7 @@ dependencies = [
  "assert_cmd",
  "axum 0.8.7",
  "async-trait",
- "axum",
+ "axum 0.8.7",
  "base64",
  "bollard",
  "bytes",

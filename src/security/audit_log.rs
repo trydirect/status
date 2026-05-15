@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn audit_logger_default() {
-        let logger = AuditLogger::default();
+        let logger = AuditLogger;
         let _ = format!("{:?}", logger);
     }
 

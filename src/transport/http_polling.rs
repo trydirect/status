@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::security::request_signer::compute_signature_base64;
 use crate::security::token_provider::TokenProvider;
 use crate::transport::retry::{signed_get_with_retry, signed_post_with_retry, RetryConfig};
-use crate::transport::Command;
+use crate::transport::{Command, CommandError};
 
 const TS_OVERRIDE_ENV: &str = "HTTP_POLLING_TS_OVERRIDE";
 const REQUEST_ID_OVERRIDE_ENV: &str = "HTTP_POLLING_REQUEST_ID_OVERRIDE";
@@ -140,13 +140,17 @@ fn build_wait_command_url(
     timeout_secs: u64,
     priority: Option<&str>,
 ) -> String {
-    format!(
-        "{}/api/v1/agent/commands/wait/{}?timeout={}&priority={}",
-        base_url,
-        deployment_hash,
-        timeout_secs,
-        priority.unwrap_or("normal")
-    )
+    let mut url = format!(
+        "{}/api/v1/agent/commands/wait/{}?timeout={}",
+        base_url, deployment_hash, timeout_secs
+    );
+
+    if let Some(priority) = priority.filter(|value| !value.is_empty()) {
+        url.push_str("&priority=");
+        url.push_str(priority);
+    }
+
+    url
 }
 
 fn create_http_client() -> Result<Client> {
@@ -350,6 +354,7 @@ pub async fn report_result(
     status: &str,
     result: &Option<serde_json::Value>,
     error: &Option<String>,
+    errors: &Option<Vec<CommandError>>,
     completed_at: &str,
     executed_by: Option<&str>,
 ) -> Result<()> {
@@ -387,6 +392,13 @@ pub async fn report_result(
         body.insert("error".to_string(), serde_json::Value::String(err.clone()));
     } else {
         body.insert("error".to_string(), serde_json::Value::Null);
+    }
+
+    if let Some(errs) = errors {
+        body.insert(
+            "errors".to_string(),
+            serde_json::to_value(errs).context("Failed to encode command errors")?,
+        );
     }
 
     debug!(url = %url, body = ?body, "reporting command result to stacker");
@@ -479,6 +491,7 @@ pub async fn report_result_with_retry(
     status: &str,
     result: &Option<serde_json::Value>,
     error: &Option<String>,
+    errors: &Option<Vec<CommandError>>,
     completed_at: &str,
     executed_by: Option<&str>,
 ) -> Result<()> {
@@ -506,6 +519,12 @@ pub async fn report_result_with_retry(
             .map(|e| Value::String(e.clone()))
             .unwrap_or(Value::Null),
     );
+    if let Some(errs) = errors {
+        body.insert(
+            "errors".into(),
+            serde_json::to_value(errs).context("Failed to encode command errors")?,
+        );
+    }
 
     debug!(url = %url, body = ?body, "reporting result with retry");
 
@@ -555,6 +574,7 @@ pub async fn update_app_status_with_retry<T: Serialize>(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use mockito::{Matcher, Server};
@@ -582,6 +602,7 @@ mod tests {
         let status = "success";
         let result: Option<serde_json::Value> = None;
         let error = None;
+        let errors: Option<Vec<CommandError>> = None;
         let completed_at = "2023-11-15T10:00:00Z";
         let executed_by = Some("compose_agent");
 
@@ -610,6 +631,9 @@ mod tests {
             payload.insert("result".to_string(), value);
         }
         payload.insert("error".to_string(), serde_json::Value::Null);
+        if let Some(value) = errors.clone() {
+            payload.insert("errors".to_string(), serde_json::to_value(value).unwrap());
+        }
 
         let body = serde_json::to_vec(&payload).unwrap();
         let signature = compute_signature_base64(agent_token, &body);
@@ -639,6 +663,83 @@ mod tests {
             status,
             &result,
             &error,
+            &errors,
+            completed_at,
+            executed_by,
+        )
+        .await
+        .expect("report_result should succeed");
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn report_result_includes_structured_errors() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        env::set_var(TS_OVERRIDE_ENV, "1700000003");
+        env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-999");
+
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+        let agent_id = "agent-123";
+        let agent_token = "token-abc";
+        let command_id = "cmd-2";
+        let deployment_hash = "dep-hash-456";
+        let status = "failed";
+        let result = Some(json!({
+            "type": "configure_proxy",
+            "status": "error",
+            "message": "NPM operation failed"
+        }));
+        let error = Some("NPM operation failed".to_string());
+        let errors = Some(vec![CommandError {
+            code: "npm_error".to_string(),
+            message: "NPM operation failed".to_string(),
+            details: Some("Failed to connect to NPM".to_string()),
+        }]);
+        let completed_at = "2023-11-15T10:05:00Z";
+        let executed_by = None;
+
+        let mut payload = serde_json::Map::new();
+        payload.insert("command_id".to_string(), json!(command_id));
+        payload.insert("deployment_hash".to_string(), json!(deployment_hash));
+        payload.insert("status".to_string(), json!(status));
+        payload.insert("completed_at".to_string(), json!(completed_at));
+        payload.insert("result".to_string(), result.clone().unwrap());
+        payload.insert("error".to_string(), json!(error.clone().unwrap()));
+        payload.insert(
+            "errors".to_string(),
+            serde_json::to_value(errors.clone().unwrap()).unwrap(),
+        );
+
+        let body = serde_json::to_vec(&payload).unwrap();
+        let signature = compute_signature_base64(agent_token, &body);
+        let ts = env::var(TS_OVERRIDE_ENV).unwrap();
+        let req_id = env::var(REQUEST_ID_OVERRIDE_ENV).unwrap();
+        let mock = server
+            .mock("POST", "/api/v1/agent/commands/report")
+            .match_header("X-Agent-Id", Matcher::Exact(agent_id.into()))
+            .match_header(
+                "Authorization",
+                Matcher::Exact(format!("Bearer {}", agent_token)),
+            )
+            .match_header("X-Timestamp", Matcher::Exact(ts))
+            .match_header("X-Request-Id", Matcher::Exact(req_id))
+            .match_header("X-Agent-Signature", Matcher::Exact(signature))
+            .match_body(Matcher::Exact(String::from_utf8(body.clone()).unwrap()))
+            .with_status(200)
+            .create_async()
+            .await;
+
+        report_result(
+            &base_url,
+            agent_id,
+            agent_token,
+            command_id,
+            deployment_hash,
+            status,
+            &result,
+            &error,
+            &errors,
             completed_at,
             executed_by,
         )
@@ -664,6 +765,7 @@ mod tests {
         let status = "success";
         let result: Option<serde_json::Value> = None;
         let error = None;
+        let errors: Option<Vec<CommandError>> = None;
         let completed_at = "2023-11-15T10:00:00Z";
         let executed_by = Some("compose_agent");
 
@@ -718,6 +820,7 @@ mod tests {
             status,
             &result,
             &error,
+            &errors,
             completed_at,
             executed_by,
         )
@@ -828,11 +931,11 @@ mod tests {
     }
 
     #[test]
-    fn build_wait_command_url_default_priority() {
+    fn build_wait_command_url_omits_priority_when_unset() {
         let url = build_wait_command_url("https://example.com", "dep-1", 60, None);
         assert_eq!(
             url,
-            "https://example.com/api/v1/agent/commands/wait/dep-1?timeout=60&priority=normal"
+            "https://example.com/api/v1/agent/commands/wait/dep-1?timeout=60"
         );
     }
 

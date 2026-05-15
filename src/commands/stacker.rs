@@ -22,6 +22,8 @@ use std::sync::Arc;
 #[cfg(feature = "docker")]
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
+#[cfg(feature = "docker")]
+use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
@@ -38,6 +40,8 @@ use super::firewall::{self, ConfigureFirewallCommand};
 
 const LOGS_DEFAULT_LIMIT: usize = 400;
 const LOGS_MAX_LIMIT: usize = 1000;
+#[cfg(feature = "docker")]
+const MANAGED_FILE_BACKUP_KEEP: usize = 5;
 
 /// Container runtime selection for hardware-level isolation.
 /// Defaults to `Runc` (standard Linux containers). `Kata` provides microVM-based isolation
@@ -1446,12 +1450,35 @@ pub struct DeployAppCommand {
     /// Whether to remove existing container before deploying
     #[serde(default)]
     force_recreate: bool,
+    /// Whether to overwrite drifted runtime config files such as .env
+    #[serde(default)]
+    force_config_overwrite: bool,
     /// Optional: config files to write before deploying (uses existing AppConfig struct)
     #[serde(default)]
     config_files: Option<Vec<crate::security::vault_client::AppConfig>>,
     /// Container runtime to use: "runc" (default) or "kata" for microVM isolation
     #[serde(default)]
     runtime: Option<ContainerRuntime>,
+    /// Optional private registry credentials for authenticated image pulls.
+    #[serde(default)]
+    registry_auth: Option<RegistryAuthCommand>,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct RegistryAuthCommand {
+    registry: String,
+    username: String,
+    password: String,
+}
+
+impl std::fmt::Debug for RegistryAuthCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryAuthCommand")
+            .field("registry", &self.registry)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Command to remove an app container and associated config
@@ -1507,6 +1534,9 @@ pub struct DeployWithConfigsCommand {
     /// Container runtime to use: "runc" (default) or "kata" for microVM isolation
     #[serde(default)]
     runtime: Option<ContainerRuntime>,
+    /// Optional private registry credentials for authenticated image pulls.
+    #[serde(default)]
+    registry_auth: Option<RegistryAuthCommand>,
 }
 
 /// Command to detect configuration drift between Vault and deployed files
@@ -2733,22 +2763,142 @@ fn trimmed(value: &str) -> String {
 
 #[cfg(feature = "docker")]
 fn resolve_compose_paths(deployment_hash: &str, app_code: &str) -> (String, String) {
-    use std::path::Path;
-
-    if let Ok(dir) = std::env::var("COMPOSE_PROJECT_DIR") {
-        let file = format!("{}/docker-compose.yml", dir);
-        return (dir, file);
+    if let Some(paths) = resolve_compose_paths_from_env() {
+        return paths;
     }
 
-    let hash_dir = format!("/home/trydirect/{}", deployment_hash);
-    let hash_file = format!("{}/docker-compose.yml", hash_dir);
-    if Path::new(&hash_file).exists() {
-        return (hash_dir, hash_file);
+    resolve_compose_paths_in_base(
+        std::path::Path::new("/home/trydirect"),
+        deployment_hash,
+        app_code,
+    )
+}
+
+#[cfg(feature = "docker")]
+async fn resolve_compose_paths_for_service(
+    deployment_hash: &str,
+    app_code: &str,
+) -> (String, String) {
+    if let Some(paths) = resolve_compose_paths_from_env() {
+        return paths;
+    }
+    if let Some(paths) = resolve_compose_paths_from_container_labels(app_code).await {
+        return paths;
     }
 
-    let app_dir = format!("/home/trydirect/{}", app_code);
-    let app_file = format!("{}/docker-compose.yml", app_dir);
-    (app_dir, app_file)
+    resolve_compose_paths(deployment_hash, app_code)
+}
+
+#[cfg(feature = "docker")]
+fn resolve_compose_paths_from_env() -> Option<(String, String)> {
+    let dir = std::env::var("COMPOSE_PROJECT_DIR").ok()?;
+    let dir_path = std::path::Path::new(&dir);
+    let file = resolve_compose_file_in_dir(dir_path)
+        .unwrap_or_else(|| dir_path.join("docker-compose.yml"));
+    Some((dir, file.to_string_lossy().to_string()))
+}
+
+#[cfg(feature = "docker")]
+async fn resolve_compose_paths_from_container_labels(app_code: &str) -> Option<(String, String)> {
+    use tokio::process::Command;
+
+    let output = Command::new("docker")
+        .arg("ps")
+        .arg("-a")
+        .arg("--filter")
+        .arg(format!("label=com.docker.compose.service={}", app_code))
+        .arg("--format")
+        .arg("{{.Label \"com.docker.compose.project.working_dir\"}}\t{{.Label \"com.docker.compose.project.config_files\"}}")
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(compose_paths_from_label_line)
+}
+
+#[cfg(feature = "docker")]
+fn compose_paths_from_label_line(line: &str) -> Option<(String, String)> {
+    let mut parts = line.splitn(2, '\t');
+    let working_dir = parts.next()?.trim();
+    let config_files = parts.next().unwrap_or_default().trim();
+    compose_paths_from_label_values(working_dir, config_files)
+}
+
+#[cfg(feature = "docker")]
+fn compose_paths_from_label_values(
+    working_dir: &str,
+    config_files: &str,
+) -> Option<(String, String)> {
+    if working_dir.is_empty() {
+        return None;
+    }
+
+    let dir_path = std::path::Path::new(working_dir);
+    let labeled_file = config_files
+        .split(',')
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                dir_path.join(path)
+            }
+        });
+
+    let file = labeled_file
+        .filter(|path| path.exists())
+        .or_else(|| resolve_compose_file_in_dir(dir_path))?;
+
+    Some((
+        dir_path.to_string_lossy().to_string(),
+        file.to_string_lossy().to_string(),
+    ))
+}
+
+#[cfg(feature = "docker")]
+fn resolve_compose_paths_in_base(
+    base_dir: &std::path::Path,
+    deployment_hash: &str,
+    app_code: &str,
+) -> (String, String) {
+    for candidate in [deployment_hash, "project", app_code] {
+        let dir = base_dir.join(candidate);
+        if let Some(file) = resolve_compose_file_in_dir(&dir) {
+            return (
+                dir.to_string_lossy().to_string(),
+                file.to_string_lossy().to_string(),
+            );
+        }
+        if candidate == app_code {
+            let fallback = dir.join("docker-compose.yml");
+            return (
+                dir.to_string_lossy().to_string(),
+                fallback.to_string_lossy().to_string(),
+            );
+        }
+    }
+
+    unreachable!("app_code fallback always returns")
+}
+
+#[cfg(feature = "docker")]
+fn resolve_compose_file_in_dir(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    [
+        "compose.yml",
+        "compose.yaml",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+    ]
+    .iter()
+    .map(|file_name| dir.join(file_name))
+    .find(|path| path.exists())
 }
 
 /// Represents which compose command variant is available on the system.
@@ -2814,6 +2964,16 @@ pub fn build_compose_command(variant: ComposeVariant) -> (String, Vec<String>) {
     }
 }
 
+#[cfg(feature = "docker")]
+fn compose_target_service(app_code: &str) -> Vec<String> {
+    let trimmed = app_code.trim();
+    if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        vec![trimmed.to_string()]
+    }
+}
+
 fn base_result(
     agent_cmd: &AgentCommand,
     deployment_hash: &str,
@@ -2840,6 +3000,20 @@ fn now_timestamp() -> String {
 #[cfg(feature = "docker")]
 fn errors_value(errors: &[CommandError]) -> Value {
     serde_json::to_value(errors).unwrap_or_else(|_| json!([]))
+}
+
+#[cfg(feature = "docker")]
+fn finish_success_with_warnings(
+    result: &mut CommandResult,
+    mut body: Value,
+    warnings: &[CommandError],
+) {
+    body["warnings"] = if warnings.is_empty() {
+        json!(null)
+    } else {
+        errors_value(warnings)
+    };
+    result.result = Some(body);
 }
 
 #[cfg(feature = "docker")]
@@ -4991,6 +5165,8 @@ async fn handle_apply_config(
             file_mode: "0644".to_string(),
             owner: None,
             group: None,
+            force_overwrite: false,
+            drift_check: None,
         }
     } else {
         // Fetch from Vault
@@ -5232,11 +5408,21 @@ async fn ensure_env_files_exist(
 /// Write config file to disk with proper permissions
 #[cfg(feature = "docker")]
 pub async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig) -> Result<()> {
+    write_config_to_disk_with_force(config, false).await
+}
+
+#[cfg(feature = "docker")]
+async fn write_config_to_disk_with_force(
+    config: &crate::security::vault_client::AppConfig,
+    force_overwrite: bool,
+) -> Result<()> {
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     let path = Path::new(&config.destination_path);
+    let effective_force = force_overwrite || config.force_overwrite;
 
     // Check if the destination path exists as a directory (Docker sometimes creates these)
     // If so, remove it first so we can write the file
@@ -5256,18 +5442,50 @@ pub async fn write_config_to_disk(config: &crate::security::vault_client::AppCon
         fs::create_dir_all(parent).context(format!("Failed to create directory: {:?}", parent))?;
     }
 
-    // Write the content
-    fs::write(path, &config.content)
-        .context(format!("Failed to write file: {}", config.destination_path))?;
+    enforce_config_drift_policy(config, path, effective_force)?;
 
-    // Set file permissions
-    if let Ok(mode) = u32::from_str_radix(config.file_mode.trim_start_matches('0'), 8) {
-        let permissions = fs::Permissions::from_mode(mode);
-        fs::set_permissions(path, permissions).context(format!(
-            "Failed to set permissions on: {}",
+    let temp_path = sibling_temp_path(path)?;
+    let write_result = (|| -> Result<()> {
+        backup_existing_file_if_changed(path, config.content.as_bytes())?;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .context(format!(
+                "Failed to create temp file: {}",
+                temp_path.display()
+            ))?;
+        file.write_all(config.content.as_bytes())
+            .context("Failed to write config temp file")?;
+        file.sync_all().context("Failed to sync config temp file")?;
+
+        if let Ok(mode) = u32::from_str_radix(config.file_mode.trim_start_matches('0'), 8) {
+            let permissions = fs::Permissions::from_mode(mode);
+            fs::set_permissions(&temp_path, permissions).context(format!(
+                "Failed to set permissions on: {}",
+                temp_path.display()
+            ))?;
+        }
+
+        fs::rename(&temp_path, path).context(format!(
+            "Failed to atomically move config into place: {}",
             config.destination_path
         ))?;
+
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
     }
+    write_result?;
 
     tracing::info!(
         path = %config.destination_path,
@@ -5275,6 +5493,254 @@ pub async fn write_config_to_disk(config: &crate::security::vault_client::AppCon
         size = config.content.len(),
         "Config file written to disk"
     );
+
+    Ok(())
+}
+
+#[cfg(feature = "docker")]
+fn enforce_config_drift_policy(
+    config: &crate::security::vault_client::AppConfig,
+    path: &std::path::Path,
+    force_overwrite: bool,
+) -> Result<()> {
+    let Some(drift_check) = &config.drift_check else {
+        return Ok(());
+    };
+    if !drift_check.enabled {
+        return Ok(());
+    }
+    if drift_check.hash_source.as_deref() != Some("stacker-render-header") {
+        return Ok(());
+    }
+
+    let expected_hash = stacker_render_hash(&config.content).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Runtime env drift check requested but stacker-render hash header is missing for {}",
+            config.destination_path
+        )
+    })?;
+
+    if !path.exists() || path.is_dir() {
+        return Ok(());
+    }
+
+    let current_content = std::fs::read_to_string(path).context(format!(
+        "Failed to read existing config for drift check: {}",
+        config.destination_path
+    ))?;
+    let actual_hash = env_body_hash(&current_content);
+
+    if actual_hash == expected_hash {
+        return Ok(());
+    }
+
+    if force_overwrite {
+        tracing::warn!(
+            path = %config.destination_path,
+            expected_hash = %expected_hash,
+            actual_hash = %actual_hash,
+            "Forcing overwrite of drifted runtime config"
+        );
+        return Ok(());
+    }
+
+    bail!(
+        "Runtime env drift detected for {}: expected hash {}, found {}; rerun with --force to overwrite",
+        config.destination_path,
+        expected_hash,
+        actual_hash
+    );
+}
+
+#[cfg(feature = "docker")]
+fn is_env_config_file(config: &crate::security::vault_client::AppConfig) -> bool {
+    config.content_type == "env" || config.destination_path.ends_with(".env")
+}
+
+#[cfg(feature = "docker")]
+fn is_runtime_config_drift_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("Runtime env drift detected")
+        || message.contains("Runtime env drift check requested")
+}
+
+#[cfg(feature = "docker")]
+fn stacker_render_hash(content: &str) -> Option<String> {
+    let header = content.lines().next()?;
+    if !header.starts_with("# stacker-render ") {
+        return None;
+    }
+    header
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("hash="))
+        .map(str::to_string)
+}
+
+#[cfg(feature = "docker")]
+fn env_body_hash(content: &str) -> String {
+    let body = content
+        .strip_prefix("# stacker-render ")
+        .and_then(|_| content.split_once('\n').map(|(_, body)| body))
+        .unwrap_or(content);
+    sha256_hex(body.as_bytes())
+}
+
+#[cfg(feature = "docker")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(bytes);
+    format!("{:x}", digest)
+}
+
+#[cfg(feature = "docker")]
+fn sibling_temp_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no file name: {}", path.display()))?;
+    let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+
+    Ok(parent.join(format!(
+        ".{}.tmp.{}.{}",
+        file_name,
+        std::process::id(),
+        suffix
+    )))
+}
+
+#[cfg(feature = "docker")]
+fn backup_existing_file_if_changed(
+    path: &std::path::Path,
+    replacement: &[u8],
+) -> Result<Option<std::path::PathBuf>> {
+    if !path.exists() || path.is_dir() {
+        return Ok(None);
+    }
+
+    let current = std::fs::read(path).with_context(|| {
+        format!(
+            "Failed to read existing file for backup: {}",
+            path.display()
+        )
+    })?;
+    if current == replacement {
+        return Ok(None);
+    }
+
+    let metadata = std::fs::metadata(path).with_context(|| {
+        format!(
+            "Failed to stat existing file for backup: {}",
+            path.display()
+        )
+    })?;
+    let backup_path = sibling_backup_path(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(metadata.permissions().mode() & 0o777);
+    }
+
+    {
+        use std::io::Write as _;
+
+        let mut backup = options.open(&backup_path).with_context(|| {
+            format!(
+                "Failed to create backup {} before overwriting {}",
+                backup_path.display(),
+                path.display()
+            )
+        })?;
+        backup.write_all(&current).with_context(|| {
+            format!(
+                "Failed to write backup {} before overwriting {}",
+                backup_path.display(),
+                path.display()
+            )
+        })?;
+        backup
+            .sync_all()
+            .with_context(|| format!("Failed to sync backup: {}", backup_path.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::set_permissions(&backup_path, metadata.permissions());
+    }
+
+    prune_sibling_backups(path, MANAGED_FILE_BACKUP_KEEP)?;
+
+    tracing::warn!(
+        path = %path.display(),
+        backup = %backup_path.display(),
+        "Created managed file backup before overwrite"
+    );
+
+    Ok(Some(backup_path))
+}
+
+#[cfg(feature = "docker")]
+fn sibling_backup_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no file name: {}", path.display()))?;
+    let now = Utc::now();
+    let stamp = now.format("%Y%m%dT%H%M%SZ");
+    let nanos = now.timestamp_nanos_opt().unwrap_or_default();
+
+    Ok(parent.join(format!(
+        "{}.stacker-bak-{}-{}-{}",
+        file_name,
+        stamp,
+        std::process::id(),
+        nanos
+    )))
+}
+
+#[cfg(feature = "docker")]
+fn prune_sibling_backups(path: &std::path::Path, keep: usize) -> Result<()> {
+    if keep == 0 {
+        return Ok(());
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Destination path has no file name: {}", path.display()))?;
+    let prefix = format!("{file_name}.stacker-bak-");
+
+    let mut backups = std::fs::read_dir(parent)
+        .with_context(|| format!("Failed to list backup directory: {}", parent.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if name.starts_with(&prefix) {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    backups.sort();
+    let remove_count = backups.len().saturating_sub(keep);
+    for backup in backups.into_iter().take(remove_count) {
+        std::fs::remove_file(&backup)
+            .with_context(|| format!("Failed to remove old backup: {}", backup.display()))?;
+    }
 
     Ok(())
 }
@@ -5297,8 +5763,8 @@ async fn handle_deploy_app(
     let mut errors: Vec<CommandError> = Vec::new();
 
     // Determine the compose working directory
-    // Standard TryDirect deployments use /home/trydirect/<deployment_hash>
-    let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
+    let (compose_dir, compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
 
     // If compose_content is provided, write it to disk (for new deployments)
     if let Some(compose_content) = &data.compose_content {
@@ -5351,6 +5817,23 @@ async fn handle_deploy_app(
         }
 
         // Write the compose file
+        if let Err(e) = backup_existing_file_if_changed(
+            std::path::Path::new(&compose_file),
+            final_compose.as_bytes(),
+        ) {
+            let error = make_error(
+                "compose_backup_failed",
+                format!(
+                    "Failed to back up docker-compose.yml before overwrite: {}",
+                    e
+                ),
+                None,
+            );
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
         if let Err(e) = tokio::fs::write(&compose_file, &final_compose).await {
             let error = make_error(
                 "compose_write_failed",
@@ -5376,7 +5859,20 @@ async fn handle_deploy_app(
                     if kata_available {
                         if let Ok(existing) = tokio::fs::read_to_string(&compose_file).await {
                             let injected = inject_runtime_into_compose(&existing, runtime);
-                            if let Err(e) = tokio::fs::write(&compose_file, &injected).await {
+                            if let Err(e) = backup_existing_file_if_changed(
+                                std::path::Path::new(&compose_file),
+                                injected.as_bytes(),
+                            ) {
+                                errors.push(make_error(
+                                    "runtime_inject_warning",
+                                    format!(
+                                        "Failed to back up compose file before runtime injection: {}",
+                                        e
+                                    ),
+                                    None,
+                                ));
+                            } else if let Err(e) = tokio::fs::write(&compose_file, &injected).await
+                            {
                                 errors.push(make_error(
                                     "runtime_inject_warning",
                                     format!(
@@ -5418,6 +5914,12 @@ async fn handle_deploy_app(
         }
     }
 
+    let has_env_config_file = data
+        .config_files
+        .as_ref()
+        .map(|configs| configs.iter().any(is_env_config_file))
+        .unwrap_or(false);
+
     // Write config files if provided (e.g., telegraf.conf, nginx.conf, etc.)
     if let Some(config_files) = &data.config_files {
         for config in config_files {
@@ -5426,15 +5928,24 @@ async fn handle_deploy_app(
                 destination = %config.destination_path,
                 "Writing config file from command payload"
             );
-            if let Err(e) = write_config_to_disk(config).await {
-                errors.push(make_error(
+            if let Err(e) =
+                write_config_to_disk_with_force(config, data.force_config_overwrite).await
+            {
+                let error = make_error(
                     "config_write_warning",
                     format!(
                         "Failed to write config file {}: {}",
                         config.destination_path, e
                     ),
                     None,
-                ));
+                );
+                if is_runtime_config_drift_error(&e) {
+                    result.status = "failed".into();
+                    result.error = Some(error.message.clone());
+                    result.errors = Some(vec![error]);
+                    return Ok(result);
+                }
+                errors.push(error);
                 // Continue with other configs, don't fail entirely
             }
         }
@@ -5442,8 +5953,8 @@ async fn handle_deploy_app(
 
     // Fetch .env from Vault if env_vars not provided in command payload
     // This ensures user-edited .env content from Stacker is applied
-    let env_from_vault = if data.env_vars.is_none()
-        || data.env_vars.as_ref().map(|v| v.is_empty()).unwrap_or(true)
+    let env_from_vault = if !has_env_config_file
+        && (data.env_vars.is_none() || data.env_vars.as_ref().map(|v| v.is_empty()).unwrap_or(true))
     {
         match VaultClient::from_env() {
             Ok(Some(vault_client)) => {
@@ -5491,21 +6002,29 @@ async fn handle_deploy_app(
 
     // Write .env from Vault if fetched
     if let Some(env_config) = env_from_vault {
-        let env_file_path = format!("{}/.env", compose_dir);
         tracing::info!(
             app_code = %data.app_code,
-            env_file = %env_file_path,
+            env_file = %env_config.destination_path,
             "Writing .env file from Vault"
         );
-        if let Err(e) = tokio::fs::write(&env_file_path, &env_config.content).await {
-            errors.push(make_error(
+        if let Err(e) =
+            write_config_to_disk_with_force(&env_config, data.force_config_overwrite).await
+        {
+            let error = make_error(
                 "env_file_warning",
                 format!("Failed to write .env file from Vault: {}", e),
                 None,
-            ));
+            );
+            if is_runtime_config_drift_error(&e) {
+                result.status = "failed".into();
+                result.error = Some(error.message.clone());
+                result.errors = Some(vec![error]);
+                return Ok(result);
+            }
+            errors.push(error);
         } else {
             tracing::info!(
-                env_file = %env_file_path,
+                env_file = %env_config.destination_path,
                 ".env file from Vault written successfully"
             );
         }
@@ -5530,7 +6049,16 @@ async fn handle_deploy_app(
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            if let Err(e) = tokio::fs::write(&env_file_path, &env_content).await {
+            if let Err(e) = backup_existing_file_if_changed(
+                std::path::Path::new(&env_file_path),
+                env_content.as_bytes(),
+            ) {
+                errors.push(make_error(
+                    "env_file_warning",
+                    format!("Failed to back up .env file before overwrite: {}", e),
+                    None,
+                ));
+            } else if let Err(e) = tokio::fs::write(&env_file_path, &env_content).await {
                 errors.push(make_error(
                     "env_file_warning",
                     format!("Failed to write .env file: {}", e),
@@ -5597,16 +6125,26 @@ async fn handle_deploy_app(
             "Pulling docker image for service"
         );
 
+        let docker_auth_dir: Option<tempfile::TempDir> =
+            match prepare_registry_auth_for_pull(data.registry_auth.as_ref()).await {
+                Ok(dir) => dir,
+                Err(message) => {
+                    errors.push(make_error("pull_auth_warning", message, None));
+                    None
+                }
+            };
+
         let mut pull_cmd = Command::new(&compose_program);
         for arg in &compose_base_args {
             pull_cmd.arg(arg);
         }
-        // Don't specify service name - pull ALL services defined in compose file
-        // The compose file may have services with different names than app_code
-        let pull_result = pull_cmd
-            .arg("-f")
-            .arg(&compose_file)
+        if let Some(auth_dir) = docker_auth_dir.as_ref() {
+            pull_cmd.env("DOCKER_CONFIG", auth_dir.path());
+        }
+        let pull_result = pull_cmd.arg("-f").arg(&compose_file);
+        let pull_result = pull_result
             .arg("pull")
+            .args(compose_target_service(&data.app_code))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -5641,8 +6179,6 @@ async fn handle_deploy_app(
             "Force recreating: stopping existing container"
         );
 
-        // Don't specify service name - stop ALL services defined in compose file
-        // The compose file may have services with different names than app_code
         let mut stop_cmd = Command::new(&compose_program);
         for arg in &compose_base_args {
             stop_cmd.arg(arg);
@@ -5651,6 +6187,7 @@ async fn handle_deploy_app(
             .arg("-f")
             .arg(&compose_file)
             .arg("stop")
+            .args(compose_target_service(&data.app_code))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -5664,6 +6201,7 @@ async fn handle_deploy_app(
             .arg(&compose_file)
             .arg("rm")
             .arg("-f")
+            .args(compose_target_service(&data.app_code))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -5681,14 +6219,12 @@ async fn handle_deploy_app(
     for arg in &compose_base_args {
         compose_cmd.arg(arg);
     }
-    // Don't specify service name - deploy ALL services defined in compose file
-    // The compose file may have services with different names than app_code
-    // Also removed --no-deps since we want all services to start properly
     compose_cmd
         .arg("-f")
         .arg(&compose_file)
         .arg("up")
         .arg("-d")
+        .args(compose_target_service(&data.app_code))
         .current_dir(&compose_dir);
 
     // Add environment variables if provided
@@ -5738,13 +6274,9 @@ async fn handle_deploy_app(
                     "runtime": effective_runtime.to_string(),
                     "deployed_at": now_timestamp(),
                     "output": stdout.trim(),
-                    "warnings": if errors.is_empty() { json!(null) } else { errors_value(&errors) },
                 });
 
-                result.result = Some(body);
-                if !errors.is_empty() {
-                    result.errors = Some(errors);
-                }
+                finish_success_with_warnings(&mut result, body, &errors);
             } else {
                 let error = make_error(
                     "deploy_failed",
@@ -5799,6 +6331,68 @@ async fn handle_deploy_app(
     Ok(result)
 }
 
+#[cfg(feature = "docker")]
+async fn prepare_registry_auth_for_pull(
+    registry_auth: Option<&RegistryAuthCommand>,
+) -> Result<Option<tempfile::TempDir>, String> {
+    let Some(registry_auth) = registry_auth else {
+        return Ok(None);
+    };
+
+    let auth_dir = tempfile::tempdir().map_err(|error| {
+        format!(
+            "Failed to create temporary Docker auth directory: {}",
+            error
+        )
+    })?;
+
+    let mut login_cmd = Command::new("docker");
+    login_cmd
+        .arg("login")
+        .arg(&registry_auth.registry)
+        .arg("--username")
+        .arg(&registry_auth.username)
+        .arg("--password-stdin")
+        .env("DOCKER_CONFIG", auth_dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = login_cmd
+        .spawn()
+        .map_err(|error| format!("Failed to start docker login: {}", error))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(registry_auth.password.as_bytes())
+            .await
+            .map_err(|error| format!("Failed to send docker registry password: {}", error))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| format!("Failed to wait for docker login: {}", error))?;
+
+    if output.status.success() {
+        Ok(Some(auth_dir))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            "docker login failed with no output".to_string()
+        };
+        Err(format!(
+            "Private registry authentication failed for {}: {}",
+            registry_auth.registry, detail
+        ))
+    }
+}
+
 /// Handle remove_app command - stop and remove a service container and purge config
 #[cfg(feature = "docker")]
 async fn handle_remove_app(
@@ -5816,7 +6410,8 @@ async fn handle_remove_app(
     );
     let mut errors: Vec<CommandError> = Vec::new();
 
-    let (compose_dir, compose_file) = resolve_compose_paths(&data.deployment_hash, &data.app_code);
+    let (compose_dir, compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
     let compose_exists = Path::new(&compose_file).exists();
 
     // Track whether container was successfully removed
@@ -6329,8 +6924,10 @@ async fn handle_deploy_with_configs(
         env_vars: None,
         pull: data.pull,
         force_recreate: data.force_recreate,
+        force_config_overwrite: data.force_recreate,
         config_files: None, // Configs already written in step 1 from Vault
         runtime: data.runtime.clone(),
+        registry_auth: data.registry_auth.clone(),
     };
 
     let deploy_result = handle_deploy_app(agent_cmd, &deploy_cmd).await?;
@@ -6567,6 +7164,7 @@ async fn handle_configure_proxy(
                 "error".to_string()
             };
             result.error = Some(command_error.message.clone());
+            result.errors = Some(vec![command_error.clone()]);
             result.result = Some(json!({
                 "type": "configure_proxy",
                 "action": data.action,
@@ -6575,6 +7173,7 @@ async fn handle_configure_proxy(
                 "status": if result.status == "success" { "skipped" } else { "error" },
                 "error_code": command_error.code,
                 "message": command_error.message,
+                "details": command_error.details,
             }));
             return Ok(result);
         }
@@ -6627,6 +7226,7 @@ async fn handle_configure_proxy(
                 let error = configure_proxy_error(&conflict);
                 result.status = "error".to_string();
                 result.error = Some(error.message.clone());
+                result.errors = Some(vec![error.clone()]);
                 result.result = Some(json!({
                     "type": "configure_proxy",
                     "action": data.action,
@@ -6635,6 +7235,7 @@ async fn handle_configure_proxy(
                     "status": "error",
                     "error_code": error.code,
                     "message": error.message,
+                    "details": error.details,
                     "proxy_host_id": existing_host["id"].as_i64(),
                 }));
                 return Ok(result);
@@ -6661,6 +7262,16 @@ async fn handle_configure_proxy(
                         let error = make_error("npm_create_failed", &proxy_result.message, None);
                         result.status = "error".to_string();
                         result.error = Some(error.message.clone());
+                        result.errors = Some(vec![error.clone()]);
+                        result.result = Some(json!({
+                            "type": "configure_proxy",
+                            "action": data.action,
+                            "deployment_hash": data.deployment_hash,
+                            "app_code": data.app_code,
+                            "status": "error",
+                            "error_code": error.code,
+                            "message": error.message,
+                        }));
                     }
                 }
                 Err(e) => {
@@ -6668,6 +7279,17 @@ async fn handle_configure_proxy(
                         make_error("npm_error", "NPM operation failed", Some(e.to_string()));
                     result.status = "error".to_string();
                     result.error = Some(error.message.clone());
+                    result.errors = Some(vec![error.clone()]);
+                    result.result = Some(json!({
+                        "type": "configure_proxy",
+                        "action": data.action,
+                        "deployment_hash": data.deployment_hash,
+                        "app_code": data.app_code,
+                        "status": "error",
+                        "error_code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    }));
                 }
             }
         }
@@ -6688,12 +7310,33 @@ async fn handle_configure_proxy(
                     let error = make_error("npm_delete_failed", &proxy_result.message, None);
                     result.status = "error".to_string();
                     result.error = Some(error.message.clone());
+                    result.errors = Some(vec![error.clone()]);
+                    result.result = Some(json!({
+                        "type": "configure_proxy",
+                        "action": "delete",
+                        "deployment_hash": data.deployment_hash,
+                        "app_code": data.app_code,
+                        "status": "error",
+                        "error_code": error.code,
+                        "message": error.message,
+                    }));
                 }
             }
             Err(e) => {
                 let error = make_error("npm_error", "NPM operation failed", Some(e.to_string()));
                 result.status = "error".to_string();
                 result.error = Some(error.message.clone());
+                result.errors = Some(vec![error.clone()]);
+                result.result = Some(json!({
+                    "type": "configure_proxy",
+                    "action": "delete",
+                    "deployment_hash": data.deployment_hash,
+                    "app_code": data.app_code,
+                    "status": "error",
+                    "error_code": error.code,
+                    "message": error.message,
+                    "details": error.details,
+                }));
             }
         },
         _ => {
@@ -8001,6 +8644,51 @@ mod tests {
         assert_eq!(pipe_source_poll_interval(), Duration::from_secs(1));
     }
 
+    #[cfg(feature = "docker")]
+    #[test]
+    fn success_warnings_do_not_mark_command_as_failed() {
+        let mut result = CommandResult {
+            status: "success".into(),
+            ..CommandResult::default()
+        };
+        let warning = make_error(
+            "pull_warning",
+            "Image pull had issues, but compose used a local image",
+            None,
+        );
+
+        finish_success_with_warnings(
+            &mut result,
+            json!({
+                "type": "deploy_app",
+                "status": "deployed"
+            }),
+            std::slice::from_ref(&warning),
+        );
+
+        assert!(result.errors.is_none());
+        assert_eq!(
+            result.result.as_ref().unwrap()["warnings"][0]["code"],
+            "pull_warning"
+        );
+    }
+
+    #[cfg(feature = "docker")]
+    #[test]
+    fn registry_auth_debug_redacts_password() {
+        let auth = RegistryAuthCommand {
+            registry: "docker.io".into(),
+            username: "optimum".into(),
+            password: "supersecret".into(),
+        };
+
+        let rendered = format!("{:?}", auth);
+        assert!(rendered.contains("docker.io"));
+        assert!(rendered.contains("optimum"));
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("supersecret"));
+    }
+
     #[tokio::test]
     async fn pipe_runtime_persistence_redacts_credentials() {
         let dir = tempdir().unwrap();
@@ -8110,6 +8798,20 @@ mod tests {
             "image": "testimage:latest",
             "pull": true,
             "force_recreate": false
+        }),
+        StackerCommand::DeployApp
+    );
+    stacker_test!(
+        parses_deploy_app_command_with_registry_auth,
+        "deploy_app",
+        json!({
+            "deployment_hash": "testhash",
+            "app_code": "testapp",
+            "registry_auth": {
+                "registry": "docker.io",
+                "username": "optimum",
+                "password": "supersecret"
+            }
         }),
         StackerCommand::DeployApp
     );
@@ -8641,37 +9343,150 @@ services:
         let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
         assert!(doc.get("services").is_none());
     }
+
+    #[test]
+    fn compose_target_service_selects_requested_app_only() {
+        assert_eq!(compose_target_service("device-api"), vec!["device-api"]);
+    }
+
+    #[test]
+    fn compose_target_service_ignores_blank_app_code() {
+        assert!(compose_target_service("  ").is_empty());
+    }
+
+    #[test]
+    fn resolve_compose_paths_prefers_project_compose_over_app_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+
+        let (compose_dir, compose_file) =
+            resolve_compose_paths_in_base(dir.path(), "deployment_test", "device-api");
+
+        assert_eq!(compose_dir, project_dir.to_string_lossy());
+        assert_eq!(
+            compose_file,
+            project_dir.join("docker-compose.yml").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn resolve_compose_paths_accepts_project_compose_yml() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("compose.yml"), "services: {}\n").unwrap();
+
+        let (compose_dir, compose_file) =
+            resolve_compose_paths_in_base(dir.path(), "deployment_test", "device-api");
+
+        assert_eq!(compose_dir, project_dir.to_string_lossy());
+        assert_eq!(
+            compose_file,
+            project_dir.join("compose.yml").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn compose_paths_from_labels_use_initial_deployment_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let deploy_dir = dir.path().join("opt").join("syncopia");
+        std::fs::create_dir_all(&deploy_dir).unwrap();
+        let compose_file = deploy_dir.join("compose.yml");
+        std::fs::write(&compose_file, "services: {}\n").unwrap();
+
+        let (compose_dir, resolved_file) = compose_paths_from_label_values(
+            deploy_dir.to_str().unwrap(),
+            compose_file.to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(compose_dir, deploy_dir.to_string_lossy());
+        assert_eq!(resolved_file, compose_file.to_string_lossy());
+    }
+
+    #[test]
+    fn compose_paths_from_labels_resolve_relative_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let deploy_dir = dir.path().join("deployment");
+        std::fs::create_dir_all(&deploy_dir).unwrap();
+        let compose_file = deploy_dir.join("docker-compose.yml");
+        std::fs::write(&compose_file, "services: {}\n").unwrap();
+
+        let (compose_dir, resolved_file) =
+            compose_paths_from_label_values(deploy_dir.to_str().unwrap(), "docker-compose.yml")
+                .unwrap();
+
+        assert_eq!(compose_dir, deploy_dir.to_string_lossy());
+        assert_eq!(resolved_file, compose_file.to_string_lossy());
+    }
 }
 
 #[cfg(all(test, feature = "docker"))]
 mod write_config_tests {
     use super::write_config_to_disk;
-    use crate::security::vault_client::AppConfig;
+    use crate::security::vault_client::{AppConfig, AppConfigDriftCheck};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    fn app_config(path: String, content: String) -> AppConfig {
+        AppConfig {
+            content,
+            content_type: "env".to_string(),
+            destination_path: path,
+            file_mode: "0600".to_string(),
+            owner: None,
+            group: None,
+            force_overwrite: false,
+            drift_check: None,
+        }
+    }
+
+    fn stacker_env(body: &str) -> String {
+        format!(
+            "# stacker-render version=1 hash={} generated_at=2026-05-13T00:00:00Z inputs=base\n{}",
+            super::sha256_hex(body.as_bytes()),
+            body
+        )
+    }
+
+    fn enable_drift_check(config: &mut AppConfig) {
+        config.drift_check = Some(AppConfigDriftCheck {
+            enabled: true,
+            hash_source: Some("stacker-render-header".to_string()),
+        });
+    }
+
+    fn sibling_backups(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        let prefix = format!("{file_name}.stacker-bak-");
+        let mut backups = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        backups.sort();
+        backups
+    }
 
     #[tokio::test]
     async fn test_write_config_to_disk_creates_file_and_sets_permissions() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.conf");
         let file_path_str = file_path.to_str().unwrap().to_string();
-        let config = AppConfig {
-            content: "key=value".to_string(),
-            content_type: "env".to_string(),
-            destination_path: file_path_str.clone(),
-            file_mode: "0600".to_string(),
-            owner: None,
-            group: None,
-        };
+        let config = app_config(file_path_str.clone(), "key=value".to_string());
 
         write_config_to_disk(&config)
             .await
             .expect("write should succeed");
-
-        println!("Test config written to: {}", file_path_str);
-        // Pause for 10 seconds to allow manual inspection
-        std::thread::sleep(std::time::Duration::from_secs(10));
 
         let written = fs::read_to_string(&file_path).expect("file should exist");
         assert_eq!(written, "key=value");
@@ -8679,6 +9494,130 @@ mod write_config_tests {
         let metadata = fs::metadata(&file_path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn test_is_env_config_file_matches_relative_dot_env_destination() {
+        let config = app_config(".env".to_string(), "KEY=value\n".to_string());
+        assert!(super::is_env_config_file(&config));
+    }
+
+    #[test]
+    fn test_is_env_config_file_matches_absolute_dot_env_destination() {
+        let config = app_config(
+            "/home/trydirect/project/.env".to_string(),
+            "KEY=value\n".to_string(),
+        );
+        assert!(super::is_env_config_file(&config));
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_rejects_drift_without_force() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(&file_path, stacker_env("OLD=value\n")).unwrap();
+
+        let mut config = app_config(
+            file_path.to_string_lossy().to_string(),
+            stacker_env("NEW=value\n"),
+        );
+        enable_drift_check(&mut config);
+
+        let error = write_config_to_disk(&config)
+            .await
+            .expect_err("drift should be rejected");
+
+        assert!(error.to_string().contains("Runtime env drift detected"));
+        let written = fs::read_to_string(&file_path).expect("file should remain");
+        assert!(written.contains("OLD=value"));
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_allows_forced_drift_overwrite() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(&file_path, stacker_env("OLD=value\n")).unwrap();
+
+        let mut config = app_config(
+            file_path.to_string_lossy().to_string(),
+            stacker_env("NEW=value\n"),
+        );
+        config.force_overwrite = true;
+        enable_drift_check(&mut config);
+
+        write_config_to_disk(&config)
+            .await
+            .expect("forced drift overwrite should succeed");
+
+        let written = fs::read_to_string(&file_path).expect("file should exist");
+        assert!(written.contains("NEW=value"));
+        assert!(!written.contains("OLD=value"));
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_backs_up_existing_file_before_overwrite() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(&file_path, "OLD=value\n").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let config = app_config(
+            file_path.to_string_lossy().to_string(),
+            "NEW=value\n".to_string(),
+        );
+
+        write_config_to_disk(&config)
+            .await
+            .expect("write should succeed");
+
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "NEW=value\n");
+        let backups = sibling_backups(&file_path);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "OLD=value\n");
+        assert_eq!(
+            fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_skips_backup_when_content_is_unchanged() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(&file_path, "SAME=value\n").unwrap();
+
+        let config = app_config(
+            file_path.to_string_lossy().to_string(),
+            "SAME=value\n".to_string(),
+        );
+
+        write_config_to_disk(&config)
+            .await
+            .expect("write should succeed");
+
+        assert!(sibling_backups(&file_path).is_empty());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "SAME=value\n");
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_retains_only_recent_backups() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+
+        for index in 0..7 {
+            fs::write(&file_path, format!("VALUE={index}\n")).unwrap();
+            let config = app_config(
+                file_path.to_string_lossy().to_string(),
+                format!("VALUE={}\n", index + 1),
+            );
+            write_config_to_disk(&config)
+                .await
+                .expect("write should succeed");
+        }
+
+        let backups = sibling_backups(&file_path);
+        assert_eq!(backups.len(), super::MANAGED_FILE_BACKUP_KEEP);
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "VALUE=7\n");
     }
 }
 

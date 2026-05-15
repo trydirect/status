@@ -3,6 +3,8 @@
 //! Automated tests for Critical and High severity findings from the OWASP Top 10 audit.
 //! Each test targets a specific vulnerability and verifies the fix is in place.
 
+#![allow(clippy::await_holding_lock)]
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
