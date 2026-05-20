@@ -1540,9 +1540,11 @@ mod tests {
         assert_eq!(credentials.host(), "http://nginx-proxy-manager:81");
         assert_eq!(credentials.email(), "admin@example.com");
         assert_eq!(credentials.password(), "secret");
-        assert!(transport.requested_urls().iter().any(
-            |url| url.ends_with("/v1/secret/base/status_panel/hosts/server-123/npm_credentials")
-        ));
+        assert!(transport
+            .requested_urls()
+            .iter()
+            .any(|url| url
+                .ends_with("/v1/secret/base/status_panel/hosts/server-123/npm_credentials")));
     }
 
     #[tokio::test]
