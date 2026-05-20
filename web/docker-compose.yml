@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: trydirect/status-panel-web:latest
+    image: trydirect/status-panel-web:0.1.0
     container_name: status-panel-web
     ports:
       - "3000:3000"
