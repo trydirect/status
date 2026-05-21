@@ -1685,7 +1685,11 @@ pub struct ProbeEndpointsCommand {
 }
 
 fn default_probe_protocols() -> Vec<String> {
-    vec!["openapi".to_string(), "rest".to_string()]
+    vec![
+        "openapi".to_string(),
+        "html_forms".to_string(),
+        "rest".to_string(),
+    ]
 }
 
 fn default_probe_timeout() -> u32 {
@@ -3045,6 +3049,28 @@ fn make_error(code: &str, message: impl Into<String>, details: Option<String>) -
 }
 
 #[cfg(feature = "docker")]
+fn npm_preflight_error(host: &str, error: &anyhow::Error) -> CommandError {
+    let error_text = error.to_string();
+    if error_text.contains("NPM authentication failed") {
+        return make_error(
+            "npm_auth_failed",
+            "Nginx Proxy Manager authentication failed",
+            Some(format!(
+                "The Status Panel agent reached Nginx Proxy Manager at {host}, but the configured credentials were rejected. Update the host-scoped npm_credentials Vault secret and retry configure-proxy."
+            )),
+        );
+    }
+
+    make_error(
+        "npm_unavailable",
+        "Nginx Proxy Manager is not installed or not reachable from the Status Panel agent",
+        Some(format!(
+            "The Status Panel agent could not connect to Nginx Proxy Manager at {host}: {error_text}. Ensure an nginx-proxy-manager service is deployed on the same Docker network before running configure-proxy."
+        )),
+    )
+}
+
+#[cfg(feature = "docker")]
 fn env_flag_enabled(name: &str, default: bool) -> bool {
     match std::env::var(name) {
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
@@ -3171,6 +3197,110 @@ fn proxy_host_matches(
         && existing_host["ssl_forced"].as_bool().unwrap_or(false) == request.ssl_forced
         && existing_host["http2_support"].as_bool().unwrap_or(false) == request.http2_support
         && existing_ssl_enabled == request.ssl_enabled
+}
+
+#[cfg(feature = "docker")]
+fn proxy_host_routes_to_requested_target(
+    existing_host: &Value,
+    request: &crate::connectors::npm::ProxyHostRequest,
+) -> bool {
+    let mut requested_domains = request.domain_names.clone();
+    requested_domains.sort();
+
+    extract_proxy_domains(existing_host) == requested_domains
+        && existing_host["forward_host"].as_str().unwrap_or_default() == request.forward_host
+        && existing_host["forward_port"].as_u64().unwrap_or_default() as u16 == request.forward_port
+}
+
+#[cfg(feature = "docker")]
+fn proxy_host_ssl_enabled(existing_host: &Value) -> bool {
+    existing_host
+        .get("certificate_id")
+        .map(|value| match value {
+            Value::Number(number) => number.as_i64().unwrap_or_default() > 0,
+            Value::String(text) => {
+                let text = text.trim();
+                !text.is_empty() && text != "0" && text != "null"
+            }
+            other => !other.is_null(),
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "docker")]
+fn proxy_result_from_existing_host(
+    existing_host: &Value,
+    request: &crate::connectors::npm::ProxyHostRequest,
+) -> crate::connectors::npm::ProxyHostResult {
+    let ssl_enabled = proxy_host_ssl_enabled(existing_host);
+    let ssl_status = if request.ssl_enabled && !ssl_enabled {
+        "pending_or_failed_http_only"
+    } else if ssl_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let details = if request.ssl_enabled && !ssl_enabled {
+        Some(
+            "Existing NPM proxy host is HTTP-only; SSL certificate issuance is pending or failed"
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let message = if request.ssl_enabled && !ssl_enabled {
+        "Existing NPM proxy host adopted as HTTP route; SSL certificate is pending or failed"
+    } else {
+        "Existing NPM proxy host adopted"
+    };
+
+    crate::connectors::npm::ProxyHostResult {
+        success: true,
+        proxy_host_id: existing_host["id"].as_i64(),
+        message: message.to_string(),
+        details,
+        npm_response: None,
+        domain_names: extract_proxy_domains(existing_host),
+        forward_host: existing_host["forward_host"]
+            .as_str()
+            .unwrap_or(&request.forward_host)
+            .to_string(),
+        forward_port: existing_host["forward_port"]
+            .as_u64()
+            .map(|port| port as u16)
+            .unwrap_or(request.forward_port),
+        adopted: true,
+        ssl_enabled,
+        ssl_status: Some(ssl_status.to_string()),
+    }
+}
+
+#[cfg(feature = "docker")]
+fn configure_proxy_create_success_body(
+    data: &ConfigureProxyCommand,
+    proxy_result: &crate::connectors::npm::ProxyHostResult,
+) -> Value {
+    json!({
+        "type": "configure_proxy",
+        "action": data.action,
+        "deployment_hash": data.deployment_hash,
+        "app_code": data.app_code,
+        "status": "success",
+        "proxy_host_id": proxy_result.proxy_host_id,
+        "domain_names": proxy_result.domain_names,
+        "forward_host": proxy_result.forward_host,
+        "forward_port": proxy_result.forward_port,
+        "ssl_requested": data.ssl_enabled,
+        "ssl_enabled": proxy_result.ssl_enabled,
+        "ssl_status": proxy_result.ssl_status,
+        "route_adopted": proxy_result.adopted,
+        "route_usable": true,
+        "message": proxy_result.message,
+        "details": proxy_result.details,
+        "npm_response": proxy_result.npm_response,
+        "unchanged": false,
+        "created_at": now_timestamp(),
+    })
 }
 
 #[cfg(feature = "docker")]
@@ -3427,6 +3557,22 @@ fn merge_trigger_with_registration(
 #[cfg(feature = "docker")]
 fn shell_escape_single_quotes(value: &str) -> String {
     value.replace('\'', r#"'\"'\"'"#)
+}
+
+#[cfg(feature = "docker")]
+fn build_http_body_probe_command(url: &str, timeout_secs: u32) -> String {
+    let escaped_url = shell_escape_single_quotes(url);
+    format!(
+        "if command -v curl >/dev/null 2>&1; then curl -sf -m {timeout_secs} '{escaped_url}' 2>/dev/null || true; elif command -v wget >/dev/null 2>&1; then wget -q -T {timeout_secs} -O - '{escaped_url}' 2>/dev/null || true; fi"
+    )
+}
+
+#[cfg(feature = "docker")]
+fn build_http_status_probe_command(url: &str, timeout_secs: u32) -> String {
+    let escaped_url = shell_escape_single_quotes(url);
+    format!(
+        "if command -v curl >/dev/null 2>&1; then curl -sf -m {timeout_secs} -o /dev/null -w '%{{http_code}}' '{escaped_url}' 2>/dev/null || echo 000; elif command -v wget >/dev/null 2>&1; then wget -q -T {timeout_secs} -O /dev/null '{escaped_url}' 2>/dev/null && echo 200 || echo 000; else echo 000; fi"
+    )
 }
 
 #[cfg(feature = "docker")]
@@ -7179,7 +7325,26 @@ async fn handle_configure_proxy(
         }
     };
 
+    let npm_host = config.host.clone();
     let mut npm_client = NpmClient::new(config);
+    if let Err(error) = npm_client.authenticate().await {
+        let command_error = npm_preflight_error(&npm_host, &error);
+        result.status = "error".to_string();
+        result.error = Some(command_error.message.clone());
+        result.errors = Some(vec![command_error.clone()]);
+        result.result = Some(json!({
+            "type": "configure_proxy",
+            "action": data.action,
+            "deployment_hash": data.deployment_hash,
+            "app_code": data.app_code,
+            "status": "error",
+            "preflight": "nginx_proxy_manager",
+            "error_code": command_error.code,
+            "message": command_error.message,
+            "details": command_error.details,
+        }));
+        return Ok(result);
+    }
 
     // Determine forward_host (default to app_code if not specified)
     let forward_host = data
@@ -7198,10 +7363,32 @@ async fn handle_configure_proxy(
                 http2_support: data.http2_support,
             };
 
-            if let Some(existing_host) = npm_client
+            let existing_host = match npm_client
                 .find_proxy_host_by_domain(&data.domain_names[0])
-                .await?
+                .await
             {
+                Ok(existing_host) => existing_host,
+                Err(e) => {
+                    let error =
+                        make_error("npm_error", "NPM operation failed", Some(e.to_string()));
+                    result.status = "error".to_string();
+                    result.error = Some(error.message.clone());
+                    result.errors = Some(vec![error.clone()]);
+                    result.result = Some(json!({
+                        "type": "configure_proxy",
+                        "action": data.action,
+                        "deployment_hash": data.deployment_hash,
+                        "app_code": data.app_code,
+                        "status": "error",
+                        "error_code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    }));
+                    return Ok(result);
+                }
+            };
+
+            if let Some(existing_host) = existing_host {
                 if proxy_host_matches(&existing_host, &request) {
                     result.result = Some(json!({
                         "type": "configure_proxy",
@@ -7217,6 +7404,12 @@ async fn handle_configure_proxy(
                         "ssl_enabled": data.ssl_enabled,
                         "created_at": now_timestamp(),
                     }));
+                    return Ok(result);
+                }
+
+                if proxy_host_routes_to_requested_target(&existing_host, &request) {
+                    let proxy_result = proxy_result_from_existing_host(&existing_host, &request);
+                    result.result = Some(configure_proxy_create_success_body(data, &proxy_result));
                     return Ok(result);
                 }
 
@@ -7244,22 +7437,14 @@ async fn handle_configure_proxy(
             match npm_client.create_proxy_host(&request).await {
                 Ok(proxy_result) => {
                     if proxy_result.success {
-                        result.result = Some(json!({
-                            "type": "configure_proxy",
-                            "action": data.action,
-                            "deployment_hash": data.deployment_hash,
-                            "app_code": data.app_code,
-                            "status": "success",
-                            "proxy_host_id": proxy_result.proxy_host_id,
-                            "domain_names": data.domain_names,
-                            "forward_host": forward_host,
-                            "forward_port": data.forward_port,
-                            "ssl_enabled": data.ssl_enabled,
-                            "unchanged": false,
-                            "created_at": now_timestamp(),
-                        }));
+                        result.result =
+                            Some(configure_proxy_create_success_body(data, &proxy_result));
                     } else {
-                        let error = make_error("npm_create_failed", &proxy_result.message, None);
+                        let error = make_error(
+                            "npm_create_failed",
+                            &proxy_result.message,
+                            proxy_result.details.clone(),
+                        );
                         result.status = "error".to_string();
                         result.error = Some(error.message.clone());
                         result.errors = Some(vec![error.clone()]);
@@ -7271,6 +7456,12 @@ async fn handle_configure_proxy(
                             "status": "error",
                             "error_code": error.code,
                             "message": error.message,
+                            "details": error.details,
+                            "npm_response": proxy_result.npm_response,
+                            "domain_names": data.domain_names,
+                            "forward_host": forward_host,
+                            "forward_port": data.forward_port,
+                            "ssl_requested": data.ssl_enabled,
                         }));
                     }
                 }
@@ -7798,6 +7989,209 @@ async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
     Ok(ports)
 }
 
+#[cfg(feature = "docker")]
+async fn probe_http_body(
+    container_name: &str,
+    app_code: &str,
+    port: u16,
+    path: &str,
+    timeout_secs: u32,
+) -> Option<(String, String)> {
+    if let Some(result) =
+        probe_http_body_from_agent(app_code, container_name, port, path, timeout_secs).await
+    {
+        return Some(result);
+    }
+    probe_http_body_from_container_exec(container_name, port, path, timeout_secs).await
+}
+
+#[cfg(feature = "docker")]
+async fn probe_http_status(
+    container_name: &str,
+    app_code: &str,
+    port: u16,
+    path: &str,
+    timeout_secs: u32,
+) -> Option<(String, String)> {
+    if let Some(result) =
+        probe_http_status_from_agent(app_code, container_name, port, path, timeout_secs).await
+    {
+        return Some(result);
+    }
+    probe_http_status_from_container_exec(container_name, port, path, timeout_secs).await
+}
+
+#[cfg(feature = "docker")]
+async fn probe_http_body_from_agent(
+    app_code: &str,
+    container_name: &str,
+    port: u16,
+    path: &str,
+    timeout_secs: u32,
+) -> Option<(String, String)> {
+    let client = probe_http_client(timeout_secs)?;
+    for base_url in http_probe_base_urls(app_code, container_name, port).await {
+        let url = format!("{}{}", base_url.internal, path);
+        let Ok(response) = client.get(&url).send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(body) = response.text().await else {
+            continue;
+        };
+        if !body.trim().is_empty() {
+            return Some((body, base_url.public));
+        }
+    }
+    None
+}
+
+#[cfg(feature = "docker")]
+async fn probe_http_status_from_agent(
+    app_code: &str,
+    container_name: &str,
+    port: u16,
+    path: &str,
+    timeout_secs: u32,
+) -> Option<(String, String)> {
+    let client = probe_http_client(timeout_secs)?;
+    for base_url in http_probe_base_urls(app_code, container_name, port).await {
+        let url = format!("{}{}", base_url.internal, path);
+        let Ok(response) = client.get(&url).send().await else {
+            continue;
+        };
+        return Some((response.status().as_u16().to_string(), base_url.public));
+    }
+    None
+}
+
+#[cfg(feature = "docker")]
+async fn probe_http_body_from_container_exec(
+    container_name: &str,
+    port: u16,
+    path: &str,
+    timeout_secs: u32,
+) -> Option<(String, String)> {
+    let command =
+        build_http_body_probe_command(&format!("http://localhost:{}{}", port, path), timeout_secs);
+    let Ok(Ok((0, stdout, _))) = tokio::time::timeout(
+        std::time::Duration::from_secs((timeout_secs + 2) as u64),
+        docker::exec_in_container_with_output(container_name, &command),
+    )
+    .await
+    else {
+        return None;
+    };
+    if stdout.trim().is_empty() {
+        return None;
+    }
+    Some((stdout, format!("http://{}:{}", container_name, port)))
+}
+
+#[cfg(feature = "docker")]
+async fn probe_http_status_from_container_exec(
+    container_name: &str,
+    port: u16,
+    path: &str,
+    timeout_secs: u32,
+) -> Option<(String, String)> {
+    let command = build_http_status_probe_command(
+        &format!("http://localhost:{}{}", port, path),
+        timeout_secs,
+    );
+    let Ok(Ok((0, stdout, _))) = tokio::time::timeout(
+        std::time::Duration::from_secs((timeout_secs + 2) as u64),
+        docker::exec_in_container_with_output(container_name, &command),
+    )
+    .await
+    else {
+        return None;
+    };
+    Some((stdout, format!("http://{}:{}", container_name, port)))
+}
+
+#[cfg(feature = "docker")]
+fn probe_http_client(timeout_secs: u32) -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs as u64))
+        .build()
+        .ok()
+}
+
+#[cfg(feature = "docker")]
+#[derive(Debug, Clone)]
+struct ProbeBaseUrl {
+    internal: String,
+    public: String,
+}
+
+#[cfg(feature = "docker")]
+async fn http_probe_base_urls(
+    app_code: &str,
+    container_name: &str,
+    port: u16,
+) -> Vec<ProbeBaseUrl> {
+    let mut urls = Vec::new();
+    push_probe_base_url(&mut urls, container_name, port, app_code);
+    if app_code != container_name {
+        push_probe_base_url(&mut urls, app_code, port, app_code);
+    }
+    for ip in get_container_ip_addresses(container_name).await {
+        push_probe_base_url(&mut urls, &ip, port, app_code);
+    }
+    urls
+}
+
+#[cfg(feature = "docker")]
+fn push_probe_base_url(urls: &mut Vec<ProbeBaseUrl>, host: &str, port: u16, app_code: &str) {
+    let internal = format!("http://{}:{}", host, port);
+    if urls.iter().any(|url| url.internal == internal) {
+        return;
+    }
+    urls.push(ProbeBaseUrl {
+        internal,
+        public: format!("http://{}:{}", app_code, port),
+    });
+}
+
+#[cfg(feature = "docker")]
+async fn get_container_ip_addresses(container_name: &str) -> Vec<String> {
+    let output = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Networks}}",
+            container_name,
+        ])
+        .output()
+        .await;
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Ok(networks) = serde_json::from_str::<serde_json::Map<String, Value>>(stdout.trim()) else {
+        return Vec::new();
+    };
+    let mut addresses = Vec::new();
+    for network in networks.values() {
+        if let Some(ip) = network
+            .get("IPAddress")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            if !addresses.iter().any(|existing| existing == ip) {
+                addresses.push(ip.to_string());
+            }
+        }
+    }
+    addresses
+}
+
 #[cfg(any(feature = "docker", test))]
 fn extract_openapi_operations(spec: &Value, capture_samples: bool) -> Vec<Value> {
     let mut operations = Vec::new();
@@ -8086,17 +8480,16 @@ async fn handle_probe_endpoints(
 
         for port in &ports {
             for path in &openapi_paths {
-                let probe_cmd = format!(
-                    "curl -sf -m {} http://localhost:{}{} 2>/dev/null || true",
-                    data.probe_timeout, port, path
-                );
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
-                    docker::exec_in_container_with_output(&target_name, &probe_cmd),
+                if let Some((stdout, base_url)) = probe_http_body(
+                    &target_name,
+                    &data.app_code,
+                    *port,
+                    path,
+                    data.probe_timeout,
                 )
                 .await
                 {
-                    Ok(Ok((0, stdout, _))) if !stdout.trim().is_empty() => {
+                    if !stdout.trim().is_empty() {
                         if let Ok(spec) = serde_json::from_str::<Value>(&stdout) {
                             if spec.get("openapi").is_some() || spec.get("swagger").is_some() {
                                 if !protocols_detected.contains(&"openapi".to_string()) {
@@ -8106,14 +8499,13 @@ async fn handle_probe_endpoints(
                                     extract_openapi_operations(&spec, data.capture_samples);
                                 endpoints.push(json!({
                                     "protocol": "openapi",
-                                    "base_url": format!("http://{}:{}", data.app_code, port),
+                                    "base_url": base_url,
                                     "spec_url": path,
                                     "operations": operations,
                                 }));
                             }
                         }
                     }
-                    _ => continue,
                 }
             }
         }
@@ -8124,26 +8516,27 @@ async fn handle_probe_endpoints(
         let form_paths = ["/", "/contact", "/register", "/login", "/signup"];
         for port in &ports {
             for path in &form_paths {
-                let probe_cmd = format!(
-                    "curl -sf -m {} http://localhost:{}{} 2>/dev/null || true",
-                    data.probe_timeout, port, path
-                );
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
-                    docker::exec_in_container_with_output(&target_name, &probe_cmd),
+                if let Some((stdout, _)) = probe_http_body(
+                    &target_name,
+                    &data.app_code,
+                    *port,
+                    path,
+                    data.probe_timeout,
                 )
                 .await
                 {
-                    Ok(Ok((0, stdout, _))) if !stdout.trim().is_empty() => {
-                        let found_forms = extract_html_forms(&stdout, path);
+                    if !stdout.trim().is_empty() {
+                        let mut found_forms = extract_html_forms(&stdout, path);
                         if !found_forms.is_empty() {
                             if !protocols_detected.contains(&"html_forms".to_string()) {
                                 protocols_detected.push("html_forms".to_string());
                             }
+                            for form in &mut found_forms {
+                                form["container"] = json!(target_name);
+                            }
                             forms.extend(found_forms);
                         }
                     }
-                    _ => continue,
                 }
             }
         }
@@ -8154,67 +8547,58 @@ async fn handle_probe_endpoints(
         let rest_paths = ["/api", "/api/v1", "/api/v2"];
         for port in &ports {
             for path in &rest_paths {
-                let probe_cmd = format!(
-                    "curl -sf -m {} -o /dev/null -w '%{{http_code}}' http://localhost:{}{} 2>/dev/null || echo 000",
-                    data.probe_timeout, port, path
-                );
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
-                    docker::exec_in_container_with_output(&target_name, &probe_cmd),
+                if let Some((code, base_url)) = probe_http_status(
+                    &target_name,
+                    &data.app_code,
+                    *port,
+                    path,
+                    data.probe_timeout,
                 )
                 .await
                 {
-                    Ok(Ok((0, stdout, _))) => {
-                        let code = stdout.trim();
-                        if code == "200" || code == "401" || code == "403" {
-                            if !protocols_detected.contains(&"rest".to_string()) {
-                                protocols_detected.push("rest".to_string());
-                            }
+                    let code = code.trim();
+                    if code == "200" || code == "401" || code == "403" {
+                        if !protocols_detected.contains(&"rest".to_string()) {
+                            protocols_detected.push("rest".to_string());
+                        }
 
-                            // Capture sample response body for REST endpoints
-                            let mut sample_response = None;
-                            if data.capture_samples && code == "200" {
-                                let escaped_url = shell_escape_single_quotes(&format!(
-                                    "http://localhost:{}{}",
-                                    port, path
-                                ));
-                                let body_cmd = format!(
-                                    "curl -sf -m {} '{}' 2>/dev/null || true",
-                                    data.probe_timeout, escaped_url
-                                );
-                                if let Ok(Ok((0, body, _))) = tokio::time::timeout(
-                                    std::time::Duration::from_secs((data.probe_timeout + 2) as u64),
-                                    docker::exec_in_container_with_output(&target_name, &body_cmd),
-                                )
-                                .await
-                                {
-                                    let body = body.trim();
-                                    if !body.is_empty() {
-                                        // Try to parse as JSON; fall back to string
-                                        sample_response = Some(
-                                            serde_json::from_str::<Value>(body)
-                                                .unwrap_or_else(|_| json!(body)),
-                                        );
-                                    }
+                        // Capture sample response body for REST endpoints
+                        let mut sample_response = None;
+                        if data.capture_samples && code == "200" {
+                            if let Some((body, _)) = probe_http_body(
+                                &target_name,
+                                &data.app_code,
+                                *port,
+                                path,
+                                data.probe_timeout,
+                            )
+                            .await
+                            {
+                                let body = body.trim();
+                                if !body.is_empty() {
+                                    // Try to parse as JSON; fall back to string
+                                    sample_response = Some(
+                                        serde_json::from_str::<Value>(body)
+                                            .unwrap_or_else(|_| json!(body)),
+                                    );
                                 }
                             }
-
-                            let mut ep = json!({
-                                "protocol": "rest",
-                                "base_url": format!("http://{}:{}", data.app_code, port),
-                                "spec_url": path,
-                                "operations": [],
-                            });
-
-                            // Attach sample_response at endpoint level for REST heuristic
-                            if let Some(sample) = sample_response {
-                                ep["sample_response"] = sample;
-                            }
-
-                            endpoints.push(ep);
                         }
+
+                        let mut ep = json!({
+                            "protocol": "rest",
+                            "base_url": base_url,
+                            "spec_url": path,
+                            "operations": [],
+                        });
+
+                        // Attach sample_response at endpoint level for REST heuristic
+                        if let Some(sample) = sample_response {
+                            ep["sample_response"] = sample;
+                        }
+
+                        endpoints.push(ep);
                     }
-                    _ => continue,
                 }
             }
         }
@@ -9717,6 +10101,103 @@ mod configure_proxy_resolution_tests {
             "certificate_id": 3
         });
         assert!(!proxy_host_matches(&conflict, &request));
+    }
+
+    #[test]
+    fn configure_proxy_success_body_reports_adopted_http_route_with_ssl_pending() {
+        let command = sample_configure_proxy();
+        let proxy_result = crate::connectors::npm::ProxyHostResult {
+            success: true,
+            proxy_host_id: Some(10),
+            message: "Proxy host exists after NPM create returned an error; adopted existing HTTP route, SSL certificate is pending or failed".to_string(),
+            details: Some("certificate challenge failed".to_string()),
+            npm_response: Some(json!({"error": {"message": "certificate challenge failed"}})),
+            domain_names: vec!["app.example.com".to_string()],
+            forward_host: "my-app".to_string(),
+            forward_port: 8080,
+            adopted: true,
+            ssl_enabled: false,
+            ssl_status: Some("pending_or_failed_http_only".to_string()),
+        };
+
+        let body = configure_proxy_create_success_body(&command, &proxy_result);
+
+        assert_eq!(body["status"], "success");
+        assert_eq!(body["route_adopted"], true);
+        assert_eq!(body["route_usable"], true);
+        assert_eq!(body["ssl_requested"], true);
+        assert_eq!(body["ssl_enabled"], false);
+        assert_eq!(body["ssl_status"], "pending_or_failed_http_only");
+        assert_eq!(body["details"], "certificate challenge failed");
+    }
+
+    #[test]
+    fn existing_http_only_host_for_requested_route_can_be_adopted() {
+        let request = crate::connectors::npm::ProxyHostRequest {
+            domain_names: vec!["app.example.com".to_string()],
+            forward_host: "my-app".to_string(),
+            forward_port: 8080,
+            ssl_enabled: true,
+            ssl_forced: true,
+            http2_support: true,
+        };
+        let existing = json!({
+            "id": 11,
+            "domain_names": ["app.example.com"],
+            "forward_host": "my-app",
+            "forward_port": 8080,
+            "ssl_forced": false,
+            "http2_support": false,
+            "certificate_id": null
+        });
+
+        assert!(!proxy_host_matches(&existing, &request));
+        assert!(proxy_host_routes_to_requested_target(&existing, &request));
+
+        let adopted = proxy_result_from_existing_host(&existing, &request);
+        assert!(adopted.success);
+        assert!(adopted.adopted);
+        assert_eq!(adopted.proxy_host_id, Some(11));
+        assert!(!adopted.ssl_enabled);
+        assert_eq!(
+            adopted.ssl_status.as_deref(),
+            Some("pending_or_failed_http_only")
+        );
+    }
+
+    #[test]
+    fn npm_preflight_error_reports_unavailable_proxy() {
+        let error = npm_preflight_error(
+            "http://nginx-proxy-manager:81",
+            &anyhow::anyhow!("Failed to connect to Nginx Proxy Manager"),
+        );
+
+        assert_eq!(error.code, "npm_unavailable");
+        assert_eq!(
+            error.message,
+            "Nginx Proxy Manager is not installed or not reachable from the Status Panel agent"
+        );
+        assert!(error
+            .details
+            .as_deref()
+            .unwrap_or_default()
+            .contains("nginx-proxy-manager service is deployed"));
+    }
+
+    #[test]
+    fn npm_preflight_error_reports_auth_failure() {
+        let error = npm_preflight_error(
+            "http://nginx-proxy-manager:81",
+            &anyhow::anyhow!("NPM authentication failed with status 401 Unauthorized"),
+        );
+
+        assert_eq!(error.code, "npm_auth_failed");
+        assert_eq!(error.message, "Nginx Proxy Manager authentication failed");
+        assert!(error
+            .details
+            .as_deref()
+            .unwrap_or_default()
+            .contains("credentials were rejected"));
     }
 }
 
