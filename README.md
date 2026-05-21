@@ -37,7 +37,7 @@ curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh 
 Pin a specific version or choose a custom directory:
 
 ```bash
-VERSION=v0.1.4 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
+VERSION=v0.1.9 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 INSTALL_DIR=~/.local/bin curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 ```
 
@@ -50,6 +50,7 @@ status --version
 ## CLI Commands
 
 ```
+status init                               Generate default config.json and .env
 status serve [--port 5000] [--with-ui]   Start the HTTP API server
 status containers                         List all Docker containers
 status health [name]                      Check container or stack health
@@ -62,6 +63,29 @@ status metrics [--json]                   Show CPU, memory, disk usage
 status update check                       Check for new versions
 status update apply [--version V]         Download and verify an update
 status update rollback                    Roll back to previous version
+```
+
+## First Run
+
+After installing, generate the default configuration files:
+
+```bash
+status init                      # creates config.json and .env in current directory
+status init --config /etc/status # custom path
+```
+
+Edit `.env` to set **required** credentials before starting:
+
+```bash
+STATUS_PANEL_USERNAME=myuser
+STATUS_PANEL_PASSWORD=strong-secret
+AGENT_ID=my-server-01
+```
+
+Then start the agent:
+
+```bash
+status --config config.json
 ```
 
 ## Running Modes
@@ -86,6 +110,15 @@ status --daemon --config config.json
 status serve --port 5000           # JSON API only
 status serve --port 5000 --with-ui # API + web dashboard
 ```
+
+## Command Transport Split
+
+Status Panel uses **two different command transport paths**:
+
+1. **Normal Status Panel commands** use the dashboard DB queue plus HTTP long-polling. The agent waits on `/api/v1/agent/commands/wait/{deployment_hash}`, executes the command locally, then reports back to `/api/v1/agent/commands/report`.
+2. **Agent-executor pipe steps** are a separate path. AMQP/RabbitMQ support belongs to that executor flow, not to the normal Status Panel command queue.
+
+This means RabbitMQ is **not** the transport for regular `health`, `logs`, `deploy_app`, or other Status Panel commands. Pipe operations such as `activate_pipe`, `deactivate_pipe`, and `trigger_pipe` run inside the agent runtime, but the normal command delivery path is still DB queue + long-polling.
 
 ## Build from Source
 
@@ -127,6 +160,8 @@ Or use Docker Compose with the included `docker-compose.yml` for a full setup wi
 | `POST` | `/api/v1/commands/enqueue` | Enqueue a command |
 | `POST` | `/api/v1/commands/report` | Report execution result |
 
+The local `/api/v1/commands/*` endpoints are the agent's own Axum API surface. When connected to the remote dashboard, the daemon uses the `/api/v1/agent/commands/*` contract instead. AMQP-backed executor traffic is separate from both of these HTTP command paths.
+
 ### Self-Update
 
 | Method | Path | Description |
@@ -155,26 +190,43 @@ The agent accepts signed commands from the Stacker dashboard covering the full l
 | `config_diff` | Detect configuration drift |
 | `configure_proxy` | Nginx proxy management |
 | `configure_firewall` | iptables policy management |
+| `activate_pipe` / `deactivate_pipe` / `trigger_pipe` | Agent-side pipe registration and runtime execution |
 
 ## Security
 
+- **No default credentials** — `STATUS_PANEL_USERNAME` and `STATUS_PANEL_PASSWORD` must be set; login is disabled until configured
 - **HMAC-SHA256** request signing with `AGENT_TOKEN`
 - **Replay protection** via `X-Request-Id` tracking
 - **Rate limiting** per agent
+- **Session security** — HttpOnly + Secure + SameSite=Strict cookies; server-side session invalidation on logout; TTL-based cleanup
 - **Command validation** — conservative allowlist, blocked shells and metacharacters
+- **Injection prevention** — all shell-interpolated values (email, domains, container names) validated against metacharacters
 - **Exec sandboxing** — dangerous commands (`rm -rf /`, `mkfs`, `shutdown`, etc.) are blocked
+- **Localhost by default** — API server binds `127.0.0.1`; explicit `--bind 0.0.0.0` required for external access
+- **HTTPS-only updates** — self-update rejects HTTP download URLs; SHA256 verification on every download
 - **Audit logging** — all auth attempts and scope denials recorded
 - **Vault integration** — secrets and configs stored securely, never in plaintext
 
 ## Configuration
 
+`STATUS_PANEL_USERNAME` / `STATUS_PANEL_PASSWORD` only control the Status Panel UI. `configure_proxy`
+uses a separate Nginx Proxy Manager credential resolved from Vault with `STACKER_SERVER_ID`.
+When Stacker sends `ssl_enabled=false` (for example via `stacker agent configure-proxy --no-ssl`),
+the agent creates a plain HTTP proxy host and does not send Let's Encrypt metadata to NPM.
+
 | Environment Variable | Description |
 |---------------------|-------------|
-| `AGENT_ID` | Unique agent identifier |
+| `STATUS_PANEL_USERNAME` | **Required.** Login username |
+| `STATUS_PANEL_PASSWORD` | **Required.** Login password |
+| `AGENT_ID` | **Required.** Unique agent identifier (protects API endpoints) |
 | `AGENT_TOKEN` | Authentication token for signed requests |
 | `DASHBOARD_URL` | Remote dashboard URL |
 | `VAULT_ADDRESS` | HashiCorp Vault server URL |
+| `STACKER_SERVER_ID` | Stable server UUID used to resolve host-scoped NPM credentials in Vault |
+| `STATUS_PANEL_PROXY_OWNER` | Set `true` on the single agent allowed to manage shared proxy state |
+| `NPM_ALLOW_ENV_FALLBACK` | Temporary migration switch for legacy `NPM_*` env credentials |
 | `UPDATE_SERVER_URL` | Remote update server for version checks |
+| `UPDATE_EXPECTED_SHA256` | Expected SHA256 hash for self-update binary |
 | `COMPOSE_AGENT_ENABLED` | Enable compose-agent mode |
 | `METRICS_INTERVAL_SECS` | Metrics collection interval |
 

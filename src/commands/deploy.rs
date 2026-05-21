@@ -115,6 +115,7 @@ pub async fn rollback_latest() -> Result<Option<RollbackEntry>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;

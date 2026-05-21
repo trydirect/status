@@ -1,5 +1,86 @@
 # Changelog
 
+## 0.1.9 — 2026-05-15
+### Added
+- `deploy_app` now creates adjacent `.stacker-bak-*` backups before overwriting managed compose, env, or config bundle files, retaining the five most recent backups per file.
+
+### Changed
+- Nginx Proxy Manager proxy-host creation now includes the Let's Encrypt account email only when SSL is requested.
+- Failed NPM proxy-host creation results preserve the NPM response status and error message for clearer CLI feedback.
+
+## 0.1.8 — 2026-04-21
+### Added
+- `status --version` now includes the git short hash (for example `0.1.8 (abc1234)`) so production builds can be identified instantly.
+
+### Changed
+- Docker builds now include the protobuf build inputs required for gRPC client code generation in musl/release images.
+- Pipe-contract fixtures remain sourced from `trydirect/config`, while fork PRs and unauthorized CI runs now skip only the shared-fixture tests instead of failing the entire workflow.
+
+## 0.1.7 — 2026-04-10
+### Security — OWASP Top 10 Hardening
+
+This is a **security release** addressing 6 Critical and 5 High severity findings from a comprehensive OWASP Top 10 audit.
+
+#### A01: Broken Access Control
+- **No default credentials** — `Credentials::from_env()` now returns an error when `STATUS_PANEL_USERNAME` / `STATUS_PANEL_PASSWORD` are unset; no admin/admin backdoor
+- **Container routes require auth** — `/restart/{name}`, `/stop/{name}`, `/pause/{name}` now enforce session authentication
+- **SSL routes require auth** — `/enable_ssl`, `/disable_ssl` now enforce session authentication
+- **AGENT_ID enforced** — `validate_agent_id` rejects requests when `AGENT_ID` env var is unset or empty
+
+#### A02: Cryptographic Failures
+- **Secure session cookies** — `Set-Cookie` now includes `Secure; SameSite=Strict; HttpOnly`
+
+#### A03: Injection
+- **Certbot command injection prevented** — email and domain values validated against shell metacharacters before `exec_in_container`
+- **Daemon shell fallback validated** — unrecognised commands now pass through `CommandValidator` before execution
+- New `security::validation` module with `is_safe_shell_value()`, `is_valid_domain()`, `is_valid_email()`, `is_safe_update_url()`
+
+#### A04: Insecure Design
+- **Session TTL** — `SessionStore` now tracks creation timestamps; `cleanup_expired(duration)` removes stale sessions
+
+#### A05: Security Misconfiguration
+- **Default bind address is 127.0.0.1** — server no longer binds `0.0.0.0` by default; explicit `--bind 0.0.0.0` required for all-interfaces
+
+#### A07: Identification and Authentication Failures
+- **Logout invalidates session** — `logout_handler` extracts cookie, calls `delete_session`, and sets `Max-Age=0`
+
+#### A08: Software and Data Integrity Failures
+- **HTTPS enforced for self-update** — `start_update_job` rejects HTTP URLs
+- **SHA256 always computed** — hash is calculated on every download; warns if `UPDATE_EXPECTED_SHA256` is not set
+
+### Added
+- `status init` command — generates default `config.json` and `.env` template on first run
+- Friendly error message when `config.json` is missing (replaces stack trace)
+- 12 automated OWASP security tests (`tests/owasp_security.rs`)
+
+### Fixed
+- RUSTSEC-2026-0049 — upgraded `rustls-webpki` 0.103.8 → 0.103.10
+
+## 0.1.6 — 2026-04-08
+### Added — Kata Containers Runtime Support
+
+#### Container Runtime Selection (`commands/stacker.rs`)
+- `ContainerRuntime` enum (`runc`/`kata`) with serde support and Docker runtime name mapping
+- `detect_kata_runtime()` — cached detection via `docker info` with 5s timeout and `OnceLock`
+- `inject_runtime_into_compose()` — parses compose YAML and injects `runtime:` per-service
+- `DeployAppCommand` and `DeployWithConfigsCommand` accept optional `runtime` field
+- Graceful fallback: if Kata is requested but unavailable, deploys with runc and emits `kata_fallback` warning
+- Effective runtime reported in deploy result body
+
+#### Capabilities Discovery (`comms/local_api.rs`)
+- `/capabilities` endpoint reports `"kata"` in features list when Kata runtime is detected on the host
+
+#### Code Quality Fixes (PR #84 review)
+- `runtime_compose_tests` gated with `#[cfg(all(test, feature = "docker"))]` for minimal builds
+- Replaced blocking `std::path::Path::exists()` with `tokio::fs::try_exists()` in async deploy path
+- Added proper error logging in `unlink_handler` for `try_exists` failures
+
+#### Tests
+- 14 new tests: enum behavior, serde deserialization, compose YAML injection (including edge cases), command parsing with runtime field
+
+## 0.1.5 — 2026-03-26
+### Added — Long Polling, Vault Integration, Compose Agent Sidecar
+
 ## 0.1.4 — 2026-03-13
 ### Added — CLI Improvements, Install Script & GitHub Releases
 
@@ -142,4 +223,3 @@
 - Planned: align build and runtime images to avoid glibc drift; keep the musl-based build variant as the default container target.
 - Planned: update CI to build and test using the production base image so linker/runtime errors are caught early.
 - Planned: add a container startup smoke check to surface missing runtime dependencies before release.
-

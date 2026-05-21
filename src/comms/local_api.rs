@@ -42,11 +42,13 @@ use crate::commands::{
     check_remote_version, get_update_status, start_update_job, UpdateJobs, UpdatePhase,
 };
 use crate::commands::{
-    execute_stacker_command, parse_stacker_command, CommandValidator, DockerOperation,
+    execute_stacker_command, parse_stacker_command, CommandValidator, DockerOperation, PipeRuntime,
     TimeoutStrategy,
 };
+use crate::comms::notifications::{self, MarkReadRequest, NotificationStore, UnreadCountResponse};
 use crate::monitoring::{
-    spawn_heartbeat, MetricsCollector, MetricsSnapshot, MetricsStore, MetricsTx,
+    spawn_heartbeat, CommandExecutionMetrics, CommandMetricsStore, ControlPlane, MetricsCollector,
+    MetricsSnapshot, MetricsStore, MetricsTx,
 };
 use crate::security::audit_log::AuditLogger;
 use crate::security::auth::{Credentials, SessionStore, SessionUser};
@@ -62,7 +64,20 @@ use crate::VERSION;
 
 type SharedState = Arc<AppState>;
 
-// Extract client IP from ConnectInfo, headers, or fallback to 127.0.0.1
+/// Build cookie attributes. Include `Secure` only when STATUS_PANEL_HTTPS=true
+/// (or when behind a TLS-terminating proxy). Without TLS, browsers ignore Secure cookies.
+fn cookie_attributes() -> &'static str {
+    let secure = std::env::var("STATUS_PANEL_HTTPS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if secure {
+        "Path=/; HttpOnly; Secure; SameSite=Strict"
+    } else {
+        "Path=/; HttpOnly; SameSite=Strict"
+    }
+}
+
+// Extract client IP from ConnectInfo or fallback to 127.0.0.1
 #[derive(Debug, Clone)]
 struct ClientIp(pub String);
 
@@ -73,31 +88,17 @@ where
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Prefer SocketAddr inserted by Axum's connect info middleware
-        if let Some(addr) = parts.extensions.get::<SocketAddr>() {
-            return Ok(ClientIp(addr.ip().to_string()));
+        // Use ConnectInfo<SocketAddr> from Axum's connect info middleware.
+        // Do NOT trust proxy headers (X-Forwarded-For, X-Real-Ip) as they are
+        // trivially spoofable and would allow rate-limit bypass.
+        if let Some(connect_info) = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        {
+            return Ok(ClientIp(connect_info.0.ip().to_string()));
         }
 
-        // Check common proxy headers
-        if let Some(forwarded) = parts.headers.get("x-forwarded-for") {
-            if let Ok(s) = forwarded.to_str() {
-                // Take the first IP if multiple
-                let ip = s.split(',').next().unwrap_or(s).trim().to_string();
-                if !ip.is_empty() {
-                    return Ok(ClientIp(ip));
-                }
-            }
-        }
-        if let Some(real_ip) = parts.headers.get("x-real-ip") {
-            if let Ok(s) = real_ip.to_str() {
-                let ip = s.trim().to_string();
-                if !ip.is_empty() {
-                    return Ok(ClientIp(ip));
-                }
-            }
-        }
-
-        // Fallback for tests or when info is unavailable
+        // Fallback for tests (oneshot doesn't populate ConnectInfo)
         Ok(ClientIp("127.0.0.1".to_string()))
     }
 }
@@ -109,6 +110,7 @@ pub struct AppState {
     pub with_ui: bool,
     pub metrics_collector: Arc<MetricsCollector>,
     pub metrics_store: MetricsStore,
+    pub command_metrics: CommandMetricsStore,
     pub metrics_tx: MetricsTx,
     pub metrics_webhook: Option<String>,
     pub backup_path: Option<String>,
@@ -123,6 +125,9 @@ pub struct AppState {
     pub token_cache: Option<TokenCache>,
     pub update_jobs: UpdateJobs,
     pub firewall_policy: FirewallPolicy,
+    pub login_limiter: RateLimiter,
+    pub notification_store: NotificationStore,
+    pub pipe_runtime: PipeRuntime,
 }
 
 impl AppState {
@@ -160,6 +165,7 @@ impl AppState {
             with_ui,
             metrics_collector: Arc::new(MetricsCollector::new()),
             metrics_store: Arc::new(tokio::sync::RwLock::new(MetricsSnapshot::default())),
+            command_metrics: Arc::new(tokio::sync::RwLock::new(CommandExecutionMetrics::default())),
             metrics_tx: broadcast::channel(32).0,
             metrics_webhook: std::env::var("METRICS_WEBHOOK").ok(),
             backup_path: std::env::var("BACKUP_PATH").ok(),
@@ -186,6 +192,9 @@ impl AppState {
             token_cache,
             update_jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             firewall_policy,
+            login_limiter: RateLimiter::new_per_minute(5),
+            notification_store: notifications::new_notification_store(),
+            pipe_runtime: PipeRuntime::new(),
         }
     }
 }
@@ -232,6 +241,7 @@ pub struct HealthResponse {
     pub status: String,
     pub token_age_seconds: u64,
     pub last_refresh_ok: Option<bool>,
+    pub command_metrics: CommandExecutionMetrics,
 }
 
 // ---- Marketplace types ----
@@ -300,11 +310,34 @@ async fn health(State(state): State<SharedState>) -> impl IntoResponse {
         None
     };
 
+    let command_metrics = state.command_metrics.read().await.clone();
+
     Json(HealthResponse {
         status: "ok".to_string(),
         token_age_seconds,
         last_refresh_ok,
+        command_metrics,
     })
+}
+
+async fn command_metrics_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    Json(state.command_metrics.read().await.clone())
+}
+
+async fn record_command_execution(state: &SharedState, executed_by: &str) {
+    let control_plane = ControlPlane::from_value(Some(executed_by));
+    let mut metrics = state.command_metrics.write().await;
+    metrics.record_execution(control_plane);
+}
+
+async fn attach_command_provenance(
+    state: &SharedState,
+    mut result: CommandResult,
+    executed_by: &str,
+) -> CommandResult {
+    record_command_execution(state, executed_by).await;
+    result.executed_by = Some(executed_by.to_string());
+    result
 }
 
 // Login form (GET)
@@ -333,17 +366,80 @@ async fn login_page(State(state): State<SharedState>) -> impl IntoResponse {
 // Login handler (POST)
 async fn login_handler(
     State(state): State<SharedState>,
+    client_ip: ClientIp,
     Form(req): Form<LoginRequest>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
-    let creds = Credentials::from_env();
-    if req.username == creds.username && req.password == creds.password {
+    if !state.login_limiter.allow(&client_ip.0).await {
+        if state.with_ui {
+            if let Some(templates) = &state.templates {
+                let mut context = tera::Context::new();
+                context.insert("error", &true);
+                if let Ok(html) = templates.render("login.html", &context) {
+                    return Err((StatusCode::TOO_MANY_REQUESTS, Html(html).into_response()));
+                }
+            }
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Html(
+                    "<html><body>Too many login attempts. Try again later.</body></html>"
+                        .to_string(),
+                )
+                .into_response(),
+            ));
+        } else {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorResponse {
+                    error: "Too many login attempts. Try again later.".to_string(),
+                })
+                .into_response(),
+            ));
+        }
+    }
+    let creds = match Credentials::from_env() {
+        Ok(c) => c,
+        Err(_) => {
+            error!("login attempt but credentials are not configured");
+            if state.with_ui {
+                if let Some(templates) = &state.templates {
+                    let mut context = tera::Context::new();
+                    context.insert("error", &true);
+                    if let Ok(html) = templates.render("login.html", &context) {
+                        return Err((StatusCode::SERVICE_UNAVAILABLE, Html(html).into_response()));
+                    }
+                }
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Html(
+                        "<html><body>Credentials not configured. Run `status init`.</body></html>"
+                            .to_string(),
+                    )
+                    .into_response(),
+                ));
+            } else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: "Credentials not configured. Set STATUS_PANEL_USERNAME and STATUS_PANEL_PASSWORD.".to_string(),
+                    })
+                    .into_response(),
+                ));
+            }
+        }
+    };
+    // Constant-time comparison to prevent timing attacks on credentials
+    let user_match =
+        subtle::ConstantTimeEq::ct_eq(req.username.as_bytes(), creds.username.as_bytes());
+    let pass_match =
+        subtle::ConstantTimeEq::ct_eq(req.password.as_bytes(), creds.password.as_bytes());
+    if (user_match & pass_match).into() {
         let user = SessionUser::new(req.username.clone());
         let session_id = state.session_store.create_session(user).await;
         debug!("user logged in: {}", req.username);
         use axum::http::header::SET_COOKIE;
         if state.with_ui {
             // Set session cookie (HttpOnly, Secure if HTTPS)
-            let cookie = format!("session_id={}; Path=/; HttpOnly", session_id);
+            let cookie = format!("session_id={}; {}", session_id, cookie_attributes());
             let mut resp = Redirect::to("/").into_response();
             resp.headers_mut()
                 .append(SET_COOKIE, cookie.parse().unwrap());
@@ -388,13 +484,35 @@ async fn login_handler(
 }
 
 // Logout handler
-async fn logout_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    // @todo Extract session ID from cookies and delete
+async fn logout_handler(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
+    // Extract session_id from cookie and invalidate
+    if let Some(cookie_header) = headers.get("cookie") {
+        if let Ok(cookies) = cookie_header.to_str() {
+            for pair in cookies.split(';') {
+                let pair = pair.trim();
+                if let Some(session_id) = pair.strip_prefix("session_id=") {
+                    state.session_store.delete_session(session_id).await;
+                    debug!("session invalidated: {}", session_id);
+                    break;
+                }
+            }
+        }
+    }
+
     debug!("user logged out");
+    use axum::http::header::SET_COOKIE;
+    let clear_cookie = format!("session_id=; {}; Max-Age=0", cookie_attributes());
+
     if state.with_ui {
-        Redirect::to("/login").into_response()
+        let mut resp = Redirect::to("/login").into_response();
+        resp.headers_mut()
+            .append(SET_COOKIE, clear_cookie.parse().unwrap());
+        resp
     } else {
-        Json(json!({"status": "logged out"})).into_response()
+        let mut resp = Json(json!({"status": "logged out"})).into_response();
+        resp.headers_mut()
+            .append(SET_COOKIE, clear_cookie.parse().unwrap());
+        resp
     }
 }
 
@@ -480,8 +598,17 @@ async fn home(
 }
 
 // ---- SSL enable/disable (Let’s Encrypt or self-signed) ----
+/// Build certbot argv vectors — each argument is a separate element to avoid
+/// shell interpretation. Passed directly to `exec_in_container_argv`.
 #[cfg(feature = "docker")]
-fn build_certbot_cmds(config: &Config) -> (String, String) {
+fn build_certbot_argv(config: &Config) -> Result<(Vec<String>, Vec<String>), String> {
+    use crate::security::validation::{is_safe_shell_value, is_valid_domain, is_valid_email};
+
+    let email = &config.reqdata.email;
+    if !is_valid_email(email) || !is_safe_shell_value(email) {
+        return Err(format!("Invalid or unsafe email for certbot: {}", email));
+    }
+
     // Domains from subdomains can be object, array, or comma-separated string
     let mut domains: Vec<String> = Vec::new();
     if let Some(ref sd) = config.subdomains {
@@ -512,25 +639,43 @@ fn build_certbot_cmds(config: &Config) -> (String, String) {
         }
     }
 
-    let domains_flags = domains
-        .into_iter()
-        .map(|d| format!("-d {}", d))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Validate every domain
+    for d in &domains {
+        if !is_valid_domain(d) || !is_safe_shell_value(d) {
+            return Err(format!("Invalid or unsafe domain for certbot: {}", d));
+        }
+    }
 
-    let email = config.reqdata.email.clone();
-    let reg_cmd = format!("certbot register --email {} --agree-tos -n", email);
-    let crt_cmd = if domains_flags.is_empty() {
-        "certbot --nginx --redirect".to_string()
-    } else {
-        format!("certbot --nginx --redirect {}", domains_flags)
-    };
+    let reg_argv = vec![
+        "certbot".to_string(),
+        "register".to_string(),
+        "--email".to_string(),
+        email.clone(),
+        "--agree-tos".to_string(),
+        "-n".to_string(),
+    ];
 
-    (reg_cmd, crt_cmd)
+    let mut crt_argv = vec![
+        "certbot".to_string(),
+        "--nginx".to_string(),
+        "--redirect".to_string(),
+    ];
+    for d in domains {
+        crt_argv.push("-d".to_string());
+        crt_argv.push(d);
+    }
+
+    Ok((reg_argv, crt_argv))
 }
 
 #[cfg(feature = "docker")]
-async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoResponse {
+async fn enable_ssl_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     let nginx = std::env::var("NGINX_CONTAINER").unwrap_or_else(|_| "nginx".to_string());
     // Prepare challenge directory
     if let Err(e) = docker::exec_in_container(
@@ -544,13 +689,19 @@ async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoRespon
     }
 
     if state.config.ssl.as_deref() == Some("letsencrypt") {
-        let (reg_cmd, crt_cmd) = build_certbot_cmds(&state.config);
+        let (reg_argv, crt_argv) = match build_certbot_argv(&state.config) {
+            Ok(cmds) => cmds,
+            Err(e) => {
+                error!("certbot command validation failed: {}", e);
+                return Redirect::to("/").into_response();
+            }
+        };
         info!("starting certbot registration and certificate issue");
-        if let Err(e) = docker::exec_in_container(&nginx, &reg_cmd).await {
+        if let Err(e) = docker::exec_in_container_argv(&nginx, reg_argv).await {
             error!("certbot register failed: {}", e);
             return Redirect::to("/").into_response();
         }
-        if let Err(e) = docker::exec_in_container(&nginx, &crt_cmd).await {
+        if let Err(e) = docker::exec_in_container_argv(&nginx, crt_argv).await {
             error!("certbot issue failed: {}", e);
             return Redirect::to("/").into_response();
         }
@@ -599,7 +750,13 @@ async fn enable_ssl_handler(State(state): State<SharedState>) -> impl IntoRespon
 }
 
 #[cfg(feature = "docker")]
-async fn disable_ssl_handler(State(state): State<SharedState>) -> impl IntoResponse {
+async fn disable_ssl_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     let nginx = std::env::var("NGINX_CONTAINER").unwrap_or_else(|_| "nginx".to_string());
     let mut names: Vec<String> = Vec::new();
     if let Some(ref sd) = state.config.subdomains {
@@ -639,12 +796,48 @@ async fn disable_ssl_handler(State(state): State<SharedState>) -> impl IntoRespo
     Redirect::to("/").into_response()
 }
 
+/// Extract session_id from cookies and verify against the session store.
+/// Returns None if no valid session found.
+#[cfg(feature = "docker")]
+async fn require_session(state: &SharedState, headers: &HeaderMap) -> Option<String> {
+    let session_id = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|cookies| {
+            cookies
+                .split(';')
+                .find_map(|c| c.trim().strip_prefix("session_id=").map(|v| v.to_string()))
+        })?;
+    state
+        .session_store
+        .get_session(&session_id)
+        .await
+        .map(|_| session_id)
+}
+
+#[cfg(feature = "docker")]
+fn unauthorized_response(state: &SharedState) -> axum::http::Response<axum::body::Body> {
+    if state.with_ui {
+        Redirect::to("/login").into_response()
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "authentication required"})),
+        )
+            .into_response()
+    }
+}
+
 // Restart container
 #[cfg(feature = "docker")]
 async fn restart_container(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     use crate::agent::docker;
     match docker::restart(&name).await {
         Ok(_) => {
@@ -667,8 +860,12 @@ async fn restart_container(
 #[cfg(feature = "docker")]
 async fn stop_container(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     use crate::agent::docker;
     match docker::stop(&name).await {
         Ok(_) => {
@@ -690,8 +887,12 @@ async fn stop_container(
 #[cfg(feature = "docker")]
 async fn pause_container(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return unauthorized_response(&state);
+    }
     use crate::agent::docker;
     match docker::pause(&name).await {
         Ok(_) => {
@@ -930,8 +1131,20 @@ async fn capabilities_handler(State(state): State<SharedState>) -> impl IntoResp
         features.push("logs".to_string());
         features.push("restart".to_string());
     }
+    features.push("pipes".to_string());
+    features.push("activate_pipe".to_string());
+    features.push("deactivate_pipe".to_string());
+    features.push("trigger_pipe".to_string());
     if compose_agent {
         features.push("compose_agent".to_string());
+    }
+
+    // Detect Kata Containers runtime availability
+    #[cfg(feature = "docker")]
+    {
+        if crate::commands::stacker::detect_kata_runtime().await {
+            features.push("kata".to_string());
+        }
     }
 
     let resp = CapabilitiesResponse {
@@ -1191,6 +1404,7 @@ async fn link_select_handler(
         &stacker_url,
         &req.session_token,
         &req.deployment_id,
+        state.config.compose_agent_enabled,
     )
     .await
     {
@@ -1226,11 +1440,19 @@ async fn link_select_handler(
 
 async fn unlink_handler(State(state): State<SharedState>) -> impl IntoResponse {
     let reg_path = "/etc/status-panel/registration.json";
-    if tokio::fs::try_exists(reg_path).await.unwrap_or(false) {
-        if let Err(e) = tokio::fs::remove_file(reg_path).await {
-            error!("failed to remove registration: {}", e);
-        } else {
-            info!("dashboard unlinked, registration removed");
+    match tokio::fs::try_exists(reg_path).await {
+        Ok(true) => {
+            if let Err(e) = tokio::fs::remove_file(reg_path).await {
+                error!("failed to remove registration: {}", e);
+            } else {
+                info!("dashboard unlinked, registration removed");
+            }
+        }
+        Ok(false) => {
+            info!("unlink requested but no registration file found");
+        }
+        Err(e) => {
+            error!("failed to check registration file at {}: {}", reg_path, e);
         }
     }
     if state.with_ui {
@@ -1240,12 +1462,35 @@ async fn unlink_handler(State(state): State<SharedState>) -> impl IntoResponse {
     }
 }
 
+// ---- Notification API handlers ----
+
+async fn notifications_list(State(state): State<SharedState>) -> impl IntoResponse {
+    let summary = notifications::get_summary(&state.notification_store).await;
+    Json(summary)
+}
+
+async fn notifications_mark_read(
+    State(state): State<SharedState>,
+    Json(req): Json<MarkReadRequest>,
+) -> impl IntoResponse {
+    notifications::mark_read(&state.notification_store, &req.ids, req.all).await;
+    Json(json!({"status": "ok"}))
+}
+
+async fn notifications_unread_count(State(state): State<SharedState>) -> impl IntoResponse {
+    let count = notifications::get_unread_count(&state.notification_store).await;
+    Json(UnreadCountResponse {
+        unread_count: count,
+    })
+}
+
 pub fn create_router(state: SharedState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
         .route("/capabilities", get(capabilities_handler))
         .route("/metrics", get(metrics_handler))
         .route("/metrics/stream", get(metrics_ws_handler))
+        .route("/api/v1/diagnostics/commands", get(command_metrics_handler))
         // Self-update endpoints
         .route("/api/self/version", get(self_version))
         .route("/api/self/update/start", post(self_update_start))
@@ -1264,6 +1509,11 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/v1/commands/enqueue", post(commands_enqueue))
         .route("/api/v1/auth/rotate-token", post(rotate_token));
 
+    router = router.route(
+        "/api/v1/pipes/webhook/{deployment_hash}/{pipe_instance_id}",
+        post(pipe_webhook_ingest),
+    );
+
     // Marketplace & dashboard linking
     router = router
         .route("/marketplace", get(marketplace_page))
@@ -1272,6 +1522,15 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/link", get(link_page).post(link_login_handler))
         .route("/link/select", post(link_select_handler))
         .route("/link/unlink", post(unlink_handler));
+
+    // Notifications
+    router = router
+        .route("/api/v1/notifications", get(notifications_list))
+        .route("/api/v1/notifications/read", post(notifications_mark_read))
+        .route(
+            "/api/v1/notifications/unread-count",
+            get(notifications_unread_count),
+        );
 
     #[cfg(feature = "docker")]
     {
@@ -1490,7 +1749,14 @@ fn default_wait_timeout() -> u64 {
 fn validate_agent_id(headers: &HeaderMap) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let expected = std::env::var("AGENT_ID").unwrap_or_default();
     if expected.is_empty() {
-        return Ok(());
+        // When AGENT_ID is not configured, reject all requests to prevent
+        // unauthenticated access to sensitive endpoints.
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "AGENT_ID not configured".to_string(),
+            }),
+        ));
     }
     match headers.get("X-Agent-Id").and_then(|v| v.to_str().ok()) {
         Some(got) if got == expected => Ok(()),
@@ -1671,6 +1937,9 @@ async fn commands_report(
                 .into_response()
         }
     };
+    if let Some(executed_by) = res.executed_by.as_deref() {
+        record_command_execution(&state, executed_by).await;
+    }
     info!(command_id = %res.command_id, status = %res.status, "command result reported");
     (StatusCode::OK, Json(json!({"accepted": true}))).into_response()
 }
@@ -1704,10 +1973,25 @@ async fn commands_execute(
                 .into_response()
         }
     };
+    let executed_by = ControlPlane::from_value(
+        std::env::var("CONTROL_PLANE")
+            .ok()
+            .as_deref()
+            .or(state.config.control_plane.as_deref()),
+    )
+    .to_string();
     if let Some(stacker_cmd) = parsed_stacker_cmd {
-        match execute_stacker_command(&cmd, &stacker_cmd, &state.firewall_policy).await {
+        match execute_stacker_command(
+            &cmd,
+            &stacker_cmd,
+            &state.firewall_policy,
+            &state.pipe_runtime,
+        )
+        .await
+        {
             Ok(result) => {
-                return Json(result).into_response();
+                return Json(attach_command_provenance(&state, result, &executed_by).await)
+                    .into_response();
             }
             Err(e) => {
                 error!(
@@ -1744,7 +2028,10 @@ async fn commands_execute(
                 }
                 #[cfg(feature = "docker")]
                 match execute_docker_operation(&cmd.command_id, op).await {
-                    Ok(result) => return Json(result).into_response(),
+                    Ok(result) => {
+                        return Json(attach_command_provenance(&state, result, &executed_by).await)
+                            .into_response()
+                    }
                     Err(e) => {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1791,7 +2078,10 @@ async fn commands_execute(
     let executor = CommandExecutor::new();
 
     match executor.execute(&cmd, strategy).await {
-        Ok(exec) => Json(exec.to_command_result()).into_response(),
+        Ok(exec) => {
+            Json(attach_command_provenance(&state, exec.to_command_result(), &executed_by).await)
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -1833,6 +2123,41 @@ async fn commands_enqueue(
     (StatusCode::ACCEPTED, Json(json!({"queued": true}))).into_response()
 }
 
+async fn pipe_webhook_ingest(
+    State(state): State<SharedState>,
+    Path((deployment_hash, pipe_instance_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(resp) = verify_stacker_post(&state, &headers, &body, "commands:execute").await {
+        return resp.into_response();
+    }
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid webhook payload: {}", error)})),
+            )
+                .into_response()
+        }
+    };
+
+    match state
+        .pipe_runtime
+        .trigger_registered_payload(&deployment_hash, &pipe_instance_id, payload, "webhook")
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct RotateTokenRequest {
     new_token: String,
@@ -1871,9 +2196,33 @@ async fn rotate_token(
     (StatusCode::OK, Json(json!({"rotated": true}))).into_response()
 }
 
-pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
+/// Return the bind address. Defaults to 127.0.0.1 for security.
+/// Pass `Some("0.0.0.0")` to explicitly listen on all interfaces.
+pub fn default_bind_address(bind: Option<String>) -> std::net::Ipv4Addr {
+    match bind.as_deref() {
+        Some(addr) => addr.parse().unwrap_or(std::net::Ipv4Addr::LOCALHOST),
+        None => std::net::Ipv4Addr::LOCALHOST,
+    }
+}
+
+pub async fn serve(config: Config, config_path: &str, port: u16, with_ui: bool) -> Result<()> {
     let cfg = Arc::new(config);
     let state = Arc::new(AppState::new(cfg, with_ui, Some(port)));
+    state
+        .pipe_runtime
+        .configure_persistence(crate::commands::default_pipe_runtime_state_path(Some(
+            config_path,
+        )))
+        .await;
+    match state.pipe_runtime.restore_from_disk().await {
+        Ok(restored) if restored > 0 => {
+            info!(restored, "restored persisted pipe runtime registrations");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            error!(error = %error, "failed to restore persisted pipe runtime registrations");
+        }
+    }
 
     // Spawn token refresh task if Vault is configured
     if let (Some(vault_client), Some(token_cache)) = (&state.vault_client, &state.token_cache) {
@@ -1893,13 +2242,82 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
         .and_then(|s| s.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(30));
+
+    let alert_manager = {
+        let cfg = crate::monitoring::alerting::AlertConfig::from_env();
+        let mgr = crate::monitoring::alerting::AlertManager::new(cfg);
+        if mgr.is_enabled() {
+            tracing::info!("outbound alerting enabled");
+            Some(Arc::new(mgr))
+        } else {
+            tracing::debug!("outbound alerting disabled (ALERT_WEBHOOK_URL not set)");
+            None
+        }
+    };
+
     spawn_heartbeat(
         state.metrics_collector.clone(),
         state.metrics_store.clone(),
         heartbeat_interval,
         state.metrics_tx.clone(),
         state.metrics_webhook.clone(),
+        alert_manager,
     );
+
+    // Spawn notification poller if dashboard connection is configured
+    {
+        let dashboard_url =
+            std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "http://localhost:5000".to_string());
+        let agent_id = std::env::var("AGENT_ID").unwrap_or_default();
+        let agent_token = std::env::var("AGENT_TOKEN").unwrap_or_default();
+
+        if !agent_token.is_empty() {
+            // Build a TokenProvider so the poller can refresh on 401/403
+            let token_provider = crate::security::token_provider::TokenProvider::from_env(
+                state.vault_client.clone(),
+            );
+
+            let poll_interval = std::env::var("NOTIFICATION_POLL_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(300));
+
+            let deployment_hash =
+                std::env::var("DEPLOYMENT_HASH").unwrap_or_else(|_| "default".to_string());
+
+            notifications::spawn_notification_poller(
+                dashboard_url,
+                agent_id,
+                token_provider,
+                deployment_hash,
+                state.notification_store.clone(),
+                poll_interval,
+            );
+            info!("Notification poller spawned");
+        } else {
+            info!("Notification poller skipped (no AGENT_TOKEN configured)");
+        }
+    }
+
+    // Periodic cleanup of rate limiter, login limiter, replay protection, and expired sessions
+    {
+        let state_cleanup = state.clone();
+        let session_ttl = state.session_store.ttl();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                state_cleanup.rate_limiter.cleanup_stale().await;
+                state_cleanup.login_limiter.cleanup_stale().await;
+                state_cleanup.replay.cleanup_expired().await;
+                state_cleanup
+                    .session_store
+                    .cleanup_expired(session_ttl)
+                    .await;
+            }
+        });
+    }
 
     let app = create_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
 
@@ -1909,9 +2327,95 @@ pub async fn serve(config: Config, port: u16, with_ui: bool) -> Result<()> {
         info!("HTTP server in API-only mode starting on port {}", port);
     }
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let bind = std::env::var("STATUS_PANEL_BIND").ok();
+    let bind_addr = default_bind_address(bind);
+    let addr = SocketAddr::from((bind_addr, port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("HTTP server listening on {}", addr);
     axum::serve(listener, app).into_future().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use serde_json::Value;
+
+    fn test_state(control_plane: Option<&str>) -> SharedState {
+        Arc::new(AppState::new(
+            Arc::new(Config {
+                domain: None,
+                subdomains: None,
+                apps_info: None,
+                reqdata: crate::agent::config::ReqData {
+                    email: "ops@example.com".to_string(),
+                },
+                ssl: None,
+                compose_agent_enabled: false,
+                control_plane: control_plane.map(str::to_string),
+                firewall: None,
+            }),
+            false,
+            None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn health_includes_command_metrics() {
+        let state = test_state(Some("compose_agent"));
+        record_command_execution(&state, "compose_agent").await;
+
+        let response = health(State(state)).await.into_response();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("health body");
+        let payload: Value = serde_json::from_slice(&body).expect("health json");
+
+        assert_eq!(payload["command_metrics"]["compose_agent_count"], 1);
+        assert_eq!(payload["command_metrics"]["total_count"], 1);
+        assert_eq!(
+            payload["command_metrics"]["last_control_plane"],
+            Value::String("compose_agent".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn command_metrics_handler_returns_snapshot() {
+        let state = test_state(Some("status_panel"));
+        record_command_execution(&state, "status_panel").await;
+
+        let response = command_metrics_handler(State(state)).await.into_response();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("metrics body");
+        let payload: Value = serde_json::from_slice(&body).expect("metrics json");
+
+        assert_eq!(payload["status_panel_count"], 1);
+        assert_eq!(payload["compose_agent_count"], 0);
+        assert_eq!(payload["total_count"], 1);
+        assert_eq!(
+            payload["last_control_plane"],
+            Value::String("status_panel".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_include_pipe_operations() {
+        let state = test_state(Some("status_panel"));
+
+        let response = capabilities_handler(State(state)).await.into_response();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("capabilities body");
+        let payload: Value = serde_json::from_slice(&body).expect("capabilities json");
+        let features = payload["features"]
+            .as_array()
+            .expect("features should be an array");
+
+        assert!(features.contains(&Value::String("pipes".to_string())));
+        assert!(features.contains(&Value::String("activate_pipe".to_string())));
+        assert!(features.contains(&Value::String("deactivate_pipe".to_string())));
+        assert!(features.contains(&Value::String("trigger_pipe".to_string())));
+    }
 }

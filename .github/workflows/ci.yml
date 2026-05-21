@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - production
+      - dev
       - testing
     tags:
       - 'v*'
@@ -16,6 +17,8 @@ jobs:
   build-and-test:
     name: Build & Test (features=${{ matrix.features }})
     runs-on: ubuntu-latest
+    env:
+      CONFIG_FIXTURES_TOKEN: ${{ secrets.CONFIG_FIXTURES_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +27,30 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Checkout shared pipe fixtures repo
+        id: checkout_shared_fixtures
+        if: ${{ env.CONFIG_FIXTURES_TOKEN != '' }}
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: trydirect/config
+          ref: main
+          token: ${{ env.CONFIG_FIXTURES_TOKEN }}
+          path: config-fixtures-repo
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            shared-fixtures
+      - name: Shared pipe fixtures unavailable
+        if: ${{ env.CONFIG_FIXTURES_TOKEN == '' || steps.checkout_shared_fixtures.outcome != 'success' }}
+        run: |
+          echo "::notice::Shared pipe fixtures are unavailable for this workflow run; shared-fixture tests will be skipped."
+      - name: Link shared pipe fixtures
+        if: ${{ env.CONFIG_FIXTURES_TOKEN != '' && steps.checkout_shared_fixtures.outcome == 'success' }}
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/../config" "${GITHUB_WORKSPACE}/../shared-fixtures"
+          ln -sfn "${GITHUB_WORKSPACE}/config-fixtures-repo/shared-fixtures" "${GITHUB_WORKSPACE}/../shared-fixtures"
+          test -d "${GITHUB_WORKSPACE}/../shared-fixtures/pipe-contract"
 
       - name: Setup Rust toolchain (${{ matrix.rust }})
         uses: dtolnay/rust-toolchain@stable
@@ -178,6 +205,7 @@ jobs:
       github.ref == 'refs/heads/production' ||
       github.ref == 'refs/heads/master' ||
       github.ref == 'refs/heads/testing' ||
+      github.ref == 'refs/heads/dev' ||
       startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Checkout repository

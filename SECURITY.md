@@ -8,6 +8,47 @@ The project maintainers will then work with you to resolve any issues where requ
 
 ---
 
+## Authentication Hardening (v0.1.7+)
+
+### Credential Configuration
+
+The agent has **no default credentials**. Authentication is disabled until you explicitly configure:
+
+```bash
+STATUS_PANEL_USERNAME=your-username
+STATUS_PANEL_PASSWORD=your-strong-password
+```
+
+If these environment variables are not set:
+- Login returns `503 Service Unavailable`
+- A warning is logged on every login attempt
+- Run `status init` to generate a `.env` template
+
+### Agent ID Protection
+
+The `AGENT_ID` environment variable must be set to protect API endpoints (`/api/self/*`, `/api/v1/*`). When unset, these endpoints return `401 Unauthorized`.
+
+### Session Security
+
+- Sessions are stored in-memory with creation timestamps
+- `cleanup_expired(duration)` removes sessions older than the TTL
+- Logout invalidates the session server-side and clears the cookie
+- Cookies use `HttpOnly; Secure; SameSite=Strict` attributes
+- `Max-Age=0` is set on logout to prevent stale cookies
+
+### Bind Address
+
+The API server defaults to `127.0.0.1` (localhost only). To expose on all interfaces, explicitly pass `--bind 0.0.0.0`. This prevents accidental exposure on public networks.
+
+### Self-Update Integrity
+
+- Update downloads require HTTPS — HTTP URLs are rejected
+- SHA256 hash is computed on every download
+- If `UPDATE_EXPECTED_SHA256` is set, hash must match or the update fails
+- If not set, a warning is logged with the computed hash for manual verification
+
+---
+
 ## Vault Integration Security
 
 ### Token Rotation Best Practices

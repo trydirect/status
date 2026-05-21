@@ -32,4 +32,12 @@ impl ReplayProtection {
         map.insert(id.to_string(), now);
         Ok(())
     }
+
+    /// Remove all expired entries. Call periodically to bound memory.
+    pub async fn cleanup_expired(&self) {
+        let now = Instant::now();
+        let ttl = self.ttl;
+        let mut map = self.inner.lock().await;
+        map.retain(|_, &mut t| now.duration_since(t) < ttl);
+    }
 }

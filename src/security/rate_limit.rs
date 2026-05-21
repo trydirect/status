@@ -40,6 +40,22 @@ impl RateLimiter {
             false
         }
     }
+
+    /// Remove keys whose entries have all expired. Call periodically to bound memory.
+    pub async fn cleanup_stale(&self) {
+        let now = Instant::now();
+        let mut map = self.inner.lock().await;
+        map.retain(|_, deque| {
+            while let Some(&front) = deque.front() {
+                if now.duration_since(front) > self.window {
+                    deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+            !deque.is_empty()
+        });
+    }
 }
 
 #[cfg(test)]

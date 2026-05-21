@@ -699,6 +699,65 @@ pub async fn exec_in_container(name: &str, cmd: &str) -> Result<()> {
     }
 }
 
+/// Execute a command inside a container using an explicit argv (no shell interpretation).
+/// Each element in `argv` is passed directly to execve, preventing shell injection.
+pub async fn exec_in_container_argv(name: &str, argv: Vec<String>) -> Result<()> {
+    use bollard::exec::StartExecResults;
+    use futures_util::StreamExt;
+
+    let docker = docker_client()?;
+    let resolved_name = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+    let argv_display = argv.join(" ");
+    let exec = docker
+        .create_exec(
+            &resolved_name,
+            CreateExecOptions {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(false),
+                cmd: Some(argv),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("create exec")?;
+
+    let start = docker
+        .start_exec(&exec.id, None)
+        .await
+        .context("start exec")?;
+
+    let mut combined = String::new();
+    match start {
+        StartExecResults::Detached => {
+            debug!(container = name, command = %argv_display, "exec_argv detached");
+        }
+        StartExecResults::Attached { mut output, .. } => {
+            while let Some(item) = output.next().await {
+                match item {
+                    Ok(log) => combined.push_str(&format!("{}", log)),
+                    Err(e) => error!("exec output stream error: {}", e),
+                }
+            }
+        }
+    }
+
+    let info = docker
+        .inspect_exec(&exec.id)
+        .await
+        .context("inspect exec")?;
+    let exit_code = info.exit_code.unwrap_or_default();
+    if exit_code == 0 {
+        debug!(container = name, command = %argv_display, "exec_argv completed");
+        Ok(())
+    } else {
+        error!(container = name, command = %argv_display, exit_code, output = combined, "exec_argv failed");
+        Err(anyhow::anyhow!("exec failed with code {}", exit_code))
+    }
+}
+
 /// Execute a shell command inside a running container and return output.
 /// Returns (exit_code, stdout, stderr) tuple.
 pub async fn exec_in_container_with_output(name: &str, cmd: &str) -> Result<(i64, String, String)> {

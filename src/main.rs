@@ -7,7 +7,66 @@ use tracing::info;
 
 /// Application version from Cargo.toml
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const DISPLAY_VERSION: &str = env!("STATUS_DISPLAY_VERSION");
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
+
+/// Check that `path` points to a readable file. Prints a friendly error and
+/// exits if the file is missing, is not a regular file, or is not readable.
+fn ensure_config_file(path: &str) {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            // Verify readability
+            if let Err(err) = std::fs::File::open(path) {
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    eprintln!();
+                    eprintln!("  Config file is not readable: {path}");
+                    eprintln!();
+                    eprintln!("  Check the file permissions and try again.");
+                    eprintln!();
+                    std::process::exit(1);
+                }
+                eprintln!();
+                eprintln!("  Cannot open config file: {path}");
+                eprintln!("  Error: {err}");
+                eprintln!();
+                std::process::exit(1);
+            }
+        }
+        Ok(_) => {
+            eprintln!();
+            eprintln!("  Config path is not a regular file: {path}");
+            eprintln!();
+            eprintln!("  Run 'status init' to generate a default configuration,");
+            eprintln!("  or specify a valid file with --config <path>");
+            eprintln!();
+            std::process::exit(1);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!();
+            eprintln!("  Config file not found: {path}");
+            eprintln!();
+            eprintln!("  Run 'status init' to generate a default configuration,");
+            eprintln!("  or specify a custom path with --config <path>");
+            eprintln!();
+            std::process::exit(1);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!();
+            eprintln!("  Config file is not readable: {path}");
+            eprintln!();
+            eprintln!("  Check the file permissions and try again.");
+            eprintln!();
+            std::process::exit(1);
+        }
+        Err(err) => {
+            eprintln!();
+            eprintln!("  Cannot access config file: {path}");
+            eprintln!("  Error: {err}");
+            eprintln!();
+            std::process::exit(1);
+        }
+    }
+}
 
 /// Print startup banner with version and system info
 fn print_banner() {
@@ -103,7 +162,7 @@ fn print_banner() {
 }
 
 #[derive(Parser)]
-#[command(name = "status", version, about = "")]
+#[command(name = "status", version = DISPLAY_VERSION, about = "")]
 struct AppCli {
     /// Run in daemon mode (background)
     #[arg(long)]
@@ -120,6 +179,13 @@ struct AppCli {
     /// Subcommands
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+fn is_direct_version_request() -> bool {
+    matches!(
+        std::env::args().skip(1).collect::<Vec<_>>().as_slice(),
+        [flag] if flag == "--version" || flag == "-V"
+    )
 }
 
 #[derive(Subcommand)]
@@ -185,6 +251,12 @@ enum Commands {
         #[arg(long)]
         server: Option<String>,
     },
+    /// Generate default config.json and .env files in the current directory
+    Init {
+        /// Overwrite existing files
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -217,27 +289,31 @@ fn run_daemon() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if is_direct_version_request() {
+        println!("{}", DISPLAY_VERSION);
+        return Ok(());
+    }
+
     // Load environment variables from .env if present
     let _ = dotenv();
     utils::logging::init();
 
-    // Show startup banner
-    print_banner();
-
     let args = AppCli::parse();
+    print_banner();
     if args.daemon {
         run_daemon()?;
     }
 
     match args.command {
         Some(Commands::Serve { port, with_ui }) => {
+            ensure_config_file(&args.config);
             if with_ui {
                 info!("Starting local API server with UI on port {port}");
             } else {
                 info!("Starting local API server on port {port}");
             }
             let config = agent::config::Config::from_file(&args.config)?;
-            comms::local_api::serve(config, port, with_ui).await?;
+            comms::local_api::serve(config, &args.config, port, with_ui).await?;
         }
         #[cfg(feature = "docker")]
         Some(Commands::Containers) => {
@@ -400,8 +476,50 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Some(Commands::Init { force }) => {
+            // Derive output directory from --config path (defaults to current dir)
+            let config_path = std::path::Path::new(&args.config);
+            let dir = config_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| {
+                    std::env::current_dir().expect("could not determine current directory")
+                });
+            let result = agent::init::generate_default_config(&dir, force)?;
+
+            println!();
+            if result.config_created {
+                println!("  ✔ Created {}", result.config_path);
+            } else {
+                println!(
+                    "  • Skipped {} (already exists, use --force to overwrite)",
+                    result.config_path
+                );
+            }
+            if result.env_created {
+                println!("  ✔ Created {}", result.env_path);
+            } else {
+                println!(
+                    "  • Skipped {} (already exists, use --force to overwrite)",
+                    result.env_path
+                );
+            }
+
+            println!();
+            println!("Next steps:");
+            println!("  1. Edit config.json — set your domain and email");
+            println!("  2. Edit .env       — set AGENT_ID, AGENT_TOKEN, DASHBOARD_URL");
+            println!("  3. Run:  status                    # start daemon");
+            println!("     or:   status serve --port 5000  # start API server");
+            println!();
+            println!("  To register with Stacker:");
+            println!("     status register --purchase-token <TOKEN> --stack-id <ID>");
+            println!();
+        }
         None => {
             // Default: run the agent daemon
+            ensure_config_file(&args.config);
             if args.compose_mode {
                 info!("Starting compose-agent daemon mode");
                 // Set CONTROL_PLANE environment variable for identification

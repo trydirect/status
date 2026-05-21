@@ -8,6 +8,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::security::vault_client::NpmCredentials;
+
 /// Configuration for connecting to Nginx Proxy Manager
 #[derive(Debug, Clone)]
 pub struct NpmConfig {
@@ -19,14 +21,28 @@ pub struct NpmConfig {
     pub password: String,
 }
 
-impl Default for NpmConfig {
-    fn default() -> Self {
+impl NpmConfig {
+    pub fn new(host: String, email: String, password: String) -> Self {
         Self {
-            host: std::env::var("NPM_HOST")
-                .unwrap_or_else(|_| "http://nginx-proxy-manager:81".to_string()),
-            email: std::env::var("NPM_EMAIL").unwrap_or_else(|_| "admin@example.com".to_string()),
-            password: std::env::var("NPM_PASSWORD").unwrap_or_else(|_| "changeme".to_string()),
+            host,
+            email,
+            password,
         }
+    }
+
+    pub fn from_credentials(credentials: &NpmCredentials) -> Self {
+        Self::new(
+            credentials.host().to_string(),
+            credentials.email().to_string(),
+            credentials.password().to_string(),
+        )
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let host = std::env::var("NPM_HOST").ok()?;
+        let email = std::env::var("NPM_EMAIL").ok()?;
+        let password = std::env::var("NPM_PASSWORD").ok()?;
+        Some(Self::new(host, email, password))
     }
 }
 
@@ -54,6 +70,8 @@ pub struct ProxyHostResult {
     pub success: bool,
     pub proxy_host_id: Option<i64>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
     pub domain_names: Vec<String>,
     pub forward_host: String,
     pub forward_port: u16,
@@ -77,17 +95,13 @@ impl NpmClient {
     }
 
     /// Create a new NPM client with default configuration from environment
-    pub fn from_env() -> Self {
-        Self::new(NpmConfig::default())
+    pub fn from_env() -> Option<Self> {
+        NpmConfig::from_env().map(Self::new)
     }
 
     /// Create a new NPM client with custom host/credentials
     pub fn with_credentials(host: String, email: String, password: String) -> Self {
-        Self::new(NpmConfig {
-            host,
-            email,
-            password,
-        })
+        Self::new(NpmConfig::new(host, email, password))
     }
 
     /// Authenticate with NPM and store the token
@@ -110,8 +124,8 @@ impl NpmClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("NPM authentication failed: {} - {}", status, body);
+            let _ = response.text().await;
+            anyhow::bail!("NPM authentication failed with status {}", status);
         }
 
         let token_data: Value = response
@@ -152,6 +166,15 @@ impl NpmClient {
         } else {
             Value::Null
         };
+        let meta = if request.ssl_enabled {
+            json!({
+                "letsencrypt_agree": true,
+                "letsencrypt_email": self.config.email,
+                "dns_challenge": false
+            })
+        } else {
+            json!({})
+        };
 
         let payload = json!({
             "domain_names": request.domain_names,
@@ -164,10 +187,7 @@ impl NpmClient {
             "block_exploits": true,
             "allow_websocket_upgrade": true,
             "access_list_id": 0,
-            "meta": {
-                "letsencrypt_agree": true,
-                "dns_challenge": false
-            },
+            "meta": meta,
             "locations": []
         });
 
@@ -199,18 +219,24 @@ impl NpmClient {
                 success: true,
                 proxy_host_id,
                 message: "Proxy host created successfully".to_string(),
+                details: None,
                 domain_names: request.domain_names.clone(),
                 forward_host: request.forward_host.clone(),
                 forward_port: request.forward_port,
             })
         } else {
-            let message = format!("Failed to create proxy host: {} - {:?}", status, body);
-            tracing::error!(%message);
+            let details = npm_error_details(&body);
+            let message = match details.as_deref() {
+                Some(details) => format!("Failed to create proxy host: {} - {}", status, details),
+                None => format!("Failed to create proxy host: {}", status),
+            };
+            tracing::error!(%message, response_body = %body);
 
             Ok(ProxyHostResult {
                 success: false,
                 proxy_host_id: None,
                 message,
+                details,
                 domain_names: request.domain_names.clone(),
                 forward_host: request.forward_host.clone(),
                 forward_port: request.forward_port,
@@ -271,19 +297,21 @@ impl NpmClient {
                     success: true,
                     proxy_host_id: Some(host_id),
                     message: "Proxy host deleted successfully".to_string(),
+                    details: None,
                     domain_names: domain_names.to_vec(),
                     forward_host,
                     forward_port,
                 })
             } else {
                 let status = delete_response.status();
-                let body = delete_response.text().await.unwrap_or_default();
-                let message = format!("Failed to delete proxy host: {} - {}", status, body);
+                let _ = delete_response.text().await;
+                let message = format!("Failed to delete proxy host (status {})", status);
 
                 Ok(ProxyHostResult {
                     success: false,
                     proxy_host_id: Some(host_id),
                     message,
+                    details: None,
                     domain_names: domain_names.to_vec(),
                     forward_host,
                     forward_port,
@@ -297,6 +325,7 @@ impl NpmClient {
                 success: true,
                 proxy_host_id: None,
                 message: "No matching proxy host found (already deleted?)".to_string(),
+                details: None,
                 domain_names: domain_names.to_vec(),
                 forward_host: String::new(),
                 forward_port: 0,
@@ -336,14 +365,48 @@ impl NpmClient {
     }
 }
 
+fn npm_error_details(body: &Value) -> Option<String> {
+    body.get("error")
+        .and_then(|error| {
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| error.get("error").and_then(Value::as_str))
+                .or_else(|| error.get("detail").and_then(Value::as_str))
+        })
+        .or_else(|| body.get("message").and_then(Value::as_str))
+        .filter(|message| !message.trim().is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            if body.is_null() || body.as_object().map(|map| map.is_empty()).unwrap_or(false) {
+                None
+            } else {
+                Some(body.to_string())
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
 
     #[test]
-    fn test_npm_config_default() {
-        let config = NpmConfig::default();
-        assert!(config.host.contains("nginx-proxy-manager"));
+    fn test_npm_config_from_env_requires_all_values() {
+        std::env::remove_var("NPM_HOST");
+        std::env::remove_var("NPM_EMAIL");
+        std::env::remove_var("NPM_PASSWORD");
+
+        assert!(NpmConfig::from_env().is_none());
+
+        std::env::set_var("NPM_HOST", "http://npm.local");
+        std::env::set_var("NPM_EMAIL", "ops@example.com");
+        std::env::set_var("NPM_PASSWORD", "secret");
+
+        let config = NpmConfig::from_env().expect("env-backed config");
+        assert_eq!(config.host, "http://npm.local");
+        assert_eq!(config.email, "ops@example.com");
+        assert_eq!(config.password, "secret");
     }
 
     #[test]
@@ -360,5 +423,146 @@ mod tests {
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["forward_port"], 8080);
         assert_eq!(json["domain_names"][0], "example.com");
+    }
+
+    #[tokio::test]
+    async fn create_proxy_host_includes_letsencrypt_email() {
+        let mut server = Server::new_async().await;
+        let token_mock = server
+            .mock("POST", "/api/tokens")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"token":"token-123"}"#)
+            .create_async()
+            .await;
+        let create_mock = server
+            .mock("POST", "/api/nginx/proxy-hosts")
+            .match_header("authorization", "Bearer token-123")
+            .match_body(Matcher::PartialJson(json!({
+                "domain_names": ["app.example.com"],
+                "certificate_id": "new",
+                "meta": {
+                    "letsencrypt_email": "ops@example.com",
+                    "letsencrypt_agree": true,
+                    "dns_challenge": false
+                }
+            })))
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":7}"#)
+            .create_async()
+            .await;
+
+        let mut client = NpmClient::with_credentials(
+            server.url(),
+            "ops@example.com".to_string(),
+            "secret".to_string(),
+        );
+        let result = client
+            .create_proxy_host(&ProxyHostRequest {
+                domain_names: vec!["app.example.com".to_string()],
+                forward_host: "app".to_string(),
+                forward_port: 8080,
+                ssl_enabled: true,
+                ssl_forced: true,
+                http2_support: true,
+            })
+            .await
+            .expect("proxy host should be created");
+
+        assert!(result.success);
+        assert_eq!(result.proxy_host_id, Some(7));
+        token_mock.assert_async().await;
+        create_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_proxy_host_without_ssl_does_not_request_letsencrypt() {
+        let mut server = Server::new_async().await;
+        let _token_mock = server
+            .mock("POST", "/api/tokens")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"token":"token-123"}"#)
+            .create_async()
+            .await;
+        let create_mock = server
+            .mock("POST", "/api/nginx/proxy-hosts")
+            .match_body(Matcher::PartialJson(json!({
+                "domain_names": ["app.example.com"],
+                "certificate_id": null,
+                "ssl_forced": false,
+                "http2_support": false,
+                "meta": {}
+            })))
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":8}"#)
+            .create_async()
+            .await;
+
+        let mut client = NpmClient::with_credentials(
+            server.url(),
+            "ops@example.com".to_string(),
+            "secret".to_string(),
+        );
+        let result = client
+            .create_proxy_host(&ProxyHostRequest {
+                domain_names: vec!["app.example.com".to_string()],
+                forward_host: "app".to_string(),
+                forward_port: 8080,
+                ssl_enabled: false,
+                ssl_forced: false,
+                http2_support: false,
+            })
+            .await
+            .expect("plain HTTP proxy host should be created");
+
+        assert!(result.success);
+        assert_eq!(result.proxy_host_id, Some(8));
+        create_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_proxy_host_preserves_npm_error_detail() {
+        let mut server = Server::new_async().await;
+        let _token_mock = server
+            .mock("POST", "/api/tokens")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"token":"token-123"}"#)
+            .create_async()
+            .await;
+        let _create_mock = server
+            .mock("POST", "/api/nginx/proxy-hosts")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"message":"Internal Error"}}"#)
+            .create_async()
+            .await;
+
+        let mut client = NpmClient::with_credentials(
+            server.url(),
+            "ops@example.com".to_string(),
+            "secret".to_string(),
+        );
+        let result = client
+            .create_proxy_host(&ProxyHostRequest {
+                domain_names: vec!["app.example.com".to_string()],
+                forward_host: "app".to_string(),
+                forward_port: 8080,
+                ssl_enabled: true,
+                ssl_forced: true,
+                http2_support: true,
+            })
+            .await
+            .expect("NPM errors should be returned as operation results");
+
+        assert!(!result.success);
+        assert_eq!(result.details.as_deref(), Some("Internal Error"));
+        assert_eq!(
+            result.message,
+            "Failed to create proxy host: 500 Internal Server Error - Internal Error"
+        );
     }
 }

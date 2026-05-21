@@ -13,6 +13,8 @@ COMMAND_TIMEOUT_SECS=300
 ```
 
 > **Note:** The commands in this quick start target the agent's local Axum API (`/api/v1/commands/*`). When the agent polls the remote Stacker dashboard it calls the `/api/v1/agent/commands/*` endpoints and sends `Authorization: Bearer $AGENT_TOKEN` (for example `/api/v1/agent/commands/wait/{deployment_hash}`).
+>
+> **Transport split:** regular Status Panel commands still use the DB queue + HTTP long-polling path. AMQP/RabbitMQ belongs to the separate agent-executor pipe-step flow and is not the transport used for normal `health`, `logs`, `deploy_app`, or other dashboard commands.
 
 ## 2️⃣ Start the Agent
 
