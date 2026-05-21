@@ -1942,6 +1942,14 @@ fn resolve_container_name(app_code: &str, container: &Option<String>) -> String 
     trimmed(app_code)
 }
 
+#[cfg(feature = "docker")]
+async fn resolve_probe_container_name(app_code: &str, container: &Option<String>) -> String {
+    let requested_name = resolve_container_name(app_code, container);
+    docker::resolve_container_name(&requested_name)
+        .await
+        .unwrap_or(requested_name)
+}
+
 impl HealthCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
@@ -8444,7 +8452,7 @@ async fn handle_probe_endpoints(
         &data.app_code,
         "probe_endpoints",
     );
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_probe_container_name(&data.app_code, &data.container).await;
 
     let mut protocols_detected: Vec<String> = Vec::new();
     let mut endpoints: Vec<Value> = Vec::new();
@@ -10623,7 +10631,7 @@ mod probe_endpoints_command_tests {
         if let Some(StackerCommand::ProbeEndpoints(cmd)) = parsed {
             assert_eq!(cmd.app_code, "crm");
             assert_eq!(cmd.deployment_hash, "abc123");
-            assert_eq!(cmd.protocols, vec!["openapi", "rest"]);
+            assert_eq!(cmd.protocols, vec!["openapi", "html_forms", "rest"]);
             assert_eq!(cmd.probe_timeout, 5);
             assert!(cmd.container.is_none());
         } else {
@@ -10735,7 +10743,7 @@ mod probe_endpoints_command_tests {
         assert_eq!(normalized.deployment_hash, "abc123");
         assert_eq!(normalized.app_code, "crm");
         assert_eq!(normalized.container, Some("crm-web".to_string()));
-        assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
+        assert_eq!(normalized.protocols, vec!["openapi", "html_forms", "rest"]);
     }
 
     #[test]
@@ -10749,7 +10757,7 @@ mod probe_endpoints_command_tests {
             capture_samples: false,
         };
         let normalized = cmd.normalize();
-        assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
+        assert_eq!(normalized.protocols, vec!["openapi", "html_forms", "rest"]);
     }
 
     #[test]
@@ -10777,7 +10785,7 @@ mod probe_endpoints_command_tests {
             capture_samples: false,
         };
         let normalized = cmd.normalize();
-        assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
+        assert_eq!(normalized.protocols, vec!["openapi", "html_forms", "rest"]);
     }
 
     #[test]

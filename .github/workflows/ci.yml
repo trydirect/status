@@ -228,8 +228,8 @@ jobs:
         run: |
           REF_NAME="${GITHUB_REF#refs/*/}"
           TAGS="trydirect/status:${REF_NAME}\ntrydirect/status:${GITHUB_SHA::7}"
-          if [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
-            TAGS="${TAGS}\ntrydirect/status:latest"
+          if [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then
+            TAGS="${TAGS}\ntrydirect/status:unstable\ntrydirect/status:latest"
           fi
           echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
           echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
@@ -241,5 +241,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           file: Dockerfile.prod
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.vars.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

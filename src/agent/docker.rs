@@ -117,7 +117,7 @@ fn name_matches(container_name: &str, app_code: &str) -> bool {
     false
 }
 
-async fn resolve_container_name(name: &str) -> Result<String> {
+pub async fn resolve_container_name(name: &str) -> Result<String> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
@@ -901,6 +901,10 @@ mod tests {
         assert!(name_matches(
             "project-nginx_proxy_manager-1",
             "nginx_proxy_manager"
+        ));
+        assert!(name_matches(
+            "project-status-panel-web-1",
+            "status-panel-web"
         ));
     }
 }
