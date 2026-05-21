@@ -105,7 +105,7 @@ struct VaultNpmSecretEnvelope {
 
 #[derive(Debug, Deserialize, Default)]
 struct VaultNpmSecretPayload {
-    schema_version: Option<u32>,
+    schema_version: Option<serde_json::Value>,
     host: Option<String>,
     email: Option<String>,
     password: Option<String>,
@@ -637,7 +637,12 @@ impl VaultClient {
         payload: VaultNpmSecretPayload,
         path: &str,
     ) -> std::result::Result<NpmCredentials, NpmCredentialError> {
-        if payload.schema_version != Some(1) {
+        let schema_version_is_one = match payload.schema_version.as_ref() {
+            Some(serde_json::Value::Number(value)) => value.as_u64() == Some(1),
+            Some(serde_json::Value::String(value)) => value.trim() == "1",
+            _ => false,
+        };
+        if !schema_version_is_one {
             return Err(NpmCredentialError::InvalidPayload {
                 path: path.to_string(),
                 reason: "schema_version must be 1".to_string(),
@@ -1581,6 +1586,75 @@ mod tests {
         assert_eq!(credentials.host(), "http://nginx-proxy-manager:81");
         assert_eq!(credentials.email(), "admin@example.com");
         assert_eq!(credentials.password(), "secret");
+    }
+
+    #[tokio::test]
+    async fn fetch_npm_credentials_accepts_string_schema_version() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("STATUS_PANEL_NPM_CREDENTIAL_PATH");
+
+        let mut fixture = npm_fixture_payload();
+        fixture["schema_version"] = serde_json::Value::String("1".to_string());
+        let transport = Arc::new(StubTransport::new(vec![
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: r#"{"data":{"ttl":3600}}"#.to_string(),
+            },
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: serde_json::json!({
+                    "data": fixture
+                })
+                .to_string(),
+            },
+        ]));
+        let client = VaultClient::with_transport(
+            "http://vault.test".to_string(),
+            "token".to_string(),
+            "secret/base/status_panel".to_string(),
+            transport,
+        );
+
+        let credentials = client
+            .fetch_npm_credentials("server-123")
+            .await
+            .expect("credentials");
+
+        assert_eq!(credentials.host(), "http://nginx-proxy-manager:81");
+        assert_eq!(credentials.email(), "admin@example.com");
+        assert_eq!(credentials.password(), "secret");
+    }
+
+    #[tokio::test]
+    async fn fetch_npm_credentials_rejects_unsupported_string_schema_version() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("STATUS_PANEL_NPM_CREDENTIAL_PATH");
+
+        let mut fixture = npm_fixture_payload();
+        fixture["schema_version"] = serde_json::Value::String("2".to_string());
+        let transport: Arc<dyn VaultTransport> = Arc::new(StubTransport::new(vec![
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: r#"{"data":{"ttl":3600}}"#.to_string(),
+            },
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: serde_json::json!({ "data": fixture }).to_string(),
+            },
+        ]));
+        let client = VaultClient::with_transport(
+            "http://vault.test".to_string(),
+            "token".to_string(),
+            "secret/base/status_panel".to_string(),
+            transport,
+        );
+
+        let error = client
+            .fetch_npm_credentials("server-123")
+            .await
+            .expect_err("schema version validation");
+
+        assert!(matches!(error, NpmCredentialError::InvalidPayload { .. }));
     }
 
     #[tokio::test]
