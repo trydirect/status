@@ -8005,12 +8005,10 @@ async fn probe_http_body(
     path: &str,
     timeout_secs: u32,
 ) -> Option<(String, String)> {
-    if let Some(result) =
-        probe_http_body_from_agent(app_code, container_name, port, path, timeout_secs).await
-    {
-        return Some(result);
-    }
-    probe_http_body_from_container_exec(container_name, port, path, timeout_secs).await
+    execute_http_body_probe(container_name, app_code, port, path, timeout_secs)
+        .await
+        .response
+        .map(|response| (response.payload, response.base_url))
 }
 
 #[cfg(feature = "docker")]
@@ -8021,103 +8019,422 @@ async fn probe_http_status(
     path: &str,
     timeout_secs: u32,
 ) -> Option<(String, String)> {
-    if let Some(result) =
-        probe_http_status_from_agent(app_code, container_name, port, path, timeout_secs).await
-    {
-        return Some(result);
+    execute_http_status_probe(container_name, app_code, port, path, timeout_secs)
+        .await
+        .response
+        .map(|response| (response.payload, response.base_url))
+}
+
+#[cfg(any(feature = "docker", test))]
+fn probe_issue_for_protocol(protocol: &str) -> String {
+    match protocol {
+        "html_forms" => "No HTML forms detected on probed pages".to_string(),
+        "openapi" => "No OpenAPI specification discovered on probed URLs".to_string(),
+        "rest" => "No REST endpoints matched the HTTP status heuristic".to_string(),
+        other => format!("No {other} endpoints detected during probing"),
     }
-    probe_http_status_from_container_exec(container_name, port, path, timeout_secs).await
+}
+
+#[cfg(any(feature = "docker", test))]
+fn build_probe_result_payload(
+    deployment_hash: &str,
+    app_code: &str,
+    requested_protocols: &[String],
+    ports: &[u16],
+    container_requested: &str,
+    container_resolved: &str,
+    protocols_detected: Vec<String>,
+    endpoints: Vec<Value>,
+    forms: Vec<Value>,
+    observations: Vec<ProbeObservation>,
+) -> Value {
+    let issues = requested_protocols
+        .iter()
+        .filter(|protocol| !protocols_detected.contains(protocol))
+        .map(|protocol| probe_issue_for_protocol(protocol))
+        .collect::<Vec<_>>();
+
+    json!({
+        "type": "probe_endpoints",
+        "deployment_hash": deployment_hash,
+        "app_code": app_code,
+        "protocols_detected": protocols_detected,
+        "endpoints": endpoints,
+        "forms": forms,
+        "diagnostics": ProbeDiagnostics {
+            protocols_requested: requested_protocols.to_vec(),
+            ports_discovered: ports.to_vec(),
+            container_requested: container_requested.to_string(),
+            container_resolved: container_resolved.to_string(),
+            observations,
+            issues,
+        },
+        "probed_at": now_timestamp(),
+    })
 }
 
 #[cfg(feature = "docker")]
-async fn probe_http_body_from_agent(
+async fn execute_http_body_probe(
+    container_name: &str,
+    app_code: &str,
+    port: u16,
+    path: &str,
+    timeout_secs: u32,
+) -> HttpProbeExecution {
+    let mut execution =
+        execute_http_body_probe_from_agent(app_code, container_name, port, path, timeout_secs)
+            .await;
+    if execution.response.is_none() {
+        let container_execution =
+            execute_http_body_probe_from_container_exec(container_name, port, path, timeout_secs)
+                .await;
+        execution.attempts.extend(container_execution.attempts);
+        execution.response = container_execution.response;
+    }
+    execution
+}
+
+#[cfg(feature = "docker")]
+async fn execute_http_status_probe(
+    container_name: &str,
+    app_code: &str,
+    port: u16,
+    path: &str,
+    timeout_secs: u32,
+) -> HttpProbeExecution {
+    let mut execution =
+        execute_http_status_probe_from_agent(app_code, container_name, port, path, timeout_secs)
+            .await;
+    if execution.response.is_none() {
+        let container_execution =
+            execute_http_status_probe_from_container_exec(container_name, port, path, timeout_secs)
+                .await;
+        execution.attempts.extend(container_execution.attempts);
+        execution.response = container_execution.response;
+    }
+    execution
+}
+
+#[cfg(feature = "docker")]
+async fn execute_http_body_probe_from_agent(
     app_code: &str,
     container_name: &str,
     port: u16,
     path: &str,
     timeout_secs: u32,
-) -> Option<(String, String)> {
-    let client = probe_http_client(timeout_secs)?;
+) -> HttpProbeExecution {
+    let Some(client) = probe_http_client(timeout_secs) else {
+        return HttpProbeExecution {
+            response: None,
+            attempts: vec![ProbeAttempt {
+                transport: "agent_http".to_string(),
+                url: format!("probe://agent{}", path),
+                reported_url: None,
+                outcome: "client_error".to_string(),
+                status_code: None,
+                detail: Some("Failed to construct HTTP probe client".to_string()),
+            }],
+        };
+    };
+
+    let mut attempts = Vec::new();
     for base_url in http_probe_base_urls(app_code, container_name, port).await {
         let url = format!("{}{}", base_url.internal, path);
-        let Ok(response) = client.get(&url).send().await else {
-            continue;
+        let response = match client.get(&url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                attempts.push(ProbeAttempt {
+                    transport: "agent_http".to_string(),
+                    url,
+                    reported_url: Some(format!("{}{}", base_url.public, path)),
+                    outcome: "request_error".to_string(),
+                    status_code: None,
+                    detail: Some(error.to_string()),
+                });
+                continue;
+            }
         };
+        let status_code = response.status().as_u16();
         if !response.status().is_success() {
+            attempts.push(ProbeAttempt {
+                transport: "agent_http".to_string(),
+                url,
+                reported_url: Some(format!("{}{}", base_url.public, path)),
+                outcome: "http_status".to_string(),
+                status_code: Some(status_code),
+                detail: Some("Received non-success status".to_string()),
+            });
             continue;
         }
-        let Ok(body) = response.text().await else {
-            continue;
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                attempts.push(ProbeAttempt {
+                    transport: "agent_http".to_string(),
+                    url,
+                    reported_url: Some(format!("{}{}", base_url.public, path)),
+                    outcome: "body_read_error".to_string(),
+                    status_code: Some(status_code),
+                    detail: Some(error.to_string()),
+                });
+                continue;
+            }
         };
         if !body.trim().is_empty() {
-            return Some((body, base_url.public));
+            attempts.push(ProbeAttempt {
+                transport: "agent_http".to_string(),
+                url,
+                reported_url: Some(format!("{}{}", base_url.public, path)),
+                outcome: "success".to_string(),
+                status_code: Some(status_code),
+                detail: None,
+            });
+            return HttpProbeExecution {
+                response: Some(ProbeResponse {
+                    payload: body,
+                    base_url: base_url.public,
+                }),
+                attempts,
+            };
         }
+        attempts.push(ProbeAttempt {
+            transport: "agent_http".to_string(),
+            url,
+            reported_url: Some(format!("{}{}", base_url.public, path)),
+            outcome: "empty_body".to_string(),
+            status_code: Some(status_code),
+            detail: Some("Received empty response body".to_string()),
+        });
     }
-    None
+    HttpProbeExecution {
+        response: None,
+        attempts,
+    }
 }
 
 #[cfg(feature = "docker")]
-async fn probe_http_status_from_agent(
+async fn execute_http_status_probe_from_agent(
     app_code: &str,
     container_name: &str,
     port: u16,
     path: &str,
     timeout_secs: u32,
-) -> Option<(String, String)> {
-    let client = probe_http_client(timeout_secs)?;
+) -> HttpProbeExecution {
+    let Some(client) = probe_http_client(timeout_secs) else {
+        return HttpProbeExecution {
+            response: None,
+            attempts: vec![ProbeAttempt {
+                transport: "agent_http".to_string(),
+                url: format!("probe://agent{}", path),
+                reported_url: None,
+                outcome: "client_error".to_string(),
+                status_code: None,
+                detail: Some("Failed to construct HTTP probe client".to_string()),
+            }],
+        };
+    };
+
+    let mut attempts = Vec::new();
     for base_url in http_probe_base_urls(app_code, container_name, port).await {
         let url = format!("{}{}", base_url.internal, path);
-        let Ok(response) = client.get(&url).send().await else {
-            continue;
+        let response = match client.get(&url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                attempts.push(ProbeAttempt {
+                    transport: "agent_http".to_string(),
+                    url,
+                    reported_url: Some(format!("{}{}", base_url.public, path)),
+                    outcome: "request_error".to_string(),
+                    status_code: None,
+                    detail: Some(error.to_string()),
+                });
+                continue;
+            }
         };
-        return Some((response.status().as_u16().to_string(), base_url.public));
+        let status_code = response.status().as_u16();
+        attempts.push(ProbeAttempt {
+            transport: "agent_http".to_string(),
+            url,
+            reported_url: Some(format!("{}{}", base_url.public, path)),
+            outcome: "response_received".to_string(),
+            status_code: Some(status_code),
+            detail: None,
+        });
+        return HttpProbeExecution {
+            response: Some(ProbeResponse {
+                payload: status_code.to_string(),
+                base_url: base_url.public,
+            }),
+            attempts,
+        };
     }
-    None
+    HttpProbeExecution {
+        response: None,
+        attempts,
+    }
 }
 
 #[cfg(feature = "docker")]
-async fn probe_http_body_from_container_exec(
+async fn execute_http_body_probe_from_container_exec(
     container_name: &str,
     port: u16,
     path: &str,
     timeout_secs: u32,
-) -> Option<(String, String)> {
-    let command =
-        build_http_body_probe_command(&format!("http://localhost:{}{}", port, path), timeout_secs);
-    let Ok(Ok((0, stdout, _))) = tokio::time::timeout(
+) -> HttpProbeExecution {
+    let url = format!("http://localhost:{}{}", port, path);
+    let reported_url = format!("http://{}:{}{}", container_name, port, path);
+    let command = build_http_body_probe_command(&url, timeout_secs);
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs((timeout_secs + 2) as u64),
         docker::exec_in_container_with_output(container_name, &command),
     )
-    .await
-    else {
-        return None;
+    .await;
+    let probe_result = match result {
+        Ok(Ok(probe_result)) => probe_result,
+        Ok(Err(error)) => {
+            return HttpProbeExecution {
+                response: None,
+                attempts: vec![ProbeAttempt {
+                    transport: "container_exec".to_string(),
+                    url,
+                    reported_url: Some(reported_url),
+                    outcome: "exec_error".to_string(),
+                    status_code: None,
+                    detail: Some(error.to_string()),
+                }],
+            };
+        }
+        Err(_) => {
+            return HttpProbeExecution {
+                response: None,
+                attempts: vec![ProbeAttempt {
+                    transport: "container_exec".to_string(),
+                    url,
+                    reported_url: Some(reported_url),
+                    outcome: "timeout".to_string(),
+                    status_code: None,
+                    detail: Some("Container exec probe timed out".to_string()),
+                }],
+            };
+        }
     };
+    let (exit_code, stdout, stderr) = probe_result;
+    if exit_code != 0 {
+        return HttpProbeExecution {
+            response: None,
+            attempts: vec![ProbeAttempt {
+                transport: "container_exec".to_string(),
+                url,
+                reported_url: Some(reported_url),
+                outcome: "exec_error".to_string(),
+                status_code: None,
+                detail: Some(format!("curl exited with code {exit_code}: {stderr}")),
+            }],
+        };
+    }
     if stdout.trim().is_empty() {
-        return None;
+        return HttpProbeExecution {
+            response: None,
+            attempts: vec![ProbeAttempt {
+                transport: "container_exec".to_string(),
+                url,
+                reported_url: Some(reported_url),
+                outcome: "empty_body".to_string(),
+                status_code: Some(200),
+                detail: Some("Received empty response body".to_string()),
+            }],
+        };
     }
-    Some((stdout, format!("http://{}:{}", container_name, port)))
+    HttpProbeExecution {
+        response: Some(ProbeResponse {
+            payload: stdout,
+            base_url: format!("http://{}:{}", container_name, port),
+        }),
+        attempts: vec![ProbeAttempt {
+            transport: "container_exec".to_string(),
+            url,
+            reported_url: Some(reported_url),
+            outcome: "success".to_string(),
+            status_code: Some(200),
+            detail: None,
+        }],
+    }
 }
 
 #[cfg(feature = "docker")]
-async fn probe_http_status_from_container_exec(
+async fn execute_http_status_probe_from_container_exec(
     container_name: &str,
     port: u16,
     path: &str,
     timeout_secs: u32,
-) -> Option<(String, String)> {
-    let command = build_http_status_probe_command(
-        &format!("http://localhost:{}{}", port, path),
-        timeout_secs,
-    );
-    let Ok(Ok((0, stdout, _))) = tokio::time::timeout(
+) -> HttpProbeExecution {
+    let url = format!("http://localhost:{}{}", port, path);
+    let reported_url = format!("http://{}:{}{}", container_name, port, path);
+    let command = build_http_status_probe_command(&url, timeout_secs);
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs((timeout_secs + 2) as u64),
         docker::exec_in_container_with_output(container_name, &command),
     )
-    .await
-    else {
-        return None;
+    .await;
+    let probe_result = match result {
+        Ok(Ok(probe_result)) => probe_result,
+        Ok(Err(error)) => {
+            return HttpProbeExecution {
+                response: None,
+                attempts: vec![ProbeAttempt {
+                    transport: "container_exec".to_string(),
+                    url,
+                    reported_url: Some(reported_url),
+                    outcome: "exec_error".to_string(),
+                    status_code: None,
+                    detail: Some(error.to_string()),
+                }],
+            };
+        }
+        Err(_) => {
+            return HttpProbeExecution {
+                response: None,
+                attempts: vec![ProbeAttempt {
+                    transport: "container_exec".to_string(),
+                    url,
+                    reported_url: Some(reported_url),
+                    outcome: "timeout".to_string(),
+                    status_code: None,
+                    detail: Some("Container exec probe timed out".to_string()),
+                }],
+            };
+        }
     };
-    Some((stdout, format!("http://{}:{}", container_name, port)))
+    let (exit_code, stdout, stderr) = probe_result;
+    if exit_code != 0 {
+        return HttpProbeExecution {
+            response: None,
+            attempts: vec![ProbeAttempt {
+                transport: "container_exec".to_string(),
+                url,
+                reported_url: Some(reported_url),
+                outcome: "exec_error".to_string(),
+                status_code: None,
+                detail: Some(format!("curl exited with code {exit_code}: {stderr}")),
+            }],
+        };
+    }
+
+    let status_code = stdout.trim().parse::<u16>().ok();
+    HttpProbeExecution {
+        response: Some(ProbeResponse {
+            payload: stdout,
+            base_url: format!("http://{}:{}", container_name, port),
+        }),
+        attempts: vec![ProbeAttempt {
+            transport: "container_exec".to_string(),
+            url,
+            reported_url: Some(reported_url),
+            outcome: "response_received".to_string(),
+            status_code,
+            detail: None,
+        }],
+    }
 }
 
 #[cfg(feature = "docker")]
@@ -8384,6 +8701,124 @@ fn resolve_ref<'a>(spec: &'a Value, ref_path: &str) -> Option<&'a Value> {
 }
 
 #[cfg(any(feature = "docker", test))]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct HtmlFormFieldBuckets {
+    fields: Vec<String>,
+    hidden_fields: Vec<String>,
+    framework_hidden_fields: Vec<String>,
+    all_fields: Vec<String>,
+}
+
+#[cfg(any(feature = "docker", test))]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProbeAttempt {
+    transport: String,
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reported_url: Option<String>,
+    outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+#[cfg(any(feature = "docker", test))]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProbeObservation {
+    protocol: String,
+    port: u16,
+    path: String,
+    detected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    attempts: Vec<ProbeAttempt>,
+}
+
+#[cfg(any(feature = "docker", test))]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProbeDiagnostics {
+    protocols_requested: Vec<String>,
+    ports_discovered: Vec<u16>,
+    container_requested: String,
+    container_resolved: String,
+    observations: Vec<ProbeObservation>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    issues: Vec<String>,
+}
+
+#[cfg(any(feature = "docker", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProbeResponse {
+    payload: String,
+    base_url: String,
+}
+
+#[cfg(any(feature = "docker", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpProbeExecution {
+    response: Option<ProbeResponse>,
+    attempts: Vec<ProbeAttempt>,
+}
+
+#[cfg(any(feature = "docker", test))]
+fn push_unique_field(field_names: &mut Vec<String>, name: String) {
+    if !field_names.contains(&name) {
+        field_names.push(name);
+    }
+}
+
+#[cfg(any(feature = "docker", test))]
+fn extract_form_field_buckets(body: &str) -> HtmlFormFieldBuckets {
+    let control_re = regex::Regex::new(r#"(?is)<(input|textarea|select)\b([^>]*)>"#).unwrap();
+    let attr_re = regex::Regex::new(r#"(?i)(name|type)\s*=\s*["']([^"']*)["']"#).unwrap();
+
+    let mut fields = Vec::new();
+    let mut hidden_fields = Vec::new();
+    let mut framework_hidden_fields = Vec::new();
+    let mut all_fields = Vec::new();
+
+    for control_cap in control_re.captures_iter(body) {
+        let tag_name = control_cap[1].to_lowercase();
+        let attrs = &control_cap[2];
+
+        let mut name = None;
+        let mut input_type = String::new();
+        for attr_cap in attr_re.captures_iter(attrs) {
+            match attr_cap[1].to_lowercase().as_str() {
+                "name" => name = Some(attr_cap[2].to_string()),
+                "type" => input_type = attr_cap[2].to_lowercase(),
+                _ => {}
+            }
+        }
+
+        let Some(name) = name else {
+            continue;
+        };
+
+        push_unique_field(&mut all_fields, name.clone());
+
+        let is_hidden_input = tag_name == "input" && input_type == "hidden";
+        if is_hidden_input {
+            push_unique_field(&mut hidden_fields, name.clone());
+            if name.starts_with("$ACTION_") {
+                push_unique_field(&mut framework_hidden_fields, name);
+            }
+            continue;
+        }
+
+        push_unique_field(&mut fields, name);
+    }
+
+    HtmlFormFieldBuckets {
+        fields,
+        hidden_fields,
+        framework_hidden_fields,
+        all_fields,
+    }
+}
+
+#[cfg(any(feature = "docker", test))]
 fn extract_html_forms(html: &str, page_path: &str) -> Vec<Value> {
     let mut forms = Vec::new();
 
@@ -8391,10 +8826,6 @@ fn extract_html_forms(html: &str, page_path: &str) -> Vec<Value> {
     let form_re = regex::Regex::new(r"(?is)<form([^>]*)>(.*?)</form>").unwrap();
     let attr_re =
         regex::Regex::new(r#"(?i)(id|name|action|method)\s*=\s*["']([^"']*)["']"#).unwrap();
-    let input_re = regex::Regex::new(
-        r#"(?i)<(?:input|textarea|select)[^>]*name\s*=\s*["']([^"']*)["'][^>]*>"#,
-    )
-    .unwrap();
 
     for form_match in form_re.captures_iter(html) {
         let attrs_str = &form_match[1];
@@ -8416,24 +8847,26 @@ fn extract_html_forms(html: &str, page_path: &str) -> Vec<Value> {
             }
         }
 
-        let mut field_names: Vec<String> = Vec::new();
-        for input_cap in input_re.captures_iter(body_str) {
-            let name = input_cap[1].to_string();
-            if !field_names.contains(&name) {
-                field_names.push(name);
-            }
-        }
+        let field_buckets = extract_form_field_buckets(body_str);
 
         if id.is_empty() {
-            id = format!("form_{}", page_path.trim_start_matches('/'));
+            let normalized_path = page_path.trim_matches('/');
+            id = if normalized_path.is_empty() {
+                "form_root".to_string()
+            } else {
+                format!("form_{}", normalized_path)
+            };
         }
 
-        if !field_names.is_empty() || method == "POST" {
+        if !field_buckets.fields.is_empty() || method == "POST" {
             forms.push(json!({
                 "id": id,
                 "action": action,
                 "method": method,
-                "fields": field_names,
+                "fields": field_buckets.fields,
+                "hidden_fields": field_buckets.hidden_fields,
+                "framework_hidden_fields": field_buckets.framework_hidden_fields,
+                "all_fields": field_buckets.all_fields,
             }));
         }
     }
@@ -8452,11 +8885,13 @@ async fn handle_probe_endpoints(
         &data.app_code,
         "probe_endpoints",
     );
+    let requested_container = resolve_container_name(&data.app_code, &data.container);
     let target_name = resolve_probe_container_name(&data.app_code, &data.container).await;
 
     let mut protocols_detected: Vec<String> = Vec::new();
     let mut endpoints: Vec<Value> = Vec::new();
     let mut forms: Vec<Value> = Vec::new();
+    let mut observations: Vec<ProbeObservation> = Vec::new();
 
     // Get container ports via docker inspect
     let ports = match get_container_ports(&target_name).await {
@@ -8488,15 +8923,20 @@ async fn handle_probe_endpoints(
 
         for port in &ports {
             for path in &openapi_paths {
-                if let Some((stdout, base_url)) = probe_http_body(
+                let probe = execute_http_body_probe(
                     &target_name,
                     &data.app_code,
                     *port,
                     path,
                     data.probe_timeout,
                 )
-                .await
-                {
+                .await;
+                let mut detected = false;
+                let mut detail = None;
+
+                if let Some(response) = probe.response {
+                    let stdout = response.payload;
+                    let base_url = response.base_url;
                     if !stdout.trim().is_empty() {
                         if let Ok(spec) = serde_json::from_str::<Value>(&stdout) {
                             if spec.get("openapi").is_some() || spec.get("swagger").is_some() {
@@ -8511,10 +8951,29 @@ async fn handle_probe_endpoints(
                                     "spec_url": path,
                                     "operations": operations,
                                 }));
+                                detected = true;
+                            } else {
+                                detail = Some(
+                                    "Response was JSON but not an OpenAPI/Swagger document"
+                                        .to_string(),
+                                );
                             }
+                        } else {
+                            detail = Some("Response body was not valid JSON".to_string());
                         }
                     }
+                } else {
+                    detail = Some("No successful HTTP response body received".to_string());
                 }
+
+                observations.push(ProbeObservation {
+                    protocol: "openapi".to_string(),
+                    port: *port,
+                    path: path.to_string(),
+                    detected,
+                    detail,
+                    attempts: probe.attempts,
+                });
             }
         }
     }
@@ -8524,15 +8983,19 @@ async fn handle_probe_endpoints(
         let form_paths = ["/", "/contact", "/register", "/login", "/signup"];
         for port in &ports {
             for path in &form_paths {
-                if let Some((stdout, _)) = probe_http_body(
+                let probe = execute_http_body_probe(
                     &target_name,
                     &data.app_code,
                     *port,
                     path,
                     data.probe_timeout,
                 )
-                .await
-                {
+                .await;
+                let mut detected = false;
+                let mut detail = None;
+
+                if let Some(response) = probe.response {
+                    let stdout = response.payload;
                     if !stdout.trim().is_empty() {
                         let mut found_forms = extract_html_forms(&stdout, path);
                         if !found_forms.is_empty() {
@@ -8543,9 +9006,24 @@ async fn handle_probe_endpoints(
                                 form["container"] = json!(target_name);
                             }
                             forms.extend(found_forms);
+                            detected = true;
+                        } else {
+                            detail =
+                                Some("HTML response contained no detectable forms".to_string());
                         }
                     }
+                } else {
+                    detail = Some("No successful HTTP response body received".to_string());
                 }
+
+                observations.push(ProbeObservation {
+                    protocol: "html_forms".to_string(),
+                    port: *port,
+                    path: path.to_string(),
+                    detected,
+                    detail,
+                    attempts: probe.attempts,
+                });
             }
         }
     }
@@ -8555,15 +9033,20 @@ async fn handle_probe_endpoints(
         let rest_paths = ["/api", "/api/v1", "/api/v2"];
         for port in &ports {
             for path in &rest_paths {
-                if let Some((code, base_url)) = probe_http_status(
+                let probe = execute_http_status_probe(
                     &target_name,
                     &data.app_code,
                     *port,
                     path,
                     data.probe_timeout,
                 )
-                .await
-                {
+                .await;
+                let mut detected = false;
+                let mut detail = None;
+
+                if let Some(response) = probe.response {
+                    let code = response.payload;
+                    let base_url = response.base_url;
                     let code = code.trim();
                     if code == "200" || code == "401" || code == "403" {
                         if !protocols_detected.contains(&"rest".to_string()) {
@@ -8606,21 +9089,40 @@ async fn handle_probe_endpoints(
                         }
 
                         endpoints.push(ep);
+                        detected = true;
+                    } else {
+                        detail = Some(format!(
+                            "HTTP status {code} did not match the REST heuristic"
+                        ));
                     }
+                } else {
+                    detail = Some("No HTTP status response received".to_string());
                 }
+
+                observations.push(ProbeObservation {
+                    protocol: "rest".to_string(),
+                    port: *port,
+                    path: path.to_string(),
+                    detected,
+                    detail,
+                    attempts: probe.attempts,
+                });
             }
         }
     }
 
-    result.result = Some(json!({
-        "type": "probe_endpoints",
-        "deployment_hash": data.deployment_hash,
-        "app_code": data.app_code,
-        "protocols_detected": protocols_detected,
-        "endpoints": endpoints,
-        "forms": forms,
-        "probed_at": now_timestamp(),
-    }));
+    result.result = Some(build_probe_result_payload(
+        &data.deployment_hash,
+        &data.app_code,
+        &data.protocols,
+        &ports,
+        &requested_container,
+        &target_name,
+        protocols_detected,
+        endpoints,
+        forms,
+        observations,
+    ));
 
     Ok(result)
 }
@@ -11513,6 +12015,13 @@ mod probe_endpoints_command_tests {
             .map(|f| f.as_str().unwrap().to_string())
             .collect();
         assert_eq!(fields, vec!["email", "name"]);
+        let hidden_fields: Vec<String> = forms[0]["hidden_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(hidden_fields, vec!["email"]);
     }
 
     #[test]
@@ -11553,6 +12062,48 @@ mod probe_endpoints_command_tests {
     }
 
     #[test]
+    fn extract_html_forms_separates_next_server_action_hidden_fields() {
+        let html = r#"
+            <form id="contact-form" action="" method="POST">
+                <input type="hidden" name="$ACTION_REF_1" value="" />
+                <input type="hidden" name="$ACTION_KEY" value="" />
+                <input type="hidden" name="csrf_token" value="secret" />
+                <input name="name" type="text" />
+                <input name="email" type="email" />
+                <input name="subject" type="text" />
+                <textarea name="message"></textarea>
+            </form>
+        "#;
+
+        let forms = extract_html_forms(html, "/contact");
+        assert_eq!(forms.len(), 1);
+        assert_eq!(
+            forms[0]["fields"],
+            json!(["name", "email", "subject", "message"])
+        );
+        assert_eq!(
+            forms[0]["hidden_fields"],
+            json!(["$ACTION_REF_1", "$ACTION_KEY", "csrf_token"])
+        );
+        assert_eq!(
+            forms[0]["framework_hidden_fields"],
+            json!(["$ACTION_REF_1", "$ACTION_KEY"])
+        );
+        assert_eq!(
+            forms[0]["all_fields"],
+            json!([
+                "$ACTION_REF_1",
+                "$ACTION_KEY",
+                "csrf_token",
+                "name",
+                "email",
+                "subject",
+                "message"
+            ])
+        );
+    }
+
+    #[test]
     fn extract_html_forms_get_with_no_fields_excluded() {
         let html = r#"
             <form action="/noop" method="GET">
@@ -11561,6 +12112,84 @@ mod probe_endpoints_command_tests {
 
         let forms = extract_html_forms(html, "/");
         assert!(forms.is_empty());
+    }
+
+    #[test]
+    fn build_probe_result_payload_includes_structured_diagnostics() {
+        let payload = build_probe_result_payload(
+            "dep-123",
+            "status-panel-web",
+            &["html_forms".to_string(), "rest".to_string()],
+            &[3000],
+            "status-panel-web",
+            "status-panel-web-1",
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                ProbeObservation {
+                    protocol: "html_forms".to_string(),
+                    port: 3000,
+                    path: "/contact".to_string(),
+                    detected: false,
+                    detail: Some("HTML response contained no detectable forms".to_string()),
+                    attempts: vec![ProbeAttempt {
+                        transport: "agent_http".to_string(),
+                        url: "http://status-panel-web-1:3000/contact".to_string(),
+                        reported_url: Some("http://status-panel-web:3000/contact".to_string()),
+                        outcome: "success".to_string(),
+                        status_code: Some(200),
+                        detail: None,
+                    }],
+                },
+                ProbeObservation {
+                    protocol: "rest".to_string(),
+                    port: 3000,
+                    path: "/api".to_string(),
+                    detected: false,
+                    detail: Some("HTTP status 404 did not match the REST heuristic".to_string()),
+                    attempts: vec![ProbeAttempt {
+                        transport: "agent_http".to_string(),
+                        url: "http://status-panel-web-1:3000/api".to_string(),
+                        reported_url: Some("http://status-panel-web:3000/api".to_string()),
+                        outcome: "response_received".to_string(),
+                        status_code: Some(404),
+                        detail: None,
+                    }],
+                },
+            ],
+        );
+
+        assert_eq!(payload["type"], "probe_endpoints");
+        assert_eq!(payload["protocols_detected"], json!([]));
+        assert_eq!(
+            payload["diagnostics"]["protocols_requested"],
+            json!(["html_forms", "rest"])
+        );
+        assert_eq!(payload["diagnostics"]["ports_discovered"], json!([3000]));
+        assert_eq!(
+            payload["diagnostics"]["container_requested"],
+            "status-panel-web"
+        );
+        assert_eq!(
+            payload["diagnostics"]["container_resolved"],
+            "status-panel-web-1"
+        );
+        assert_eq!(
+            payload["diagnostics"]["observations"][0]["attempts"][0]["reported_url"],
+            "http://status-panel-web:3000/contact"
+        );
+        assert_eq!(
+            payload["diagnostics"]["observations"][1]["detail"],
+            "HTTP status 404 did not match the REST heuristic"
+        );
+        assert_eq!(
+            payload["diagnostics"]["issues"],
+            json!([
+                "No HTML forms detected on probed pages",
+                "No REST endpoints matched the HTTP status heuristic"
+            ])
+        );
     }
 
     // ==================== RESOLVE_REF TESTS ====================

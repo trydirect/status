@@ -16,10 +16,19 @@ services:
   smtp:
     image: trydirect/smtp
     ports:
-    - 1025:1025
-    - 8025:8025
+     - "127.0.0.1:1025:25"
+    environment:
+      PORT: "25"
+      #RELAY_NETWORKS: ":127.0.0.0/8:10.0.0.0/8:172.16.0.0/12:192.168.0.0/16"
+      MAILNAME: "stacker.local"
+      SMARTHOST_ADDRESS: ${SMTP_RELAY_HOST}
+      SMARTHOST_PORT: ${SMTP_RELAY_PORT}
+      SMARTHOST_USER: ${SMTP_RELAY_USER}
+      SMARTHOST_PASSWORD: ${SMTP_RELAY_PASSWORD}
+      SMARTHOST_ALIASES: ${SMTP_RELAY_ALIASES}
+      RELAY_NETWORKS: ":0.0.0.0/0"
     volumes:
-    - smtp_data:/data
+     - smtp_data:/data
     restart: unless-stopped
 volumes:
   smtp_data:
