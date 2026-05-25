@@ -6,6 +6,11 @@ use lapin::{
     types::FieldTable,
     Connection, ConnectionProperties,
 };
+use pipe_adapter_mail::{ImapSourceAdapter, Pop3SourceAdapter, SmtpTargetAdapter};
+use pipe_adapter_sdk::{
+    PipeAdapterDispatch, PipeAdapterPayload, PipeAdapterReference, PipeSourceAdapter,
+    PipeTargetAdapter,
+};
 #[cfg(feature = "docker")]
 use regex::Regex;
 use serde::Deserialize;
@@ -87,10 +92,12 @@ mod trigger_pipe_handler_tests {
         let data = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            source_adapter: None,
             input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: Some(server.url()),
             target_container: None,
             target_endpoint: "/webhook/pipe".into(),
@@ -124,10 +131,12 @@ mod trigger_pipe_handler_tests {
         let data = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            source_adapter: None,
             input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: None,
             target_container: None,
             target_endpoint: "/webhook/pipe".into(),
@@ -145,6 +154,67 @@ mod trigger_pipe_handler_tests {
             result.error.as_deref(),
             Some("trigger_pipe requires target_url or target_container")
         );
+    }
+
+    #[test]
+    fn source_adapter_dispatch_payload_serializes_mail_message() {
+        let value = source_adapter_dispatch_payload_to_input(PipeAdapterDispatch {
+            adapter: PipeAdapterReference::new("imap"),
+            payload: PipeAdapterPayload::MailMessage(Box::new(
+                pipe_adapter_sdk::NormalizedMailMessage {
+                    subject: Some("Incident opened".to_string()),
+                    body: pipe_adapter_sdk::NormalizedMailBody {
+                        text: Some("CPU usage exceeded threshold".to_string()),
+                        html: None,
+                    },
+                    ..Default::default()
+                },
+            )),
+        })
+        .expect("mail message should serialize");
+
+        assert_eq!(value["subject"], "Incident opened");
+        assert_eq!(value["body"]["text"], "CPU usage exceeded threshold");
+    }
+
+    #[tokio::test]
+    async fn handle_trigger_pipe_reports_smtp_adapter_failures_with_transport_context() {
+        let agent_cmd = make_trigger_agent_command();
+        let pipe_runtime = PipeRuntime::new();
+        let data = TriggerPipeCommand {
+            deployment_hash: "dep-123".into(),
+            pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            source_adapter: None,
+            input_data: Some(json!({ "subject": "Deployment ready", "body_text": "done" })),
+            source_container: None,
+            source_endpoint: "/".into(),
+            source_method: "GET".into(),
+            target_adapter: Some(PipeAdapterReference::new("smtp").with_config(json!({
+                "host": "smtp.example.com",
+                "from": "noreply@example.com"
+            }))),
+            target_url: None,
+            target_container: None,
+            target_endpoint: "/".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({})),
+            trigger_type: "manual".into(),
+        };
+
+        let result = handle_trigger_pipe(&agent_cmd, &data, &pipe_runtime)
+            .await
+            .expect("trigger_pipe should return structured smtp failure");
+
+        assert_eq!(result.status, "failed");
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("smtp adapter requires at least one recipient address"));
+        let body = result.result.expect("result body");
+        assert_eq!(body["target_response"]["transport"], "smtp");
+        assert_eq!(body["target_response"]["adapter"], "smtp");
+        assert_eq!(body["target_response"]["delivered"], false);
     }
 
     #[test]
@@ -232,10 +302,12 @@ mod trigger_pipe_handler_tests {
         let data = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "11111111-1111-1111-1111-111111111111".into(),
+            source_adapter: None,
             input_data: None,
             source_container: None,
             source_endpoint: "/source/data".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: None,
             target_container: Some("target-app".into()),
             target_endpoint: "/webhook/pipe".into(),
@@ -263,10 +335,12 @@ mod trigger_pipe_handler_tests {
         let data = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "pipe-ws-1".into(),
+            source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: Some("ws://127.0.0.1:19999".into()),
             target_container: None,
             target_endpoint: "/ws-target".into(),
@@ -299,10 +373,12 @@ mod trigger_pipe_handler_tests {
         let data = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "pipe-grpc-1".into(),
+            source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: Some("grpc://127.0.0.1:19998".into()),
             target_container: None,
             target_endpoint: "/grpc-target".into(),
@@ -335,10 +411,12 @@ mod trigger_pipe_handler_tests {
         let data = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "pipe-grpcs-1".into(),
+            source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: Some("grpcs://127.0.0.1:19997".into()),
             target_container: None,
             target_endpoint: "/".into(),
@@ -371,10 +449,12 @@ mod trigger_pipe_handler_tests {
         let data = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "".into(),
+            source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: Some("grpc://127.0.0.1:19996".into()),
             target_container: None,
             target_endpoint: "/".into(),
@@ -412,6 +492,7 @@ mod trigger_pipe_handler_tests {
         let activate = ActivatePipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "pipe-runtime-1".into(),
+            source_adapter: None,
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
@@ -419,6 +500,7 @@ mod trigger_pipe_handler_tests {
             source_queue: None,
             source_exchange: None,
             source_routing_key: None,
+            target_adapter: None,
             target_url: Some(server.url()),
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
@@ -443,10 +525,12 @@ mod trigger_pipe_handler_tests {
         let trigger = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "pipe-runtime-1".into(),
+            source_adapter: None,
             input_data: Some(json!({ "user": { "email": "runtime@try.direct" } })),
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: None,
             target_container: None,
             target_endpoint: "/".into(),
@@ -488,6 +572,7 @@ mod trigger_pipe_handler_tests {
         let activate = ActivatePipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "pipe-runtime-2".into(),
+            source_adapter: None,
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
@@ -495,6 +580,7 @@ mod trigger_pipe_handler_tests {
             source_queue: None,
             source_exchange: None,
             source_routing_key: None,
+            target_adapter: None,
             target_url: Some("https://example.com".into()),
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
@@ -544,6 +630,7 @@ mod trigger_pipe_handler_tests {
         let activate = ActivatePipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "pipe-runtime-3".into(),
+            source_adapter: None,
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
@@ -551,6 +638,7 @@ mod trigger_pipe_handler_tests {
             source_queue: None,
             source_exchange: None,
             source_routing_key: None,
+            target_adapter: None,
             target_url: Some("ws://127.0.0.1:19995".into()),
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
@@ -566,10 +654,12 @@ mod trigger_pipe_handler_tests {
         let trigger = TriggerPipeCommand {
             deployment_hash: "dep-123".into(),
             pipe_instance_id: "pipe-runtime-3".into(),
+            source_adapter: None,
             input_data: Some(json!({ "user": { "email": "runtime@try.direct" } })),
             source_container: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
+            target_adapter: None,
             target_url: None,
             target_container: None,
             target_endpoint: "/".into(),
@@ -791,6 +881,8 @@ pub struct ActivatePipeCommand {
     deployment_hash: String,
     pipe_instance_id: String,
     #[serde(default)]
+    source_adapter: Option<PipeAdapterReference>,
+    #[serde(default)]
     source_container: Option<String>,
     #[serde(default = "default_pipe_source_endpoint")]
     source_endpoint: String,
@@ -804,6 +896,8 @@ pub struct ActivatePipeCommand {
     source_exchange: Option<String>,
     #[serde(default)]
     source_routing_key: Option<String>,
+    #[serde(default)]
+    target_adapter: Option<PipeAdapterReference>,
     #[serde(default)]
     target_url: Option<String>,
     #[serde(default)]
@@ -835,11 +929,15 @@ pub struct TriggerPipeCommand {
     #[serde(default)]
     input_data: Option<Value>,
     #[serde(default)]
+    source_adapter: Option<PipeAdapterReference>,
+    #[serde(default)]
     source_container: Option<String>,
     #[serde(default = "default_pipe_source_endpoint")]
     source_endpoint: String,
     #[serde(default = "default_pipe_source_method")]
     source_method: String,
+    #[serde(default)]
+    target_adapter: Option<PipeAdapterReference>,
     #[serde(default)]
     target_url: Option<String>,
     #[serde(default)]
@@ -940,6 +1038,7 @@ struct PipeLifecycleSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PipeRegistration {
+    source_adapter: Option<PipeAdapterReference>,
     source_container: Option<String>,
     source_endpoint: String,
     source_method: String,
@@ -947,6 +1046,7 @@ struct PipeRegistration {
     source_queue: Option<String>,
     source_exchange: Option<String>,
     source_routing_key: Option<String>,
+    target_adapter: Option<PipeAdapterReference>,
     target_url: Option<String>,
     target_container: Option<String>,
     target_endpoint: String,
@@ -1343,10 +1443,12 @@ impl PipeRuntime {
         let trigger = TriggerPipeCommand {
             deployment_hash: deployment_hash.to_string(),
             pipe_instance_id: pipe_instance_id.to_string(),
+            source_adapter: None,
             input_data: Some(payload),
             source_container: None,
             source_endpoint: default_pipe_source_endpoint(),
             source_method: default_pipe_source_method(),
+            target_adapter: None,
             target_url: None,
             target_container: None,
             target_endpoint: default_pipe_target_endpoint(),
@@ -1376,6 +1478,7 @@ impl PipeLifecycleSnapshot {
 impl From<ActivatePipeCommand> for PipeRegistration {
     fn from(value: ActivatePipeCommand) -> Self {
         Self {
+            source_adapter: value.source_adapter,
             source_container: value.source_container,
             source_endpoint: value.source_endpoint,
             source_method: value.source_method,
@@ -1383,6 +1486,7 @@ impl From<ActivatePipeCommand> for PipeRegistration {
             source_queue: value.source_queue,
             source_exchange: value.source_exchange,
             source_routing_key: value.source_routing_key,
+            target_adapter: value.target_adapter,
             target_url: value.target_url,
             target_container: value.target_container,
             target_endpoint: value.target_endpoint,
@@ -2202,6 +2306,10 @@ impl ActivatePipeCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.pipe_instance_id = trimmed(&self.pipe_instance_id);
+        self.source_adapter = self
+            .source_adapter
+            .take()
+            .map(normalize_pipe_adapter_reference);
         self.source_container = self.source_container.map(|value| trimmed(&value));
         self.source_endpoint = trimmed(&self.source_endpoint);
         if self.source_endpoint.is_empty() {
@@ -2213,6 +2321,10 @@ impl ActivatePipeCommand {
         self.source_queue = self.source_queue.map(|value| trimmed(&value));
         self.source_exchange = self.source_exchange.map(|value| trimmed(&value));
         self.source_routing_key = self.source_routing_key.map(|value| trimmed(&value));
+        self.target_adapter = self
+            .target_adapter
+            .take()
+            .map(normalize_pipe_adapter_reference);
         self.target_url = self.target_url.map(|value| trimmed(&value));
         self.target_container = self.target_container.map(|value| trimmed(&value));
         self.target_endpoint = trimmed(&self.target_endpoint);
@@ -2272,8 +2384,9 @@ impl ActivatePipeCommand {
                 .as_deref()
                 .filter(|value| !value.is_empty())
                 .is_none()
+            && self.target_adapter.is_none()
         {
-            bail!("activate_pipe requires target_url or target_container");
+            bail!("activate_pipe requires target_url, target_container, or target_adapter");
         }
         Ok(())
     }
@@ -2310,6 +2423,10 @@ impl TriggerPipeCommand {
     fn normalize(mut self) -> Self {
         self.deployment_hash = trimmed(&self.deployment_hash);
         self.pipe_instance_id = trimmed(&self.pipe_instance_id);
+        self.source_adapter = self
+            .source_adapter
+            .take()
+            .map(normalize_pipe_adapter_reference);
         self.source_container = self.source_container.map(|value| trimmed(&value));
         self.source_endpoint = trimmed(&self.source_endpoint);
         if self.source_endpoint.is_empty() {
@@ -2317,6 +2434,10 @@ impl TriggerPipeCommand {
         }
         self.source_method =
             normalize_trigger_pipe_method(&self.source_method, &default_pipe_source_method());
+        self.target_adapter = self
+            .target_adapter
+            .take()
+            .map(normalize_pipe_adapter_reference);
         self.target_url = self.target_url.map(|value| trimmed(&value));
         self.target_container = self.target_container.map(|value| trimmed(&value));
         self.target_endpoint = trimmed(&self.target_endpoint);
@@ -2771,6 +2892,26 @@ impl ProbeEndpointsCommand {
 
 fn trimmed(value: &str) -> String {
     value.trim().to_string()
+}
+
+fn normalize_pipe_adapter_reference(mut adapter: PipeAdapterReference) -> PipeAdapterReference {
+    adapter.code = trimmed(&adapter.code).to_lowercase();
+    adapter.config = adapter.config.take().map(normalize_json_value);
+    adapter
+}
+
+fn normalize_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(normalize_json_value).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (trimmed(&key), normalize_json_value(value)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 #[cfg(feature = "docker")]
@@ -3448,6 +3589,13 @@ fn trigger_pipe_target_transport(target_mode: &str, target_value: &str) -> &'sta
     }
 }
 
+fn target_adapter_transport(adapter: &PipeAdapterReference) -> &'static str {
+    match adapter.code.as_str() {
+        "smtp" | "mailhog" => "smtp",
+        _ => "adapter",
+    }
+}
+
 fn build_trigger_pipe_target_response(transport: &str, status: Option<u16>, body: Value) -> Value {
     json!({
         "transport": transport,
@@ -3457,17 +3605,125 @@ fn build_trigger_pipe_target_response(transport: &str, status: Option<u16>, body
     })
 }
 
+fn build_trigger_pipe_adapter_failure_response(adapter: &PipeAdapterReference) -> Value {
+    json!({
+        "transport": target_adapter_transport(adapter),
+        "adapter": adapter.code,
+        "status": Value::Null,
+        "delivered": false,
+        "body": Value::Null,
+    })
+}
+
+fn source_adapter_dispatch_payload_to_input(dispatch: PipeAdapterDispatch) -> Result<Value> {
+    match dispatch.payload {
+        PipeAdapterPayload::Json(value) => Ok(value),
+        PipeAdapterPayload::MailMessage(message) => {
+            serde_json::to_value(message).context("serializing mail source adapter payload")
+        }
+    }
+}
+
+fn build_trigger_pipe_source_adapter(
+    adapter: &PipeAdapterReference,
+) -> Result<Box<dyn PipeSourceAdapter>> {
+    match adapter.code.as_str() {
+        "imap" => {
+            let source = ImapSourceAdapter::from_reference(adapter.clone())
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            Ok(Box::new(source))
+        }
+        "pop3" => {
+            let source = Pop3SourceAdapter::from_reference(adapter.clone())
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            Ok(Box::new(source))
+        }
+        other => bail!("unsupported source adapter '{}'", other),
+    }
+}
+
+async fn poll_trigger_pipe_source_adapter(source: &dyn PipeSourceAdapter) -> Result<Vec<Value>> {
+    let dispatches = source
+        .poll()
+        .await
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    dispatches
+        .into_iter()
+        .map(source_adapter_dispatch_payload_to_input)
+        .collect()
+}
+
+async fn deliver_trigger_pipe_target_adapter(
+    adapter: &PipeAdapterReference,
+    payload: &Value,
+) -> Result<Value> {
+    match adapter.code.as_str() {
+        "smtp" | "mailhog" => {
+            let smtp = SmtpTargetAdapter::from_reference(adapter.clone())
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            smtp.deliver(PipeAdapterPayload::Json(payload.clone()))
+                .await
+                .map_err(|err| anyhow::anyhow!(err.to_string()))
+        }
+        other => bail!("unsupported target adapter '{}'", other),
+    }
+}
+
 fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistration {
     let mut registration = registration.clone();
+    registration.source_adapter = registration
+        .source_adapter
+        .take()
+        .map(redact_pipe_adapter_reference);
     registration.source_broker_url = registration
         .source_broker_url
         .as_deref()
         .map(redact_url_credentials);
+    registration.target_adapter = registration
+        .target_adapter
+        .take()
+        .map(redact_pipe_adapter_reference);
     registration.target_url = registration
         .target_url
         .as_deref()
         .map(redact_url_credentials);
     registration
+}
+
+fn redact_pipe_adapter_reference(mut adapter: PipeAdapterReference) -> PipeAdapterReference {
+    adapter.config = adapter.config.take().map(redact_json_secrets);
+    adapter
+}
+
+fn redact_json_secrets(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(redact_json_secrets).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    if is_sensitive_config_key(&key) {
+                        (key, Value::String("[REDACTED]".into()))
+                    } else {
+                        (key, redact_json_secrets(value))
+                    }
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn is_sensitive_config_key(key: &str) -> bool {
+    let lowered = key.trim().to_ascii_lowercase();
+    lowered.contains("password")
+        || lowered.contains("secret")
+        || lowered.contains("token")
+        || lowered.contains("credential")
+        || lowered == "auth"
+        || lowered.ends_with("_auth")
+        || lowered.contains("api_key")
+        || lowered.ends_with("_key")
 }
 
 fn redact_url_credentials(raw: &str) -> String {
@@ -3491,6 +3747,7 @@ fn registered_pipe_key(deployment_hash: &str, pipe_instance_id: &str) -> PipeRun
 
 fn trigger_has_inline_source(data: &TriggerPipeCommand) -> bool {
     data.input_data.is_some()
+        || data.source_adapter.is_some()
         || data
             .source_container
             .as_deref()
@@ -3499,10 +3756,12 @@ fn trigger_has_inline_source(data: &TriggerPipeCommand) -> bool {
 }
 
 fn trigger_has_inline_target(data: &TriggerPipeCommand) -> bool {
-    data.target_url
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .is_some()
+    data.target_adapter.is_some()
+        || data
+            .target_url
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_some()
         || data
             .target_container
             .as_deref()
@@ -3516,6 +3775,9 @@ fn merge_trigger_with_registration(
 ) -> TriggerPipeCommand {
     let mut merged = data.clone();
     if let Some(registration) = registration {
+        if merged.source_adapter.is_none() {
+            merged.source_adapter = registration.source_adapter.clone();
+        }
         if merged
             .source_container
             .as_deref()
@@ -3529,6 +3791,9 @@ fn merge_trigger_with_registration(
         }
         if merged.source_method == default_pipe_source_method() {
             merged.source_method = registration.source_method.clone();
+        }
+        if merged.target_adapter.is_none() {
+            merged.target_adapter = registration.target_adapter.clone();
         }
         if merged
             .target_url
@@ -3775,7 +4040,76 @@ async fn run_poll_source_worker(
         "pipe poll source worker started"
     );
 
+    let source_adapter = registration
+        .source_adapter
+        .as_ref()
+        .map(build_trigger_pipe_source_adapter)
+        .transpose();
+
     loop {
+        if let Some(adapter) = registration.source_adapter.as_ref() {
+            let source_adapter = match source_adapter.as_ref() {
+                Ok(Some(source_adapter)) => source_adapter.as_ref(),
+                Ok(None) => {
+                    warn!(
+                        deployment_hash = %key.deployment_hash,
+                        pipe_instance_id = %key.pipe_instance_id,
+                        "source adapter worker missing adapter instance"
+                    );
+                    tokio::time::sleep(interval).await;
+                    continue;
+                }
+                Err(error) => {
+                    warn!(
+                        deployment_hash = %key.deployment_hash,
+                        pipe_instance_id = %key.pipe_instance_id,
+                        error = %error,
+                        adapter = %adapter.code,
+                        "source adapter initialization failed"
+                    );
+                    tokio::time::sleep(interval).await;
+                    continue;
+                }
+            };
+
+            match poll_trigger_pipe_source_adapter(source_adapter).await {
+                Ok(payloads) => {
+                    for payload in payloads {
+                        if let Err(error) = runtime
+                            .trigger_registered_payload(
+                                &key.deployment_hash,
+                                &key.pipe_instance_id,
+                                payload,
+                                "poll",
+                            )
+                            .await
+                        {
+                            warn!(
+                                deployment_hash = %key.deployment_hash,
+                                pipe_instance_id = %key.pipe_instance_id,
+                                error = %error,
+                                adapter = %adapter.code,
+                                "source adapter trigger failed"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    runtime
+                        .mark_failed(
+                            &key.deployment_hash,
+                            &key.pipe_instance_id,
+                            now_timestamp(),
+                            format!("poll source error: {}", error),
+                        )
+                        .await;
+                }
+            }
+
+            tokio::time::sleep(interval).await;
+            continue;
+        }
+
         let fetched = match registration.source_container.as_deref() {
             Some(container) if !container.is_empty() => {
                 fetch_trigger_pipe_source_request(
@@ -4325,6 +4659,61 @@ async fn handle_trigger_pipe(
     };
 
     let mapped_data = apply_pipe_field_mapping(&source_data, resolved.field_mapping.as_ref());
+    if let Some(target_adapter) = resolved.target_adapter.as_ref() {
+        match deliver_trigger_pipe_target_adapter(target_adapter, &mapped_data).await {
+            Ok(target_response) => {
+                let triggered_at = now_timestamp();
+                pipe_runtime
+                    .mark_triggered(
+                        &data.deployment_hash,
+                        &data.pipe_instance_id,
+                        triggered_at.clone(),
+                    )
+                    .await;
+                result.status = "success".into();
+                result.result = Some(json!({
+                    "type": "trigger_pipe",
+                    "deployment_hash": data.deployment_hash,
+                    "pipe_instance_id": data.pipe_instance_id,
+                    "success": true,
+                    "source_data": source_data,
+                    "mapped_data": mapped_data,
+                    "target_response": target_response,
+                    "triggered_at": triggered_at,
+                    "trigger_type": resolved.trigger_type,
+                    "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                }));
+            }
+            Err(err) => {
+                let error = err.to_string();
+                pipe_runtime
+                    .mark_failed(
+                        &data.deployment_hash,
+                        &data.pipe_instance_id,
+                        now_timestamp(),
+                        error.clone(),
+                    )
+                    .await;
+                result.status = "failed".into();
+                result.result = Some(json!({
+                    "type": "trigger_pipe",
+                    "deployment_hash": data.deployment_hash,
+                    "pipe_instance_id": data.pipe_instance_id,
+                    "success": false,
+                    "source_data": source_data,
+                    "mapped_data": mapped_data,
+                    "target_response": build_trigger_pipe_adapter_failure_response(target_adapter),
+                    "error": error,
+                    "triggered_at": now_timestamp(),
+                    "trigger_type": resolved.trigger_type,
+                    "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                }));
+                result.error = Some(error);
+            }
+        }
+        return Ok(result);
+    }
+
     let target = match (
         resolved
             .target_url
@@ -8011,20 +8400,6 @@ async fn probe_http_body(
         .map(|response| (response.payload, response.base_url))
 }
 
-#[cfg(feature = "docker")]
-async fn probe_http_status(
-    container_name: &str,
-    app_code: &str,
-    port: u16,
-    path: &str,
-    timeout_secs: u32,
-) -> Option<(String, String)> {
-    execute_http_status_probe(container_name, app_code, port, path, timeout_secs)
-        .await
-        .response
-        .map(|response| (response.payload, response.base_url))
-}
-
 #[cfg(any(feature = "docker", test))]
 fn probe_issue_for_protocol(protocol: &str) -> String {
     match protocol {
@@ -9143,18 +9518,35 @@ mod tests {
             "activate_pipe.rabbitmq.command.json" => {
                 "../shared-fixtures/pipe-contract/activate_pipe.rabbitmq.command.json"
             }
+            "activate_pipe.adapter.command.json" => {
+                "../shared-fixtures/pipe-contract/activate_pipe.adapter.command.json"
+            }
             "deactivate_pipe.command.json" => {
                 "../shared-fixtures/pipe-contract/deactivate_pipe.command.json"
             }
             "trigger_pipe.manual.command.json" => {
                 "../shared-fixtures/pipe-contract/trigger_pipe.manual.command.json"
             }
+            "trigger_pipe.adapter.command.json" => {
+                "../shared-fixtures/pipe-contract/trigger_pipe.adapter.command.json"
+            }
             "trigger_pipe.replay.command.json" => {
                 "../shared-fixtures/pipe-contract/trigger_pipe.replay.command.json"
             }
+            "trigger_pipe.smtp_adapter.report.json" => {
+                "../shared-fixtures/pipe-contract/trigger_pipe.smtp_adapter.report.json"
+            }
             other => panic!("unknown fixture: {}", other),
         };
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path)
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let primary = manifest_dir.join(relative_path);
+        if primary.exists() {
+            return primary;
+        }
+
+        let fallback_relative_path =
+            relative_path.replacen("../shared-fixtures", "../config/shared-fixtures", 1);
+        manifest_dir.join(fallback_relative_path)
     }
 
     fn shared_fixtures_available() -> bool {
@@ -9173,6 +9565,17 @@ mod tests {
         });
 
         serde_json::from_str(&body).expect("fixture should be valid json")
+    }
+
+    #[test]
+    fn shared_smtp_trigger_report_fixture_is_available() {
+        if !shared_fixtures_available() {
+            return;
+        }
+
+        let payload = fixture("trigger_pipe.smtp_adapter.report.json");
+        assert_eq!(payload["target_response"]["transport"], "smtp");
+        assert_eq!(payload["target_response"]["adapter"], "smtp");
     }
 
     struct EnvGuard {
@@ -9274,6 +9677,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_activate_pipe_shared_adapter_fixture() {
+        if !shared_fixtures_available() {
+            eprintln!("skipping shared fixture test: shared fixtures are unavailable");
+            return;
+        }
+        let cmd = AgentCommand {
+            id: "cmd-activate-adapter-fixture".into(),
+            command_id: "cmd-activate-adapter-fixture".into(),
+            name: "activate_pipe".into(),
+            params: json!({ "params": fixture("activate_pipe.adapter.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::ActivatePipe(data)) => {
+                assert_eq!(data.deployment_hash, "dep-123");
+                assert_eq!(
+                    data.source_adapter
+                        .as_ref()
+                        .map(|adapter| adapter.code.as_str()),
+                    Some("imap")
+                );
+                assert_eq!(
+                    data.target_adapter
+                        .as_ref()
+                        .map(|adapter| adapter.code.as_str()),
+                    Some("smtp")
+                );
+                assert_eq!(data.trigger_type, "poll");
+            }
+            other => panic!("Expected ActivatePipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn parses_deactivate_pipe_shared_fixture() {
         if !shared_fixtures_available() {
             eprintln!("skipping shared fixture test: shared fixtures are unavailable");
@@ -9326,6 +9766,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_trigger_pipe_shared_adapter_fixture() {
+        if !shared_fixtures_available() {
+            eprintln!("skipping shared fixture test: shared fixtures are unavailable");
+            return;
+        }
+        let cmd = AgentCommand {
+            id: "cmd-trigger-adapter-fixture".into(),
+            command_id: "cmd-trigger-adapter-fixture".into(),
+            name: "trigger_pipe".into(),
+            params: json!({ "params": fixture("trigger_pipe.adapter.command.json") }),
+            deployment_hash: Some("dep-123".into()),
+            app_code: None,
+        };
+
+        let parsed = parse_stacker_command(&cmd).unwrap();
+        match parsed {
+            Some(StackerCommand::TriggerPipe(data)) => {
+                assert_eq!(data.trigger_type, "manual");
+                assert_eq!(
+                    data.source_adapter
+                        .as_ref()
+                        .map(|adapter| adapter.code.as_str()),
+                    Some("imap")
+                );
+                assert_eq!(
+                    data.target_adapter
+                        .as_ref()
+                        .map(|adapter| adapter.code.as_str()),
+                    Some("smtp")
+                );
+            }
+            other => panic!("Expected TriggerPipe command, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn parses_trigger_pipe_shared_replay_fixture() {
         if !shared_fixtures_available() {
             eprintln!("skipping shared fixture test: shared fixtures are unavailable");
@@ -9363,6 +9839,7 @@ mod tests {
         let mut registration = PipeRegistration::from(ActivatePipeCommand {
             deployment_hash: "dep-restore".into(),
             pipe_instance_id: "pipe-restore-1".into(),
+            source_adapter: None,
             source_container: Some("source-app".into()),
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
@@ -9370,6 +9847,7 @@ mod tests {
             source_queue: None,
             source_exchange: None,
             source_routing_key: None,
+            target_adapter: None,
             target_url: Some("https://example.com".into()),
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
@@ -9425,6 +9903,7 @@ mod tests {
         let mut registration = PipeRegistration::from(ActivatePipeCommand {
             deployment_hash: "dep-deactivate".into(),
             pipe_instance_id: "pipe-deactivate-1".into(),
+            source_adapter: None,
             source_container: Some("source-app".into()),
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
@@ -9432,6 +9911,7 @@ mod tests {
             source_queue: None,
             source_exchange: None,
             source_routing_key: None,
+            target_adapter: None,
             target_url: Some("https://example.com".into()),
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
@@ -9483,6 +9963,7 @@ mod tests {
         let mut registration = PipeRegistration::from(ActivatePipeCommand {
             deployment_hash: "dep-poll".into(),
             pipe_instance_id: "pipe-poll-1".into(),
+            source_adapter: None,
             source_container: None,
             source_endpoint: "http://127.0.0.1:1/source".into(),
             source_method: "GET".into(),
@@ -9490,6 +9971,7 @@ mod tests {
             source_queue: None,
             source_exchange: None,
             source_routing_key: None,
+            target_adapter: None,
             target_url: Some("https://example.com".into()),
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
@@ -9596,6 +10078,10 @@ mod tests {
         let mut registration = PipeRegistration::from(ActivatePipeCommand {
             deployment_hash: "dep-secret".into(),
             pipe_instance_id: "pipe-secret-1".into(),
+            source_adapter: Some(PipeAdapterReference::new("pop3").with_config(json!({
+                "username": "mailbox-user",
+                "password": "pop3-secret"
+            }))),
             source_container: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
@@ -9603,6 +10089,11 @@ mod tests {
             source_queue: Some("events.queue".into()),
             source_exchange: Some("events.exchange".into()),
             source_routing_key: Some("events.created".into()),
+            target_adapter: Some(PipeAdapterReference::new("smtp").with_config(json!({
+                "host": "smtp.example.com",
+                "password": "smtp-secret",
+                "api_key": "smtp-api-key"
+            }))),
             target_url: Some("https://user:token@example.com/hooks".into()),
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
@@ -9625,14 +10116,83 @@ mod tests {
         let body = tokio::fs::read_to_string(&state_path).await.unwrap();
         assert!(!body.contains("guest:guest"));
         assert!(!body.contains("user:token"));
+        assert!(!body.contains("pop3-secret"));
+        assert!(!body.contains("smtp-secret"));
+        assert!(!body.contains("smtp-api-key"));
         assert!(body.contains("amqp://***@localhost:5672/%2f"));
         assert!(body.contains("https://***@example.com/hooks"));
+        assert!(body.contains("\"code\": \"pop3\""));
+        assert!(body.contains("\"code\": \"smtp\""));
+        assert!(body.contains("[REDACTED]"));
 
         #[cfg(unix)]
         {
             let mode = std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn merge_trigger_with_registration_preserves_registered_adapter_refs() {
+        let registration = PipeRegistration::from(ActivatePipeCommand {
+            deployment_hash: "dep-merge".into(),
+            pipe_instance_id: "pipe-merge-1".into(),
+            source_adapter: Some(PipeAdapterReference::new("imap").with_config(json!({
+                "mailbox": "INBOX"
+            }))),
+            source_container: None,
+            source_endpoint: "/source".into(),
+            source_method: "GET".into(),
+            source_broker_url: None,
+            source_queue: None,
+            source_exchange: None,
+            source_routing_key: None,
+            target_adapter: Some(PipeAdapterReference::new("smtp").with_config(json!({
+                "host": "smtp.example.com"
+            }))),
+            target_url: None,
+            target_container: None,
+            target_endpoint: "/target".into(),
+            target_method: "POST".into(),
+            field_mapping: Some(json!({ "subject": "$.subject" })),
+            trigger_type: "manual".into(),
+        });
+
+        let trigger = TriggerPipeCommand {
+            deployment_hash: "dep-merge".into(),
+            pipe_instance_id: "pipe-merge-1".into(),
+            source_adapter: None,
+            input_data: Some(json!({ "subject": "hello" })),
+            source_container: None,
+            source_endpoint: default_pipe_source_endpoint(),
+            source_method: default_pipe_source_method(),
+            target_adapter: None,
+            target_url: None,
+            target_container: None,
+            target_endpoint: default_pipe_target_endpoint(),
+            target_method: default_pipe_target_method(),
+            field_mapping: None,
+            trigger_type: default_pipe_trigger_type(),
+        };
+
+        let merged = merge_trigger_with_registration(&trigger, Some(&registration));
+
+        assert_eq!(
+            merged
+                .source_adapter
+                .as_ref()
+                .map(|adapter| adapter.code.as_str()),
+            Some("imap")
+        );
+        assert_eq!(
+            merged
+                .target_adapter
+                .as_ref()
+                .map(|adapter| adapter.code.as_str()),
+            Some("smtp")
+        );
+        assert_eq!(merged.field_mapping, registration.field_mapping);
+        assert_eq!(merged.trigger_type, registration.trigger_type);
     }
 
     stacker_test!(
@@ -11245,7 +11805,7 @@ mod probe_endpoints_command_tests {
         assert_eq!(normalized.deployment_hash, "abc123");
         assert_eq!(normalized.app_code, "crm");
         assert_eq!(normalized.container, Some("crm-web".to_string()));
-        assert_eq!(normalized.protocols, vec!["openapi", "html_forms", "rest"]);
+        assert_eq!(normalized.protocols, vec!["openapi", "rest"]);
     }
 
     #[test]

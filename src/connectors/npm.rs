@@ -24,7 +24,7 @@ pub struct NpmConfig {
 impl NpmConfig {
     pub fn new(host: String, email: String, password: String) -> Self {
         Self {
-            host,
+            host: normalize_npm_host(host),
             email,
             password,
         }
@@ -44,6 +44,21 @@ impl NpmConfig {
         let password = std::env::var("NPM_PASSWORD").ok()?;
         Some(Self::new(host, email, password))
     }
+}
+
+fn normalize_npm_host(host: String) -> String {
+    let canonical = "nginx-proxy-manager";
+    let legacy = "nginx_proxy_manager";
+
+    if host == legacy {
+        return canonical.to_string();
+    }
+
+    if let Some(rest) = host.strip_prefix(&format!("{legacy}:")) {
+        return format!("{canonical}:{rest}");
+    }
+
+    host.replace(&format!("://{legacy}"), &format!("://{canonical}"))
 }
 
 /// Request to create or update a proxy host
@@ -584,6 +599,17 @@ mod tests {
         assert_eq!(config.host, "http://npm.local");
         assert_eq!(config.email, "ops@example.com");
         assert_eq!(config.password, "secret");
+    }
+
+    #[test]
+    fn npm_config_normalizes_legacy_underscore_internal_host() {
+        let config = NpmConfig::new(
+            "http://nginx_proxy_manager:81".to_string(),
+            "ops@example.com".to_string(),
+            "secret".to_string(),
+        );
+
+        assert_eq!(config.host, "http://nginx-proxy-manager:81");
     }
 
     #[test]

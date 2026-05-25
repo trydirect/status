@@ -2,51 +2,41 @@ name: web
 version: 0.1.0
 organization: null
 project:
-  identity: null
+  identity: web
 app:
   type: node
   path: .
-  dockerfile: null
+  environment: {}
   image: null
   build: null
   ports: []
   volumes: []
-  environment: {}
 services:
 - name: status-panel-web
   image: trydirect/status-panel-web:0.1.0
   ports:
   - 3000:3000
   environment:
-    NODE_ENV: production
     NEXT_PUBLIC_SITE_URL: https://status.stacker.my
+    NODE_ENV: production
   volumes: []
-  depends_on: []
-- name: nginx_proxy_manager
-  image: jc21/nginx-proxy-manager:latest
-  ports:
-  - 80:80
-  - 443:443
-  - 81:81
-  environment: {}
-  volumes:
-  - npm_data:/data
-  - npm_letsencrypt:/etc/letsencrypt
   depends_on: []
 - name: smtp
   image: trydirect/smtp
   ports:
-  - 1025:1025
+  - 127.0.0.1:1025:25
   - 8025:8025
   environment: {}
   volumes:
   - smtp_data:/data
   depends_on: []
 proxy:
-  type: none
+  type: nginx-proxy-manager
   auto_detect: false
-  domains: []
-  config: null
+  domains:
+  - domain: status.stacker.my
+    ssl: auto
+    upstream: status-panel-web:3000
 deploy:
   target: cloud
   environment: null
@@ -58,10 +48,9 @@ deploy:
     region: nbg1
     size: cx23
     install_image: null
-    remote_payload_file: null
+    server: null
     ssh_key: ~/.ssh/id_rsa
     key: null
-    server: null
   server: null
   registry: null
   default_target: null
@@ -79,14 +68,10 @@ ai:
   - troubleshoot
   - security
 monitoring:
-  status_panel: false
+  status_panel: true
   healthcheck: null
   metrics: null
-hooks:
-  pre_build: null
-  post_deploy: null
-  on_failure: null
-env_file: null
-env: {}
+hooks: {}
 config_contract:
   services: {}
+env: {}
