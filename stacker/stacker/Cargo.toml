@@ -1,0 +1,134 @@
+[package]
+name = "stacker"
+version = "0.2.8"
+edition = "2021"
+default-run= "server"
+
+[workspace]
+members = ["crates/pipe-adapter-sdk", "crates/pipe-adapter-mail"]
+resolver = "2"
+
+[lib]
+path="src/lib.rs"
+
+[[bin]]
+path = "src/main.rs"
+name = "server"
+
+[[bin]]
+path = "src/console/main.rs"
+name = "console"
+required-features = ["explain"]
+
+[[bin]]
+path = "src/bin/stacker.rs"
+name = "stacker-cli"
+
+[[bin]]
+path = "src/bin/agent_executor.rs"
+name = "agent-executor"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix-web = "4.3.1"
+actix = "0.13.5"
+actix-web-actors = "4.3.1"
+chrono = { version = "0.4.39", features = ["serde", "clock"] }
+config = "0.13.4"
+reqwest = { version = "0.11.23", features = ["json", "blocking", "stream"] }
+serde = { version = "1.0.195", features = ["derive"] }
+tokio = { version = "1.28.1", features = ["full"] }
+tracing = { version = "0.1.40", features = ["log"] }
+tracing-bunyan-formatter = "0.3.8"
+tracing-log = "0.1.4"
+tracing-subscriber = { version = "0.3.18", features = ["registry", "env-filter"] }
+uuid = { version = "1.3.4", features = ["v4", "serde"] }
+thiserror = "1.0"
+anyhow = "1.0"
+serde_valid = "0.18.0"
+serde_json = { version = "1.0.111", features = [] }
+async-trait = "0.1.77"
+serde_derive = "1.0.195"
+actix-cors = "0.7.0"
+actix-files = "0.6.5"
+tracing-actix-web = "0.7.7"
+regex = "1.10.2"
+rand = "0.8.5"
+tempfile = "3"
+flate2 = "1.0"
+tar = "0.4"
+ssh-key = { version = "0.6", features = ["ed25519", "rand_core"] }
+russh = "0.58"
+futures-util = "0.3.29"
+futures = "0.3.29"
+tokio-stream = "0.1.14"
+actix-http = "3.4.0"
+hmac = "0.12.1"
+sha2 = "0.10.8"
+sqlx-adapter = { version = "1.8.0", default-features = false, features = ["postgres", "runtime-tokio-native-tls"]}
+dotenvy = "0.15"
+
+# dctypes
+derive_builder = "0.12.0"
+indexmap = { version = "2.0.0", features = ["serde"], optional = true }
+serde_yaml = "0.9"
+lapin = { version = "2.3.1", features = ["serde_json"] }
+futures-lite = "2.2.0"
+clap = { version = "4.4.8", features = ["derive", "env"] }
+clap_complete = "4"
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+indicatif = "0.17"
+brotli = "3.4.0"
+serde_path_to_error = "0.1.14"
+zstd = "0.13"
+deadpool-lapin = "0.12.1"
+docker-compose-types = "0.7.0"
+actix-casbin-auth = { git = "https://github.com/casbin-rs/actix-casbin-auth.git"}
+casbin = "2.2.0"
+aes-gcm = "0.10.3"
+base64 = "0.22.1"
+redis = { version = "0.27.5", features = ["tokio-comp", "connection-manager"] }
+urlencoding = "2.1.3"
+tera = "1.19.1"
+prometheus = { version = "0.13", features = ["process"] }
+lazy_static = "1.4"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tonic = { version = "0.11", features = ["tls"] }
+prost = "0.12"
+prost-types = "0.12"
+pipe-adapter-mail = { path = "crates/pipe-adapter-mail" }
+pipe-adapter-sdk = { path = "crates/pipe-adapter-sdk" }
+
+[dependencies.sqlx]
+version = "0.8.2"
+features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "ipnetwork",
+    "macros"
+]
+
+[features]
+default = ["indexmap"]
+indexmap = ["dep:indexmap"]
+explain = ["actix-casbin-auth/explain", "actix-casbin-auth/logging"]
+
+[build-dependencies]
+tonic-build = "0.11"
+
+[dev-dependencies]
+glob = "0.3"
+wiremock = "0.5.22"
+assert_cmd = "2.0"
+predicates = "3.0"
+mockito = "1"
+cucumber = "0.22"
+futures-util = "0.3"
+
+[[test]]
+name = "bdd"
+harness = false

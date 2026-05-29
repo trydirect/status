@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE client\n        SET \n            secret=$1,\n            updated_at=NOW() at time zone 'utc'\n        WHERE id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8038cec278228a04f83f4d67f8e2fd0382be589bf5d6dcde690b63f281160159"
+}

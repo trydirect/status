@@ -1,0 +1,195 @@
+{
+  "version": 1,
+  "selector": {
+    "mode": "local",
+    "selector_kind": "containers",
+    "selector": "local",
+    "deployment_hash": null,
+    "container": null
+  },
+  "protocols_requested": [
+    "graphql",
+    "grpc",
+    "html_forms",
+    "kafka",
+    "mcp",
+    "mysql",
+    "openapi",
+    "postgres",
+    "rabbitmq",
+    "redis",
+    "rest",
+    "websocket"
+  ],
+  "capture_samples": false,
+  "cached_at": "2026-05-22T08:14:48.193770+00:00",
+  "report": {
+    "type": "probe_endpoints",
+    "deployment_hash": "local",
+    "app_code": "local",
+    "protocols_detected": [
+      "html_forms"
+    ],
+    "protocols_requested": [
+      "graphql",
+      "grpc",
+      "html_forms",
+      "kafka",
+      "mcp",
+      "mysql",
+      "openapi",
+      "postgres",
+      "rabbitmq",
+      "redis",
+      "rest",
+      "websocket"
+    ],
+    "containers": [
+      {
+        "name": "status-panel-web",
+        "image": "trydirect/status-panel-web:latest",
+        "network": "web_default",
+        "ports": [
+          "3000->3000/tcp",
+          "3000/tcp"
+        ],
+        "addresses": [
+          "172.20.0.3:3000",
+          "172.20.0.3:3000"
+        ]
+      },
+      {
+        "name": "web-smtp-1",
+        "image": "trydirect/smtp",
+        "network": "web_default",
+        "ports": [
+          "1025->1025/tcp",
+          "8025->8025/tcp",
+          "1025/tcp",
+          "25/tcp",
+          "8025/tcp"
+        ],
+        "addresses": [
+          "172.20.0.2:1025",
+          "172.20.0.2:8025",
+          "172.20.0.2:1025",
+          "172.20.0.2:25",
+          "172.20.0.2:8025"
+        ]
+      },
+      {
+        "name": "status-website-scenario-test",
+        "image": "status-website:0.1.0",
+        "network": "bridge",
+        "ports": [
+          "3100->3000/tcp",
+          "3000/tcp"
+        ],
+        "addresses": [
+          "172.17.0.2:3000",
+          "172.17.0.2:3000"
+        ]
+      }
+    ],
+    "endpoints": [],
+    "resources": [],
+    "forms": [
+      {
+        "container": "status-panel-web",
+        "id": "status-panel-web/contact",
+        "action": "/contact",
+        "method": "POST",
+        "fields": [
+          "$ACTION_REF_1",
+          "$ACTION_1:0",
+          "$ACTION_1:1",
+          "$ACTION_KEY",
+          "name",
+          "email",
+          "subject",
+          "message"
+        ]
+      },
+      {
+        "container": "status-website-scenario-test",
+        "id": "status-website-scenario-test/contact",
+        "action": "/contact",
+        "method": "POST",
+        "fields": [
+          "$ACTION_REF_1",
+          "$ACTION_1:0",
+          "$ACTION_1:1",
+          "$ACTION_KEY",
+          "name",
+          "email",
+          "subject",
+          "message"
+        ]
+      }
+    ],
+    "probe_attempts": [
+      {
+        "scope": "local_container",
+        "selector": "local",
+        "container": "status-panel-web",
+        "protocols": [
+          "graphql",
+          "grpc",
+          "html_forms",
+          "kafka",
+          "mcp",
+          "mysql",
+          "openapi",
+          "postgres",
+          "rabbitmq",
+          "redis",
+          "rest",
+          "websocket"
+        ],
+        "outcome": "detected"
+      },
+      {
+        "scope": "local_container",
+        "selector": "local",
+        "container": "web-smtp-1",
+        "protocols": [
+          "graphql",
+          "grpc",
+          "html_forms",
+          "kafka",
+          "mcp",
+          "mysql",
+          "openapi",
+          "postgres",
+          "rabbitmq",
+          "redis",
+          "rest",
+          "websocket"
+        ],
+        "outcome": "empty"
+      },
+      {
+        "scope": "local_container",
+        "selector": "local",
+        "container": "status-website-scenario-test",
+        "protocols": [
+          "graphql",
+          "grpc",
+          "html_forms",
+          "kafka",
+          "mcp",
+          "mysql",
+          "openapi",
+          "postgres",
+          "rabbitmq",
+          "redis",
+          "rest",
+          "websocket"
+        ],
+        "outcome": "detected"
+      }
+    ],
+    "target_kind": "html_form",
+    "probed_at": "2026-05-22T08:14:48.193108+00:00"
+  }
+}

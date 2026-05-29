@@ -6,7 +6,7 @@ Use this to publish the same multi-platform image variants that CI builds for th
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-context stacker=../stacker \
+  --build-context stacker=./stacker \
   -f Dockerfile.prod \
   -t trydirect/status:unstable \
   -t trydirect/status:latest \

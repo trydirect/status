@@ -1,0 +1,47 @@
+name: website-deploy
+description: Repeatable website deployment workflow for simple HTML and Next.js projects using conservative Stacker commands.
+model_match:
+  provider: ollama
+  name_contains:
+    - qwen2.5-code
+    - qwen2.5-coder
+trigger_conditions:
+  app_types:
+    - static
+    - node
+  website_kinds:
+    - html
+    - nextjs
+default_step: init-validate
+required_vars:
+  - public_domain
+  - image_repository
+  - image_tag
+  - cloud_provider
+  - cloud_region
+  - cloud_size
+transcript_rules:
+  default_path: docs/deployment-history.md
+  update_existing: true
+safety_rules:
+  - Never invent Stacker commands or flags.
+  - Inspect before mutate and dry-run before deploy.
+  - Ask for missing secrets only when the current step truly needs them.
+  - Do not assume the image exists remotely until it has been pushed successfully.
+  - Remember that `stacker agent install` does not persist local config unless explicitly requested.
+steps:
+  - id: init-validate
+    title: Validate generated stacker config and local artifacts
+    file: steps/01-init-validate.md
+  - id: image-publish
+    title: Build and publish the application image
+    file: steps/02-image-publish.md
+  - id: cloud-deploy
+    title: Deploy the stack to the cloud target
+    file: steps/03-cloud-deploy.md
+  - id: agent-firewall-dns-proxy
+    title: Install the agent and wire firewall, DNS, and proxy
+    file: steps/04-agent-firewall-dns-proxy.md
+  - id: runtime-ops
+    title: Verify runtime behavior and record the deployment story
+    file: steps/05-runtime-ops.md

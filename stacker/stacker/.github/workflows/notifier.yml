@@ -1,0 +1,20 @@
+name: Notifier
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  notifyTelegram:
+    runs-on: ubuntu-latest
+    concurrency: build
+    steps:
+      - name: send custom message
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          message: |
+            "Github actions on push: build in progress .. ${{ github.event.action }} "

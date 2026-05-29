@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE rating\n        SET \n            comment=$1,\n            rate=$2,\n            hidden=$3,\n            updated_at=NOW() at time zone 'utc'\n        WHERE id = $4\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Bool",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "55e886a505d00b70674a19fd3228915ab4494cbd7058fdec868ab93c0fcfb4d8"
+}

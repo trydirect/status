@@ -1,0 +1,2 @@
+-- Data migration rollback is intentionally a no-op because deleted rows cannot
+-- be reconstructed safely.

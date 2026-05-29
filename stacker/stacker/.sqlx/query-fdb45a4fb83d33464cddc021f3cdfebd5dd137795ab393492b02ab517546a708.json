@@ -1,0 +1,218 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE project_app SET\n            code = $2,\n            name = $3,\n            image = $4,\n            environment = $5,\n            ports = $6,\n            volumes = $7,\n            domain = $8,\n            ssl_enabled = $9,\n            resources = $10,\n            restart_policy = $11,\n            command = $12,\n            entrypoint = $13,\n            networks = $14,\n            depends_on = $15,\n            healthcheck = $16,\n            labels = $17,\n            config_files = $18,\n            template_source = $19,\n            enabled = $20,\n            deploy_order = $21,\n            parent_app_code = $22,\n            deployment_id = $23,\n            config_version = COALESCE(config_version, 0) + 1,\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING *\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "image",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "environment",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "ports",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "volumes",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "domain",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "ssl_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "resources",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "restart_policy",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "command",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "entrypoint",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "networks",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 15,
+        "name": "depends_on",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 16,
+        "name": "healthcheck",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 17,
+        "name": "labels",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 18,
+        "name": "enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 19,
+        "name": "deploy_order",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 20,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 21,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 22,
+        "name": "config_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 23,
+        "name": "vault_synced_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 24,
+        "name": "vault_sync_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 25,
+        "name": "config_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 26,
+        "name": "config_files",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 27,
+        "name": "template_source",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 28,
+        "name": "parent_app_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 29,
+        "name": "deployment_id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Varchar",
+        "Bool",
+        "Jsonb",
+        "Varchar",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Varchar",
+        "Bool",
+        "Int4",
+        "Varchar",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "fdb45a4fb83d33464cddc021f3cdfebd5dd137795ab393492b02ab517546a708"
+}

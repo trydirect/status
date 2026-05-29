@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id, c.command_id, c.deployment_hash, c.type, c.status, c.priority,\n               c.parameters, c.result, c.error, c.created_by, c.created_at, c.updated_at,\n               c.timeout_seconds, c.metadata\n        FROM commands c\n        INNER JOIN command_queue q ON c.command_id = q.command_id\n        WHERE q.deployment_hash = $1\n        ORDER BY q.priority DESC, q.created_at ASC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "command_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "deployment_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "priority",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "parameters",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "result",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "error",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_by",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "metadata",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "91966b9578edeb2303bbba93cfc756595265b21dd6f7a06a2f7a846d162b340c"
+}

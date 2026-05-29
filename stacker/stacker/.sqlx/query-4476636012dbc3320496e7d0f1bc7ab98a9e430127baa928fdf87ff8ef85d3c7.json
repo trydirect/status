@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO chat_conversations (user_id, project_id, messages)\n                   VALUES ($1, NULL, $2)\n                   ON CONFLICT (user_id) WHERE project_id IS NULL\n                   DO UPDATE SET messages = EXCLUDED.messages, updated_at = NOW()\n                   RETURNING id, user_id, project_id, messages, created_at, updated_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "project_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "messages",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4476636012dbc3320496e7d0f1bc7ab98a9e430127baa928fdf87ff8ef85d3c7"
+}

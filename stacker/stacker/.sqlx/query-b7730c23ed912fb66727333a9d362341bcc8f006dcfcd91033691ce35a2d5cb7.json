@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT occurred_at\n        FROM marketplace_event\n        WHERE template_id = $1\n        ORDER BY occurred_at DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "occurred_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b7730c23ed912fb66727333a9d362341bcc8f006dcfcd91033691ce35a2d5cb7"
+}

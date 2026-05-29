@@ -1,0 +1,126 @@
+name: Rust
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ dev, main ]
+  pull_request:
+    branches: [ dev, main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build binaries (Linux/macOS)
+    env:
+      SQLX_OFFLINE: true
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: stacker-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: stacker-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: stacker-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install protoc
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install protobuf
+          fi
+      - name: Verify .sqlx cache exists
+        run: |
+          ls -lh .sqlx/ || echo ".sqlx directory not found"
+          find .sqlx -type f 2>/dev/null | wc -l
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+      - name: Cache Cargo registry/git (no target — cross-compiled release builds cause cache bloat)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+          key: ${{ matrix.target }}
+      - name: Build server (release)
+        run: cargo build --release --target ${{ matrix.target }} --bin server --verbose
+
+      - name: Build console (release with features)
+        run: cargo build --release --target ${{ matrix.target }} --bin console --features explain --verbose
+
+      - name: Build stacker-cli (release)
+        run: cargo build --release --target ${{ matrix.target }} --bin stacker-cli --verbose
+
+      - name: Prepare binaries
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/server artifacts/server
+          cp target/${{ matrix.target }}/release/console artifacts/console
+          cp target/${{ matrix.target }}/release/stacker-cli artifacts/stacker-cli
+          tar -czf ${{ matrix.artifact_name }}.tar.gz -C artifacts .
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.tar.gz
+          retention-days: 7
+  test:
+    name: Run CLI tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432/tcp
+        options: >-
+          --init
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SQLX_OFFLINE: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export PostgreSQL connection env
+        run: |
+          echo "PGHOST=127.0.0.1" >> "$GITHUB_ENV"
+          echo "PGPORT=${{ job.services.postgres.ports['5432'] }}" >> "$GITHUB_ENV"
+          echo "PGUSER=postgres" >> "$GITHUB_ENV"
+          echo "PGPASSWORD=postgres" >> "$GITHUB_ENV"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in $(seq 1 60); do
+            if bash -lc "exec 3<>/dev/tcp/${PGHOST}/${PGPORT}" 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL did not become ready in time" >&2
+          exit 1
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Cache Cargo registry/git/target (with stale-artifact pruning)
+        uses: Swatinem/rust-cache@v2
+      - name: Run CLI integration tests
+        run: cargo test --tests --verbose
