@@ -483,13 +483,13 @@ fn redact_key_value(message: &str, key: &str) -> String {
         return message.to_string();
     };
     let value_start = message[index + key.len()..]
-        .find(|ch: char| ch == ':' || ch == '=')
+        .find([':', '='])
         .map(|offset| index + key.len() + offset + 1);
     let Some(value_start) = value_start else {
         return message.to_string();
     };
     let value_end = message[value_start..]
-        .find(|ch: char| ch == ',' || ch == '&' || ch == '\n')
+        .find([',', '&', '\n'])
         .map(|offset| value_start + offset)
         .unwrap_or(message.len());
     format!("{}***{}", &message[..value_start], &message[value_end..])

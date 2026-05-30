@@ -8411,6 +8411,7 @@ fn probe_issue_for_protocol(protocol: &str) -> String {
 }
 
 #[cfg(any(feature = "docker", test))]
+#[allow(clippy::too_many_arguments)]
 fn build_probe_result_payload(
     deployment_hash: &str,
     app_code: &str,
