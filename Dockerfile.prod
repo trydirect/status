@@ -10,7 +10,7 @@ COPY src src
 COPY templates templates
 COPY static static
 COPY config.json config.json
-COPY stacker stacker
+COPY stacker/crates stacker/crates
 
 # Build a statically linked binary for the target architecture.
 RUN case "${TARGETARCH}" in \
