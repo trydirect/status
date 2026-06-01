@@ -404,7 +404,11 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
                         .typ
                         .map(|t| {
                             let s = t.to_string();
-                            if s.is_empty() { "tcp".to_string() } else { s }
+                            if s.is_empty() {
+                                "tcp".to_string()
+                            } else {
+                                s
+                            }
                         })
                         .unwrap_or_else(|| "tcp".to_string());
                     Some(format!("{}:{}/{}", host_port, p.private_port, proto))
