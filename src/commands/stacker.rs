@@ -4930,6 +4930,41 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     let target_name = resolve_container_name(&data.app_code, &data.container);
 
+    // Return health for every container when app_code is "all" or empty.
+    if data.app_code == "all" || data.app_code.is_empty() && !data.include_system {
+        let mut all_list = Vec::new();
+        for entry in &containers {
+            let container_state = map_container_state(&entry.status).to_string();
+            let mut item = json!({
+                "app_code": entry.name.trim_start_matches('/'),
+                "container_name": entry.name.trim_start_matches('/'),
+                "container_state": container_state,
+                "status": derive_health_status(&container_state, false),
+            });
+            if data.include_metrics {
+                item["metrics"] = build_metrics(entry);
+            }
+            all_list.push(item);
+        }
+        let overall = if all_list
+            .iter()
+            .all(|c| c.get("status").and_then(|v| v.as_str()) == Some("ok"))
+        {
+            "ok"
+        } else {
+            "degraded"
+        };
+        let body = json!({
+            "type": "all_health",
+            "deployment_hash": data.deployment_hash.clone(),
+            "status": overall,
+            "last_heartbeat_at": now_timestamp(),
+            "containers": all_list,
+        });
+        result.result = Some(body);
+        return Ok(result);
+    }
+
     // Handle system containers request (status_panel, compose-agent, etc.)
     if data.include_system && (data.app_code.is_empty() || data.app_code == "system") {
         let system_patterns = [
@@ -8081,6 +8116,7 @@ async fn handle_list_containers(
                         "name": c.name,
                         "status": c.status,
                         "image": c.image,
+                        "ports": c.ports,
                         "cpu_pct": c.cpu_pct,
                         "mem_usage_bytes": c.mem_usage_bytes,
                         "mem_limit_bytes": c.mem_limit_bytes,
