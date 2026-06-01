@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, project_id, deployment_hash, user_id, deleted, status, runtime, metadata,\n               last_seen_at, created_at, updated_at\n        FROM deployment\n        WHERE project_id = $1 AND deleted = false\n        ORDER BY created_at DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "deployment_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "deleted",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "runtime",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "metadata",
+        "type_info": "Json"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "5e0b8298645aaf647eb1eb16dd74d81d663436e3a4fc6900d6f066e261ea8c54"
+}

@@ -1,0 +1,34 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .stacker/Dockerfile
+    ports:
+    - 3000:3000
+    restart: unless-stopped
+    networks:
+    - app-network
+  web:
+    image: trydirect/stacker-website:latest
+    ports:
+    - 3456:3456
+    volumes:
+    - .:/app
+    restart: unless-stopped
+    networks:
+    - app-network
+  nginx:
+    image: nginx:alpine
+    ports:
+    - 80:80
+    - 443:443
+    volumes:
+    - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+    - app
+    restart: unless-stopped
+    networks:
+    - app-network
+networks:
+  app-network:
+    driver: bridge

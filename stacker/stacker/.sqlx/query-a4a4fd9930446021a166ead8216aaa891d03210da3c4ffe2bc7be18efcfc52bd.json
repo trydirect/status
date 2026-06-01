@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO stack_template (\n            id,\n            creator_user_id,\n            creator_name,\n            name,\n            slug,\n            short_description,\n            status,\n            tags,\n            tech_stack,\n            view_count,\n            deploy_count,\n            created_at,\n            updated_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, 'approved', '[]'::jsonb, '{}'::jsonb, 0, 0, NOW(), NOW())\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4a4fd9930446021a166ead8216aaa891d03210da3c4ffe2bc7be18efcfc52bd"
+}

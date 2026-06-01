@@ -1,0 +1,1 @@
+-- No-op: this migration only ensured idempotency and did not create new rows

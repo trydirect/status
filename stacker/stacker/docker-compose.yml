@@ -1,0 +1,69 @@
+version: "2.2"
+
+volumes:
+  stackerdb:
+    driver: local
+
+  redis-data:
+    driver: local
+
+services:
+
+  stacker:
+    image: trydirect/stacker:test
+    build: .
+    container_name: stacker
+    restart: always
+    volumes:
+      - ./files:/app/files
+      - ./docker/local/configuration.yaml:/app/configuration.yaml
+      - ./access_control.conf:/app/access_control.conf
+      - ./migrations:/app/migrations
+      - ./docker/local/.env:/app/.env
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./docker/local/.env
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=1
+    depends_on:
+      stackerdb:
+        condition: service_healthy
+
+
+  redis:
+      container_name: redis
+      image: redis
+      restart: always
+      ports:
+        - 6379:6379
+      volumes:
+        - redis-data:/data
+#        - ./redis/rc.local:/etc/rc.local
+#        - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+      sysctls:
+        net.core.somaxconn: 1024
+      logging:
+        driver: "json-file"
+        options:
+          max-size: "10m"
+          tag: "container_{{.Name}}"
+
+
+  stackerdb:
+    container_name: stackerdb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    image: postgres:18.3
+    restart: always
+    ports:
+      - 5432:5432
+    env_file:
+      - ./docker/local/.env
+    volumes:
+      - stackerdb:/var/lib/postgresql
+      - ./docker/local/postgresql.conf:/etc/postgresql/postgresql.conf

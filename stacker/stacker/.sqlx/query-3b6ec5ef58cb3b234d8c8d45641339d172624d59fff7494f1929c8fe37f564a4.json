@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n           id,\n           user_id,\n           secret \n        FROM client c\n        WHERE c.id = $1\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "secret",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "3b6ec5ef58cb3b234d8c8d45641339d172624d59fff7494f1929c8fe37f564a4"
+}

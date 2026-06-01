@@ -1,0 +1,12 @@
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/templates' AND v2='GET';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/templates' AND v2='POST';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/templates/:template_id' AND v2='GET';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/templates/:template_id' AND v2='DELETE';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/instances' AND v2='POST';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/instances/:deployment_hash' AND v2='GET';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/instances/detail/:instance_id' AND v2='GET';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/instances/:instance_id' AND v2='DELETE';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/instances/:instance_id/status' AND v2='PUT';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/instances/:instance_id/executions' AND v2='GET';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/executions/:execution_id' AND v2='GET';
+DELETE FROM public.casbin_rule WHERE ptype='p' AND v0='group_user' AND v1='/api/v1/pipes/executions/:execution_id/replay' AND v2='POST';

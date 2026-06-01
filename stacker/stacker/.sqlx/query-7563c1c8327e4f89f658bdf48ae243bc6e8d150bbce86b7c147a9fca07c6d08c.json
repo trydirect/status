@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO server (\n        user_id,\n        project_id,\n        cloud_id,\n        region,\n        zone,\n        server,\n        os,\n        disk_type,\n        created_at,\n        updated_at,\n        srv_ip,\n        ssh_user,\n        ssh_port,\n        vault_key_path,\n        connection_mode,\n        key_status,\n        name\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW() at time zone 'utc',NOW() at time zone 'utc', $9, $10, $11, $12, $13, $14, $15)\n        RETURNING id;\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Int4",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7563c1c8327e4f89f658bdf48ae243bc6e8d150bbce86b7c147a9fca07c6d08c"
+}

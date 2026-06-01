@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO user_agreement (agrt_id, user_id, created_at, updated_at)\n        VALUES ($1, $2, $3, $4)\n        RETURNING id;\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Varchar",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9d821bd27d5202d2c3d49a2f148ff7f21bafde8c7c1306cc7efc976a9eae0071"
+}

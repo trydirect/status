@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_cloud_user_name;
+ALTER TABLE cloud DROP COLUMN IF EXISTS name;

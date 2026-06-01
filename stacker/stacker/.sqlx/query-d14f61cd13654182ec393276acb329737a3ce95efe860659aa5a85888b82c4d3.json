@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE stack_template \n        SET view_count = 25, deploy_count = 10\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d14f61cd13654182ec393276acb329737a3ce95efe860659aa5a85888b82c4d3"
+}

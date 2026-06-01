@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM command_queue\n        WHERE command_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "41edb5195e8e68b8c80c8412f5bb93cf4838bd1e7e668dafd0fffbd13c90d5aa"
+}

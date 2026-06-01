@@ -1,0 +1,87 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT \n            id,\n            user_id,\n            obj_id,\n            category as \"category: _\",\n            comment,\n            hidden,\n            rate,\n            created_at,\n            updated_at\n        FROM rating\n        WHERE id=$1\n        LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "obj_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "category: _",
+        "type_info": {
+          "Custom": {
+            "name": "rate_category",
+            "kind": {
+              "Enum": [
+                "application",
+                "cloud",
+                "project",
+                "deploymentSpeed",
+                "documentation",
+                "design",
+                "techSupport",
+                "price",
+                "memoryUsage"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "comment",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "hidden",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "rate",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "8db13c16e29b4aecd87646859296790f3e5971d7a2bff2d32f2d92590ec3393d"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stack_template SET status = $2, approved_at = CASE WHEN $3 THEN now() ELSE approved_at END WHERE id = $1::uuid",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5bf9f8aacbe676339d0811d305abace6cc4a4d068392f7b58f2d165042ab509e"
+}

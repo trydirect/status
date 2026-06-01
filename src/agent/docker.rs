@@ -35,6 +35,8 @@ pub struct ContainerHealth {
     pub restart_count: Option<i64>,
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub labels: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub ports: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -117,7 +119,7 @@ fn name_matches(container_name: &str, app_code: &str) -> bool {
     false
 }
 
-async fn resolve_container_name(name: &str) -> Result<String> {
+pub async fn resolve_container_name(name: &str) -> Result<String> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
@@ -392,11 +394,36 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        let ports = c
+            .ports
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| {
+                if let Some(host_port) = p.public_port {
+                    let proto = p
+                        .typ
+                        .map(|t| {
+                            let s = t.to_string();
+                            if s.is_empty() {
+                                "tcp".to_string()
+                            } else {
+                                s
+                            }
+                        })
+                        .unwrap_or_else(|| "tcp".to_string());
+                    Some(format!("{}:{}/{}", host_port, p.private_port, proto))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
         let mut item = ContainerHealth {
             name: name.clone(),
             status,
             image: c.image.unwrap_or_default(),
             labels: c.labels.unwrap_or_default(),
+            ports,
             ..Default::default()
         };
 
@@ -901,6 +928,10 @@ mod tests {
         assert!(name_matches(
             "project-nginx_proxy_manager-1",
             "nginx_proxy_manager"
+        ));
+        assert!(name_matches(
+            "project-status-panel-web-1",
+            "status-panel-web"
         ));
     }
 }

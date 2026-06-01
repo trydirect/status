@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stack_template SET status = 'submitted' WHERE id = $1::uuid AND status IN ('draft','rejected','needs_changes')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e1258273806ab030586a80cb7ac83a5339d0a631fc702082f95642ebb0c1d3a7"
+}

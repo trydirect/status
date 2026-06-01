@@ -1,0 +1,275 @@
+name: Docker CICD
+
+on:
+  push:
+    branches:
+      - main
+      - testing
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+  release:
+    types: [published]
+
+jobs:
+
+  cicd-docker:
+    name: Cargo and npm build
+    runs-on: ubuntu-latest
+    #runs-on: [self-hosted, linux]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SQLX_OFFLINE: true
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Export PostgreSQL connection env
+        run: |
+          echo "PGHOST=127.0.0.1" >> "$GITHUB_ENV"
+          echo "PGPORT=${{ job.services.postgres.ports['5432'] }}" >> "$GITHUB_ENV"
+          echo "PGUSER=postgres" >> "$GITHUB_ENV"
+          echo "PGPASSWORD=postgres" >> "$GITHUB_ENV"
+
+      - name: Install OpenSSL and protoc build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+
+      - name: Verify .sqlx cache exists
+        run: |
+          ls -lh .sqlx/ || echo ".sqlx directory not found"
+          find .sqlx -type f 2>/dev/null | wc -l
+
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: docker-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            docker-registry-
+            docker-
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: docker-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            docker-index-
+            docker-
+
+      - name: Generate Secret Key
+        run: |
+          head -c16 /dev/urandom > src/secret.key
+
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in $(seq 1 60); do
+            if bash -lc "exec 3<>/dev/tcp/${PGHOST}/${PGPORT}" 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL did not become ready in time" >&2
+          exit 1
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: docker-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            docker-build-
+            docker-
+
+      - name: Cargo check
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+
+      - name: Cargo test
+        if: ${{ always() }}
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+
+      - name: Rustfmt
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          components: rustfmt
+          command: fmt
+          args: --all -- --check
+
+      - name: Rustfmt
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          components: clippy
+          command: clippy
+          args: -- -D warnings
+
+      - name: Build server (release)
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --bin server
+
+      - name: Set up Node.js
+        if: ${{ hashFiles('web/package.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm install, build, and test
+        if: ${{ hashFiles('web/package.json') != '' }}
+        working-directory: ./web
+        run: |
+          npm install
+          npm run build
+      #   npm test
+
+      - name: Archive production artifacts
+        if: ${{ hashFiles('web/package.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-without-markdown
+          path: |
+            web/dist
+            !web/dist/**/*.md
+
+      - name: Display structure of downloaded files
+        if: ${{ hashFiles('web/package.json') != '' }}
+        run: ls -R web/dist
+
+      - name: Copy app files and zip
+        run: |
+          mkdir -p app/stacker/dist
+          cp target/release/server app/stacker/server
+          if [ -d web/dist ]; then cp -a web/dist/. app/stacker; fi
+          cp Dockerfile app/Dockerfile
+          cp access_control.conf.dist app/access_control.conf.dist
+          cd app
+          touch .env
+          tar -czvf ../app.tar.gz .
+          cd ..
+
+      - name: Upload app archive for Docker job
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-linux-docker
+          path: app.tar.gz
+
+  cicd-linux-docker:
+    name: CICD Docker
+    runs-on: ubuntu-latest
+    #runs-on: [self-hosted, linux]
+    needs: cicd-docker
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+      - name: Verify shared pipe fixtures
+        run: |
+          test -d "${GITHUB_WORKSPACE}/tests/fixtures/pipe-contract"
+
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      -
+        name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Set Docker tags
+        id: docker_tags
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tags=trydirect/stacker:${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=trydirect/stacker:latest" >> "$GITHUB_OUTPUT"
+          fi
+      -
+        name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-contexts: |
+            shared_fixtures=${{ github.workspace }}/tests/fixtures
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.docker_tags.outputs.tags }}
+
+  stackerdb-docker:
+    name: StackerDB Docker
+    runs-on: ubuntu-latest
+    #runs-on: [self-hosted, linux]
+    needs: cicd-docker
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      -
+        name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Set Docker tags
+        id: stackerdb_tags
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tags=trydirect/stackerdb:${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=trydirect/stackerdb:latest" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./stackerdb
+          file: ./stackerdb/Dockerfile
+          push: true
+          tags: ${{ steps.stackerdb_tags.outputs.tags }}

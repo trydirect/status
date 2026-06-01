@@ -24,7 +24,7 @@ pub struct NpmConfig {
 impl NpmConfig {
     pub fn new(host: String, email: String, password: String) -> Self {
         Self {
-            host,
+            host: normalize_npm_host(host),
             email,
             password,
         }
@@ -44,6 +44,21 @@ impl NpmConfig {
         let password = std::env::var("NPM_PASSWORD").ok()?;
         Some(Self::new(host, email, password))
     }
+}
+
+fn normalize_npm_host(host: String) -> String {
+    let canonical = "nginx-proxy-manager";
+    let legacy = "nginx_proxy_manager";
+
+    if host == legacy {
+        return canonical.to_string();
+    }
+
+    if let Some(rest) = host.strip_prefix(&format!("{legacy}:")) {
+        return format!("{canonical}:{rest}");
+    }
+
+    host.replace(&format!("://{legacy}"), &format!("://{canonical}"))
 }
 
 /// Request to create or update a proxy host
@@ -72,9 +87,15 @@ pub struct ProxyHostResult {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm_response: Option<Value>,
     pub domain_names: Vec<String>,
     pub forward_host: String,
     pub forward_port: u16,
+    pub adopted: bool,
+    pub ssl_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssl_status: Option<String>,
 }
 
 /// Nginx Proxy Manager API client
@@ -209,7 +230,8 @@ impl NpmClient {
             .context("Failed to send request to NPM")?;
 
         let status = response.status();
-        let body: Value = response.json().await.unwrap_or(json!({}));
+        let body_text = response.text().await.unwrap_or_default();
+        let body = npm_response_body(&body_text);
 
         if status.is_success() {
             let proxy_host_id = body["id"].as_i64();
@@ -220,26 +242,59 @@ impl NpmClient {
                 proxy_host_id,
                 message: "Proxy host created successfully".to_string(),
                 details: None,
+                npm_response: None,
                 domain_names: request.domain_names.clone(),
                 forward_host: request.forward_host.clone(),
                 forward_port: request.forward_port,
+                adopted: false,
+                ssl_enabled: request.ssl_enabled,
+                ssl_status: Some(if request.ssl_enabled {
+                    "enabled".to_string()
+                } else {
+                    "disabled".to_string()
+                }),
             })
         } else {
             let details = npm_error_details(&body);
+            if let Some(primary_domain) = request.domain_names.first() {
+                match self.find_proxy_host_by_domain(primary_domain).await {
+                    Ok(Some(existing_host)) => {
+                        return Ok(adopt_existing_proxy_host_after_create_failure(
+                            request,
+                            &existing_host,
+                            details,
+                            Some(body.clone()),
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            domain = %primary_domain,
+                            "Failed to verify whether NPM created the proxy host after an error"
+                        );
+                    }
+                }
+            }
+
             let message = match details.as_deref() {
                 Some(details) => format!("Failed to create proxy host: {} - {}", status, details),
                 None => format!("Failed to create proxy host: {}", status),
             };
-            tracing::error!(%message, response_body = %body);
+            tracing::error!(%message);
 
             Ok(ProxyHostResult {
                 success: false,
                 proxy_host_id: None,
                 message,
                 details,
+                npm_response: Some(body),
                 domain_names: request.domain_names.clone(),
                 forward_host: request.forward_host.clone(),
                 forward_port: request.forward_port,
+                adopted: false,
+                ssl_enabled: false,
+                ssl_status: Some("unknown".to_string()),
             })
         }
     }
@@ -298,9 +353,13 @@ impl NpmClient {
                     proxy_host_id: Some(host_id),
                     message: "Proxy host deleted successfully".to_string(),
                     details: None,
+                    npm_response: None,
                     domain_names: domain_names.to_vec(),
                     forward_host,
                     forward_port,
+                    adopted: false,
+                    ssl_enabled: false,
+                    ssl_status: None,
                 })
             } else {
                 let status = delete_response.status();
@@ -312,9 +371,13 @@ impl NpmClient {
                     proxy_host_id: Some(host_id),
                     message,
                     details: None,
+                    npm_response: None,
                     domain_names: domain_names.to_vec(),
                     forward_host,
                     forward_port,
+                    adopted: false,
+                    ssl_enabled: false,
+                    ssl_status: None,
                 })
             }
         } else {
@@ -326,9 +389,13 @@ impl NpmClient {
                 proxy_host_id: None,
                 message: "No matching proxy host found (already deleted?)".to_string(),
                 details: None,
+                npm_response: None,
                 domain_names: domain_names.to_vec(),
                 forward_host: String::new(),
                 forward_port: 0,
+                adopted: false,
+                ssl_enabled: false,
+                ssl_status: None,
             })
         }
     }
@@ -362,6 +429,131 @@ impl NpmClient {
                 false
             }
         }))
+    }
+}
+
+fn npm_response_body(body_text: &str) -> Value {
+    let trimmed = body_text.trim();
+    if trimmed.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(trimmed)
+            .map(redact_json_value)
+            .unwrap_or_else(|_| json!({ "body": redact_sensitive(trimmed) }))
+    }
+}
+
+fn redact_json_value(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "token" | "secret" | "password" | "credential" | "credentials"
+                ) {
+                    *child = Value::String("***".to_string());
+                } else {
+                    *child = redact_json_value(child.take());
+                }
+            }
+            value
+        }
+        Value::Array(items) => {
+            for item in items {
+                *item = redact_json_value(item.take());
+            }
+            value
+        }
+        Value::String(message) => Value::String(redact_sensitive(message)),
+        other => other.take(),
+    }
+}
+
+fn redact_sensitive(message: &str) -> String {
+    let mut redacted = message.to_string();
+    for key in ["token", "secret", "password", "credential"] {
+        redacted = redact_key_value(&redacted, key);
+    }
+    redacted
+}
+
+fn redact_key_value(message: &str, key: &str) -> String {
+    let lower = message.to_lowercase();
+    let Some(index) = lower.find(key) else {
+        return message.to_string();
+    };
+    let value_start = message[index + key.len()..]
+        .find([':', '='])
+        .map(|offset| index + key.len() + offset + 1);
+    let Some(value_start) = value_start else {
+        return message.to_string();
+    };
+    let value_end = message[value_start..]
+        .find([',', '&', '\n'])
+        .map(|offset| value_start + offset)
+        .unwrap_or(message.len());
+    format!("{}***{}", &message[..value_start], &message[value_end..])
+}
+
+fn proxy_host_ssl_enabled(host: &Value) -> bool {
+    match host.get("certificate_id") {
+        Some(Value::Number(value)) => value.as_i64().unwrap_or_default() > 0,
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && value != "null"
+        }
+        Some(value) => !value.is_null(),
+        None => false,
+    }
+}
+
+fn adopt_existing_proxy_host_after_create_failure(
+    request: &ProxyHostRequest,
+    existing_host: &Value,
+    create_error: Option<String>,
+    npm_response: Option<Value>,
+) -> ProxyHostResult {
+    let ssl_enabled = proxy_host_ssl_enabled(existing_host);
+    let ssl_status = if request.ssl_enabled && !ssl_enabled {
+        "pending_or_failed_http_only"
+    } else if ssl_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let message = if request.ssl_enabled && !ssl_enabled {
+        "Proxy host exists after NPM create returned an error; adopted existing HTTP route, SSL certificate is pending or failed"
+    } else {
+        "Proxy host exists after NPM create returned an error; adopted existing route"
+    };
+
+    ProxyHostResult {
+        success: true,
+        proxy_host_id: existing_host["id"].as_i64(),
+        message: message.to_string(),
+        details: create_error,
+        npm_response,
+        domain_names: existing_host
+            .get("domain_names")
+            .and_then(Value::as_array)
+            .map(|domains| {
+                domains
+                    .iter()
+                    .filter_map(|domain| domain.as_str().map(ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_else(|| request.domain_names.clone()),
+        forward_host: existing_host["forward_host"]
+            .as_str()
+            .unwrap_or(&request.forward_host)
+            .to_string(),
+        forward_port: existing_host["forward_port"]
+            .as_u64()
+            .map(|port| port as u16)
+            .unwrap_or(request.forward_port),
+        adopted: true,
+        ssl_enabled,
+        ssl_status: Some(ssl_status.to_string()),
     }
 }
 
@@ -407,6 +599,17 @@ mod tests {
         assert_eq!(config.host, "http://npm.local");
         assert_eq!(config.email, "ops@example.com");
         assert_eq!(config.password, "secret");
+    }
+
+    #[test]
+    fn npm_config_normalizes_legacy_underscore_internal_host() {
+        let config = NpmConfig::new(
+            "http://nginx_proxy_manager:81".to_string(),
+            "ops@example.com".to_string(),
+            "secret".to_string(),
+        );
+
+        assert_eq!(config.host, "http://nginx-proxy-manager:81");
     }
 
     #[test]
@@ -563,6 +766,133 @@ mod tests {
         assert_eq!(
             result.message,
             "Failed to create proxy host: 500 Internal Server Error - Internal Error"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_proxy_host_adopts_existing_host_after_create_failure() {
+        let mut server = Server::new_async().await;
+        let _token_mock = server
+            .mock("POST", "/api/tokens")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"token":"token-123"}"#)
+            .create_async()
+            .await;
+        let _create_mock = server
+            .mock("POST", "/api/nginx/proxy-hosts")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"message":"Internal Error"}}"#)
+            .create_async()
+            .await;
+        let list_mock = server
+            .mock("GET", "/api/nginx/proxy-hosts")
+            .match_header("authorization", "Bearer token-123")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"[{
+                    "id": 9,
+                    "domain_names": ["app.example.com"],
+                    "forward_host": "app",
+                    "forward_port": 8080,
+                    "certificate_id": 4,
+                    "ssl_forced": true,
+                    "http2_support": true
+                }]"#,
+            )
+            .create_async()
+            .await;
+
+        let mut client = NpmClient::with_credentials(
+            server.url(),
+            "ops@example.com".to_string(),
+            "secret".to_string(),
+        );
+        let result = client
+            .create_proxy_host(&ProxyHostRequest {
+                domain_names: vec!["app.example.com".to_string()],
+                forward_host: "app".to_string(),
+                forward_port: 8080,
+                ssl_enabled: true,
+                ssl_forced: true,
+                http2_support: true,
+            })
+            .await
+            .expect("existing host should be adopted");
+
+        assert!(result.success);
+        assert!(result.adopted);
+        assert_eq!(result.proxy_host_id, Some(9));
+        assert_eq!(result.ssl_status.as_deref(), Some("enabled"));
+        assert_eq!(result.details.as_deref(), Some("Internal Error"));
+        list_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_proxy_host_reports_http_only_adoption_when_ssl_was_requested() {
+        let mut server = Server::new_async().await;
+        let _token_mock = server
+            .mock("POST", "/api/tokens")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"token":"token-123"}"#)
+            .create_async()
+            .await;
+        let _create_mock = server
+            .mock("POST", "/api/nginx/proxy-hosts")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"message":"certificate challenge failed"}}"#)
+            .create_async()
+            .await;
+        let _list_mock = server
+            .mock("GET", "/api/nginx/proxy-hosts")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"[{
+                    "id": 10,
+                    "domain_names": ["app.example.com"],
+                    "forward_host": "app",
+                    "forward_port": 8080,
+                    "certificate_id": null,
+                    "ssl_forced": false,
+                    "http2_support": false
+                }]"#,
+            )
+            .create_async()
+            .await;
+
+        let mut client = NpmClient::with_credentials(
+            server.url(),
+            "ops@example.com".to_string(),
+            "secret".to_string(),
+        );
+        let result = client
+            .create_proxy_host(&ProxyHostRequest {
+                domain_names: vec!["app.example.com".to_string()],
+                forward_host: "app".to_string(),
+                forward_port: 8080,
+                ssl_enabled: true,
+                ssl_forced: true,
+                http2_support: true,
+            })
+            .await
+            .expect("HTTP-only existing host should be adopted");
+
+        assert!(result.success);
+        assert!(result.adopted);
+        assert!(!result.ssl_enabled);
+        assert_eq!(
+            result.ssl_status.as_deref(),
+            Some("pending_or_failed_http_only")
+        );
+        assert!(result.message.contains("adopted existing HTTP route"));
+        assert_eq!(
+            result.details.as_deref(),
+            Some("certificate challenge failed")
         );
     }
 }
