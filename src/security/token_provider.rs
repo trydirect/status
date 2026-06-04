@@ -304,8 +304,15 @@ mod tests {
         let tp = TokenProvider::new("stale-token".into(), Some(vault), "dep-xyz".into());
 
         let changed = tp.refresh().await.unwrap();
-        assert!(!changed, "Strategy 3 must not claim success on write failure");
-        assert_eq!(tp.get().await, "stale-token", "token must not change on failure");
+        assert!(
+            !changed,
+            "Strategy 3 must not claim success on write failure"
+        );
+        assert_eq!(
+            tp.get().await,
+            "stale-token",
+            "token must not change on failure"
+        );
 
         write.assert_async().await;
     }
