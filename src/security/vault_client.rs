@@ -49,7 +49,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Identity, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -369,13 +369,23 @@ trait VaultTransport: Send + Sync {
 #[derive(Debug, Default)]
 struct ReqwestVaultTransport;
 
+impl ReqwestVaultTransport {
+    fn build_client() -> Result<Client> {
+        let mut builder = Client::builder()
+            .timeout(std::time::Duration::from_secs(10));
+
+        if let Some(identity) = load_mtls_identity() {
+            builder = builder.identity(identity);
+        }
+
+        builder.build().context("creating HTTP client")
+    }
+}
+
 #[async_trait]
 impl VaultTransport for ReqwestVaultTransport {
     async fn get(&self, url: &str, token: &str) -> Result<VaultHttpResponse> {
-        let response = Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .context("creating HTTP client")?
+        let response = Self::build_client()?
             .get(url)
             .header("X-Vault-Token", token)
             .send()
@@ -393,10 +403,7 @@ impl VaultTransport for ReqwestVaultTransport {
         token: &str,
         payload: &serde_json::Value,
     ) -> Result<VaultHttpResponse> {
-        let response = Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .context("creating HTTP client")?
+        let response = Self::build_client()?
             .post(url)
             .header("X-Vault-Token", token)
             .json(payload)
@@ -407,6 +414,39 @@ impl VaultTransport for ReqwestVaultTransport {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         Ok(VaultHttpResponse { status, body })
+    }
+}
+
+/// Load mTLS client certificate identity from environment variables.
+///
+/// Supports two modes:
+/// 1. Inline PEM via `VAULT_CLIENT_CERT` and `VAULT_CLIENT_KEY` env vars
+/// 2. File paths via `VAULT_CLIENT_CERT_PATH` and `VAULT_CLIENT_KEY_PATH` env vars
+///
+/// Returns `None` if neither set (mTLS is optional — degradation path).
+fn load_mtls_identity() -> Option<Identity> {
+    let cert_pem = std::env::var("VAULT_CLIENT_CERT").ok()
+        .or_else(|| {
+            let path = std::env::var("VAULT_CLIENT_CERT_PATH").ok()?;
+            std::fs::read_to_string(path).ok()
+        })?;
+
+    let key_pem = std::env::var("VAULT_CLIENT_KEY").ok()
+        .or_else(|| {
+            let path = std::env::var("VAULT_CLIENT_KEY_PATH").ok()?;
+            std::fs::read_to_string(path).ok()
+        })?;
+
+    let identity_pem = format!("{}\n{}", cert_pem, key_pem);
+    match Identity::from_pem(identity_pem.as_bytes()) {
+        Ok(identity) => {
+            debug!("mTLS client identity loaded for Vault connections");
+            Some(identity)
+        }
+        Err(e) => {
+            warn!("Failed to load mTLS client identity: {}", e);
+            None
+        }
     }
 }
 
@@ -495,8 +535,15 @@ impl VaultClient {
                 // Configure HTTP client with security-conscious defaults:
                 // - 10 second timeout prevents resource exhaustion from hanging connections
                 // - TLS certificate validation enabled by default (reqwest behavior)
-                let http_client = Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
+                // - mTLS client identity loaded from VAULT_CLIENT_CERT / VAULT_CLIENT_KEY
+                let mut builder = Client::builder()
+                    .timeout(std::time::Duration::from_secs(10));
+
+                if let Some(identity) = load_mtls_identity() {
+                    builder = builder.identity(identity);
+                }
+
+                let http_client = builder
                     .build()
                     .context("creating HTTP client")?;
 
