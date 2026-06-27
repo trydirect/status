@@ -371,8 +371,7 @@ struct ReqwestVaultTransport;
 
 impl ReqwestVaultTransport {
     fn build_client() -> Result<Client> {
-        let mut builder = Client::builder()
-            .timeout(std::time::Duration::from_secs(10));
+        let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
 
         if let Some(identity) = load_mtls_identity() {
             builder = builder.identity(identity);
@@ -425,17 +424,15 @@ impl VaultTransport for ReqwestVaultTransport {
 ///
 /// Returns `None` if neither set (mTLS is optional — degradation path).
 fn load_mtls_identity() -> Option<Identity> {
-    let cert_pem = std::env::var("VAULT_CLIENT_CERT").ok()
-        .or_else(|| {
-            let path = std::env::var("VAULT_CLIENT_CERT_PATH").ok()?;
-            std::fs::read_to_string(path).ok()
-        })?;
+    let cert_pem = std::env::var("VAULT_CLIENT_CERT").ok().or_else(|| {
+        let path = std::env::var("VAULT_CLIENT_CERT_PATH").ok()?;
+        std::fs::read_to_string(path).ok()
+    })?;
 
-    let key_pem = std::env::var("VAULT_CLIENT_KEY").ok()
-        .or_else(|| {
-            let path = std::env::var("VAULT_CLIENT_KEY_PATH").ok()?;
-            std::fs::read_to_string(path).ok()
-        })?;
+    let key_pem = std::env::var("VAULT_CLIENT_KEY").ok().or_else(|| {
+        let path = std::env::var("VAULT_CLIENT_KEY_PATH").ok()?;
+        std::fs::read_to_string(path).ok()
+    })?;
 
     let identity_pem = format!("{}\n{}", cert_pem, key_pem);
     match Identity::from_pem(identity_pem.as_bytes()) {
@@ -536,16 +533,13 @@ impl VaultClient {
                 // - 10 second timeout prevents resource exhaustion from hanging connections
                 // - TLS certificate validation enabled by default (reqwest behavior)
                 // - mTLS client identity loaded from VAULT_CLIENT_CERT / VAULT_CLIENT_KEY
-                let mut builder = Client::builder()
-                    .timeout(std::time::Duration::from_secs(10));
+                let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
 
                 if let Some(identity) = load_mtls_identity() {
                     builder = builder.identity(identity);
                 }
 
-                let http_client = builder
-                    .build()
-                    .context("creating HTTP client")?;
+                let http_client = builder.build().context("creating HTTP client")?;
 
                 // Note: We log the base_url but NEVER log the token
                 debug!("Vault client initialized with base_url={}", base);
