@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "id": "status-panel-web-to-smtp-3",
+  "name": "status-panel-web-to-smtp-3",
+  "created_at": "2026-05-22T09:24:50.473437+00:00",
+  "updated_at": "2026-05-23T10:51:20.716349+00:00",
+  "status": "active",
+  "source": {
+    "selector": "status-panel-web",
+    "container": "status-panel-web",
+    "method": "POST",
+    "path": "/contact",
+    "fields": [
+      "$ACTION_REF_1",
+      "$ACTION_1:0",
+      "$ACTION_1:1",
+      "$ACTION_KEY",
+      "name",
+      "email",
+      "subject",
+      "message"
+    ]
+  },
+  "target": {
+    "selector": "smtp",
+    "adapter": {
+      "code": "smtp",
+      "role": "target",
+      "config": {
+        "from": "info@stacker.my",
+        "host": "smtp",
+        "port": 25,
+        "tls": false,
+        "to": [
+          "info@optimum-web.com"
+        ]
+      }
+    },
+    "method": "SEND",
+    "path": "adapter:smtp",
+    "fields": [
+      "from_email",
+      "reply_to_email",
+      "subject",
+      "body_text",
+      "body_html"
+    ]
+  },
+  "template": {
+    "description": "POST /contact → SEND adapter:smtp",
+    "source_app_type": "status-panel-web",
+    "source_endpoint": {
+      "method": "POST",
+      "path": "/contact"
+    },
+    "target_app_type": "smtp",
+    "target_endpoint": {
+      "adapter": "smtp",
+      "display_name": "SMTP target",
+      "mode": "adapter"
+    },
+    "field_mapping": {},
+    "config": {
+      "retry_count": 3
+    },
+    "is_public": false
+  },
+  "instance": {
+    "source_container": "status-panel-web",
+    "target_adapter": {
+      "code": "smtp",
+      "role": "target",
+      "config": {
+        "from": "info@stacker.my",
+        "host": "smtp",
+        "port": 25,
+        "tls": false,
+        "to": [
+          "info@optimum-web.com"
+        ]
+      }
+    },
+    "trigger_count": 1,
+    "error_count": 11,
+    "last_triggered_at": "2026-05-22T10:16:28.090543+00:00"
+  },
+  "promotion": {
+    "last_deployment_hash": "deployment_d6804c40-2ace-4dd5-bbfe-428cce3c50f8",
+    "remote_template_id": "a36e2837-ec76-4d5e-ba27-1f4736d4cc89",
+    "remote_instance_id": "4922167c-7cb7-45c1-9c2b-6207c936d9bc",
+    "promoted_at": "2026-05-23T10:51:20.716349+00:00"
+  },
+  "diagnostics": {
+    "notes": [
+      "source discovery: cached result (protocols: html_forms,openapi,rest, capture_samples: true)"
+    ]
+  }
+}

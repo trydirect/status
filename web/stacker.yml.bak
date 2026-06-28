@@ -1,0 +1,84 @@
+name: web
+version: 0.1.0
+organization: null
+project:
+  identity: web
+app:
+  type: node
+  path: .
+  dockerfile: null
+  image: null
+  build: null
+  ports: []
+  volumes: []
+  environment: {}
+services:
+- name: status-panel-web
+  image: trydirect/status-panel-web:0.1.0
+  ports:
+  - 3000:3000
+  environment:
+    NEXT_PUBLIC_SITE_URL: https://status.stacker.my
+    NODE_ENV: production
+  volumes: []
+  depends_on: []
+- name: smtp
+  image: trydirect/smtp
+  ports:
+  - 127.0.0.1:1025:25
+  - 8025:8025
+  environment: {}
+  volumes:
+  - smtp_data:/data
+  depends_on: []
+proxy:
+  type: nginx-proxy-manager
+  auto_detect: false
+  domains:
+  - domain: status.stacker.my
+    ssl: auto
+    upstream: status-panel-web:3000
+  config: null
+deploy:
+  target: cloud
+  environment: null
+  compose_file: docker-compose.yml
+  deployment_hash: null
+  cloud:
+    provider: hetzner
+    orchestrator: remote
+    region: nbg1
+    size: cx23
+    install_image: null
+    remote_payload_file: null
+    ssh_key: ~/.ssh/id_rsa
+    key: null
+    server: null
+  server: null
+  registry: null
+  default_target: null
+  targets: {}
+environments: {}
+ai:
+  enabled: true
+  provider: ollama
+  model: qwen2.5-coder
+  api_key: null
+  endpoint: http://192.168.100.245:11434
+  timeout: 0
+  tasks:
+  - compose
+  - troubleshoot
+  - security
+monitoring:
+  status_panel: true
+  healthcheck: null
+  metrics: null
+hooks:
+  pre_build: null
+  post_deploy: null
+  on_failure: null
+env_file: null
+env: {}
+config_contract:
+  services: {}

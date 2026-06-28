@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "selector": {
+    "mode": "local",
+    "selector_kind": "containers",
+    "selector": "status-panel-web2",
+    "deployment_hash": null,
+    "container": null
+  },
+  "protocols_requested": [
+    "html_forms",
+    "openapi",
+    "rest"
+  ],
+  "capture_samples": true,
+  "cached_at": "2026-05-22T09:21:38.787954+00:00",
+  "report": {
+    "type": "probe_endpoints",
+    "deployment_hash": "local",
+    "app_code": "status-panel-web2",
+    "protocols_detected": [],
+    "protocols_requested": [
+      "html_forms",
+      "openapi",
+      "rest"
+    ],
+    "containers": [],
+    "endpoints": [],
+    "resources": [],
+    "forms": [],
+    "probe_attempts": [
+      {
+        "scope": "local_selector",
+        "selector": "status-panel-web2",
+        "container": null,
+        "protocols": [
+          "html_forms",
+          "openapi",
+          "rest"
+        ],
+        "outcome": "empty"
+      }
+    ],
+    "target_kind": "unknown",
+    "probed_at": "2026-05-22T09:21:38.787581+00:00"
+  }
+}

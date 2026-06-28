@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "selector": {
+    "mode": "remote",
+    "selector_kind": "app",
+    "selector": "status-panel-web",
+    "deployment_hash": "deployment_a631cf66-a224-440b-9871-12b63548671c",
+    "container": null
+  },
+  "protocols_requested": [
+    "html_forms"
+  ],
+  "capture_samples": true,
+  "cached_at": "2026-05-22T07:55:49.388248+00:00",
+  "report": {
+    "type": "probe_endpoints",
+    "deployment_hash": "deployment_a631cf66-a224-440b-9871-12b63548671c",
+    "app_code": "status-panel-web",
+    "protocols_detected": [
+      "html_forms"
+    ],
+    "protocols_requested": [
+      "html_forms"
+    ],
+    "containers": [],
+    "endpoints": [],
+    "resources": [],
+    "forms": [
+      {
+        "container": "project-status-panel-web-1",
+        "id": "form_contact",
+        "action": "",
+        "method": "POST",
+        "fields": [
+          "name",
+          "email",
+          "subject",
+          "message"
+        ]
+      }
+    ],
+    "probe_attempts": [
+      {
+        "scope": "remote_app",
+        "selector": "status-panel-web",
+        "container": null,
+        "protocols": [
+          "html_forms"
+        ],
+        "outcome": "detected"
+      }
+    ],
+    "target_kind": "html_form",
+    "probed_at": "2026-05-22T07:55:48Z"
+  }
+}
