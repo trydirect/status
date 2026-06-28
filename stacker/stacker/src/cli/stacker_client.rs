@@ -25,7 +25,7 @@ pub const DEFAULT_STACKER_URL: &str = "https://stacker.try.direct";
 /// The Install Service Ansible role uses this to configure the agent's VAULT_ADDRESS
 /// environment variable on the remote server. Must be a publicly reachable address
 /// (not a Docker-internal IP) so deployed agents can connect to Vault.
-pub const DEFAULT_VAULT_URL: &str = "https://vault.try.direct";
+pub const DEFAULT_VAULT_URL: &str = "https://vault.try.direct:8443";
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Response types (matching Stacker server JSON envelope)

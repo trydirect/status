@@ -1,0 +1,11 @@
+target: cloud
+server_ip: null
+ssh_user: null
+ssh_port: 22
+server_name: web-3584
+deployment_id: 211
+project_id: 90
+cloud_id: 5
+project_name: web
+stacker_email: info@optimum-web.com
+deployed_at: 2026-05-25T14:54:33.996513+00:00
