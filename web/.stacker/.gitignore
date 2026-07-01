@@ -1,0 +1,4 @@
+# Deployment lock files contain environment-specific metadata (server IPs, emails, etc.)
+# and should not be committed to source control
+deployment-*.lock
+deployment-*.lock.back
