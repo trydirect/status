@@ -16,10 +16,10 @@ services:
   smtp:
     image: trydirect/smtp
     ports:
-    - 1025:1025
-    - 8025:8025
+      - "1025:1025"
+      - "8025:8025"
     volumes:
-    - smtp_data:/data
+      - smtp_data:/data
     restart: unless-stopped
 volumes:
   smtp_data:
