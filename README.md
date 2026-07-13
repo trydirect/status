@@ -2,11 +2,10 @@
 
 <img width="200" src="https://raw.githubusercontent.com/trydirect/status/testing/assets/logo/status.png">
 
-# Status Panel
 
 **A lightweight infrastructure agent for server and container management.**
 
-Monitors health, collects metrics, manages Docker containers, and executes commands — all from a single statically-linked binary.
+Monitors health, collects metrics, manages Docker containers, and executes commands - all from a single statically-linked binary.
 
 [![CI](https://github.com/trydirect/status/actions/workflows/ci.yml/badge.svg)](https://github.com/trydirect/status/actions/workflows/ci.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/trydirect/status.svg)](https://hub.docker.com/r/trydirect/status)
@@ -172,7 +171,12 @@ The local `/api/v1/commands/*` endpoints are the agent's own Axum API surface. W
 | `POST` | `/api/self/update/deploy` | Deploy prepared binary |
 | `POST` | `/api/self/update/rollback` | Restore previous version |
 
-### Stacker Commands (Remote)
+
+### Integrations
+
+[Stacker](https://stacker.my)
+
+Server Commands (Remote)
 
 The agent accepts signed commands from the Stacker dashboard covering the full lifecycle:
 
