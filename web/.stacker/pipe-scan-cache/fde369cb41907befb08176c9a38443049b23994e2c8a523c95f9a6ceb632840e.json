@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "selector": {
+    "mode": "local",
+    "selector_kind": "containers",
+    "selector": "status-panel-web",
+    "deployment_hash": null,
+    "container": null
+  },
+  "protocols_requested": [
+    "html_forms",
+    "openapi",
+    "rest"
+  ],
+  "capture_samples": true,
+  "cached_at": "2026-05-22T08:17:44.994249+00:00",
+  "report": {
+    "type": "probe_endpoints",
+    "deployment_hash": "local",
+    "app_code": "status-panel-web",
+    "protocols_detected": [
+      "html_forms"
+    ],
+    "protocols_requested": [
+      "html_forms",
+      "openapi",
+      "rest"
+    ],
+    "containers": [
+      {
+        "name": "status-panel-web",
+        "image": "trydirect/status-panel-web:latest",
+        "network": "web_default",
+        "ports": [
+          "3000->3000/tcp",
+          "3000/tcp"
+        ],
+        "addresses": [
+          "172.20.0.3:3000",
+          "172.20.0.3:3000"
+        ]
+      }
+    ],
+    "endpoints": [],
+    "resources": [],
+    "forms": [
+      {
+        "container": "status-panel-web",
+        "id": "status-panel-web/contact",
+        "action": "/contact",
+        "method": "POST",
+        "fields": [
+          "$ACTION_REF_1",
+          "$ACTION_1:0",
+          "$ACTION_1:1",
+          "$ACTION_KEY",
+          "name",
+          "email",
+          "subject",
+          "message"
+        ]
+      }
+    ],
+    "probe_attempts": [
+      {
+        "scope": "local_container",
+        "selector": "status-panel-web",
+        "container": "status-panel-web",
+        "protocols": [
+          "html_forms",
+          "openapi",
+          "rest"
+        ],
+        "outcome": "detected"
+      }
+    ],
+    "target_kind": "html_form",
+    "probed_at": "2026-05-22T08:17:44.990008+00:00"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "environment": "production",
+  "files": [
+    {
+      "source_path": ".env",
+      "destination_path": ".env",
+      "mode": "0644",
+      "size": 215,
+      "sha256": "fac5fd4c950c34233bcf7d4ad1750539c2234290846630e4e6edd35029a44bc6"
+    }
+  ]
+}
