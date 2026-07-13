@@ -315,7 +315,7 @@ fn calc_network(stats: &ContainerStatsResponse) -> (u64, u64) {
     if let Some(networks) = &stats.networks {
         let mut rx = 0u64;
         let mut tx = 0u64;
-        for (_iface, data) in networks.iter() {
+        for data in networks.values() {
             rx = rx.saturating_add(data.rx_bytes.unwrap_or(0));
             tx = tx.saturating_add(data.tx_bytes.unwrap_or(0));
         }
