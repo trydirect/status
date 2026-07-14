@@ -1,0 +1,109 @@
+version: "2.2"
+
+volumes:
+  stackerdb:
+    driver: local
+
+  stacker-redis-data:
+    driver: local
+
+networks:
+  backend:
+    driver: bridge
+    name: backend
+    external: true
+  trydirect-network:
+    external: true
+    name: trydirect-network
+
+
+services:
+
+  stacker:
+    image: trydirect/stacker:0.0.8
+    build: .
+    container_name: stacker
+    restart: always
+    volumes:
+      - ./stacker/files:/app/files
+      - ./configuration.yaml:/app/configuration.yaml
+      - ./access_control.conf:/app/access_control.conf
+      - ./migrations:/app/migrations
+      - ./.env:/app/.env
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./.env
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=full
+    depends_on:
+      stackerdb:
+        condition: service_healthy
+    networks:
+      - backend
+
+
+  stacker_queue:
+    image: trydirect/stacker:0.0.7
+    container_name: stacker_queue
+    restart: always
+    volumes:
+      - ./configuration.yaml:/app/configuration.yaml
+      - ./.env:/app/.env
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=1
+      - AMQP_HOST=rabbitmq
+      - AMQP_PORT=5672
+      - AMQP_USERNAME=guest
+      - AMQP_PASSWORD=guest
+    env_file:
+      - ./.env
+    depends_on:
+      stackerdb:
+        condition: service_healthy
+    entrypoint: /app/console mq listen
+    networks:
+      - backend
+      - trydirect-network
+
+
+  stackerdb:
+    container_name: stackerdb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    image: postgres:18.3
+    restart: always
+    ports:
+      - 5432
+    env_file:
+      - ./.env
+    volumes:
+      - stackerdb:/var/lib/postgresql/data
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf
+    networks:
+      - backend
+
+  stackerredis:
+    container_name: stackerredis
+    image: redis:latest
+    restart: always
+    ports:
+      - 127.0.0.1:6379:6379
+    volumes:
+      - stacker-redis-data:/data
+    #        - ./redis/rc.local:/etc/rc.local
+    #        - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    sysctls:
+      net.core.somaxconn: 1024
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        tag: "container_{{.Name}}"
+
+

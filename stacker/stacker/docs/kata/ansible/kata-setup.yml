@@ -1,0 +1,190 @@
+---
+# Ansible playbook: Install and configure Kata Containers with Docker on Ubuntu 22.04+
+#
+# Usage:
+#   ansible-playbook -i <host>, kata-setup.yml -u root
+#   ansible-playbook -i inventory.ini kata-setup.yml --become
+#
+# Requirements:
+#   - Target: Ubuntu 22.04+ on KVM-capable bare-metal (or nested-virt VM)
+#   - Ansible 2.12+
+
+- name: Provision Kata Containers runtime
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    kata_version: "3.x"  # major branch — APT will pull latest 3.x release
+    docker_runtime_name: kata
+    daemon_json_path: /etc/docker/daemon.json
+
+  pre_tasks:
+    # ── Preflight checks ────────────────────────────────────────────────
+    - name: Verify host is running Ubuntu 22.04+
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version is version('22.04', '>=')
+        fail_msg: "This playbook targets Ubuntu 22.04+. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: Check KVM device exists
+      ansible.builtin.stat:
+        path: /dev/kvm
+      register: kvm_dev
+
+    - name: Fail if /dev/kvm is missing
+      ansible.builtin.fail:
+        msg: >
+          /dev/kvm not found. Ensure the host has hardware virtualisation enabled
+          (VT-x/AMD-V) and the kvm kernel module is loaded:
+            sudo modprobe kvm_intel   # or kvm_amd
+      when: not kvm_dev.stat.exists
+
+    - name: Validate KVM is accessible
+      ansible.builtin.command: test -r /dev/kvm -a -w /dev/kvm
+      changed_when: false
+
+  tasks:
+    # ── Install prerequisites ───────────────────────────────────────────
+    - name: Install transport packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: true
+
+    # ── Docker (if not already present) ─────────────────────────────────
+    - name: Check if Docker is installed
+      ansible.builtin.command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Docker CE
+      when: docker_check.rc != 0
+      block:
+        - name: Add Docker GPG key
+          ansible.builtin.get_url:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            dest: /etc/apt/keyrings/docker.asc
+            mode: "0644"
+
+        - name: Add Docker APT repository
+          ansible.builtin.apt_repository:
+            repo: >-
+              deb [arch={{ ansible_architecture | replace('x86_64', 'amd64') }}
+              signed-by=/etc/apt/keyrings/docker.asc]
+              https://download.docker.com/linux/ubuntu
+              {{ ansible_distribution_release }} stable
+            filename: docker
+            state: present
+
+        - name: Install Docker packages
+          ansible.builtin.apt:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+              - docker-compose-plugin
+            state: present
+            update_cache: true
+
+        - name: Enable and start Docker
+          ansible.builtin.systemd:
+            name: docker
+            enabled: true
+            state: started
+
+    # ── Kata Containers ─────────────────────────────────────────────────
+    - name: Add Kata Containers GPG key
+      ansible.builtin.get_url:
+        url: https://packages.kata-containers.io/kata-containers.key
+        dest: /etc/apt/keyrings/kata-containers.asc
+        mode: "0644"
+
+    - name: Add Kata Containers APT repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/etc/apt/keyrings/kata-containers.asc]
+          https://packages.kata-containers.io/stable/ubuntu/{{ ansible_distribution_release }}/
+          stable main
+        filename: kata-containers
+        state: present
+
+    - name: Install kata-containers package
+      ansible.builtin.apt:
+        name: kata-containers
+        state: present
+        update_cache: true
+
+    - name: Verify kata-runtime binary exists
+      ansible.builtin.command: kata-runtime --version
+      register: kata_version_output
+      changed_when: false
+
+    - name: Print installed Kata version
+      ansible.builtin.debug:
+        msg: "{{ kata_version_output.stdout }}"
+
+    # ── Configure Docker to use Kata runtime ────────────────────────────
+    - name: Read existing daemon.json (if any)
+      ansible.builtin.slurp:
+        src: "{{ daemon_json_path }}"
+      register: existing_daemon_json
+      failed_when: false
+
+    - name: Build merged daemon.json with kata runtime
+      ansible.builtin.set_fact:
+        docker_daemon_config: >-
+          {{
+            (existing_daemon_json.content | default('e30=') | b64decode | from_json)
+            | combine({
+                "runtimes": {
+                  docker_runtime_name: {
+                    "path": "/usr/bin/kata-runtime"
+                  }
+                }
+              }, recursive=true)
+          }}
+
+    - name: Write daemon.json
+      ansible.builtin.copy:
+        content: "{{ docker_daemon_config | to_nice_json }}\n"
+        dest: "{{ daemon_json_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart Docker
+
+    # ── Kata host check ─────────────────────────────────────────────────
+    - name: Run kata-check to verify host compatibility
+      ansible.builtin.command: kata-runtime check
+      register: kata_check
+      changed_when: false
+      failed_when: kata_check.rc != 0
+
+  handlers:
+    - name: Restart Docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+
+  post_tasks:
+    # Flush so Docker is restarted before validation
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    # ── Validation ──────────────────────────────────────────────────────
+    - name: Run hello-world with kata runtime
+      ansible.builtin.command: docker run --rm --runtime kata hello-world
+      register: kata_hello
+      changed_when: false
+
+    - name: Confirm Kata validation passed
+      ansible.builtin.debug:
+        msg: "Kata Containers runtime is working. Output: {{ kata_hello.stdout_lines[:3] }}"

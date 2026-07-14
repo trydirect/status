@@ -1,0 +1,23 @@
+name: Deploy website with Stacker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy website
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Stacker CLI
+        run: curl -fsSL https://get.try.direct/stacker | sh
+
+      - name: Deploy stack
+        env:
+          STACKER_TOKEN: ${{ secrets.STACKER_TOKEN }}
+        run: stacker deploy --target server

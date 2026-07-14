@@ -22,7 +22,7 @@ npm run dev -- --hostname 127.0.0.1 --port 3001
 ```bash
 npm run lint
 npm run build
-docker build -t status-panel-web:test .
+docker build -t status-panel-web:0.1.0 .
 ```
 
 ## Contact pipe configuration
@@ -43,3 +43,11 @@ Do not expose `CONTACT_PIPE_TOKEN` with a `NEXT_PUBLIC_` prefix.
 Use `stacker.yml`, `docker-compose.yml`, and `Dockerfile` in this directory for
 the Stacker deployment workflow. Record all deployment, MCP, Status Panel,
 firewall, proxy, and pipe commands in `docs/deployment-history.md`.
+
+
+docker buildx build \
+    --platform linux/amd64,linux/arm64 \
+    -f Dockerfile \
+    -t trydirect/status-panel-web:0.1.0 \
+    -t trydirect/status-panel-web:latest \
+    --push .

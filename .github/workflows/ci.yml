@@ -201,6 +201,8 @@ jobs:
     name: Docker Build & Push (branches/tags)
     runs-on: ubuntu-latest
     needs: build-and-test
+    env:
+      STACKER_REPO_TOKEN: ${{ secrets.CONFIG_FIXTURES_TOKEN }}
     if: |
       github.ref == 'refs/heads/production' ||
       github.ref == 'refs/heads/master' ||
@@ -210,6 +212,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -228,8 +232,8 @@ jobs:
         run: |
           REF_NAME="${GITHUB_REF#refs/*/}"
           TAGS="trydirect/status:${REF_NAME}\ntrydirect/status:${GITHUB_SHA::7}"
-          if [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
-            TAGS="${TAGS}\ntrydirect/status:latest"
+          if [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then
+            TAGS="${TAGS}\ntrydirect/status:unstable\ntrydirect/status:latest"
           fi
           echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
           echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
@@ -240,6 +244,12 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
+          context: .
+          build-contexts: |
+            stacker=./stacker
           file: Dockerfile.prod
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.vars.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

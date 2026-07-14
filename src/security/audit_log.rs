@@ -46,6 +46,10 @@ impl AuditLogger {
         info!(target: "audit", event = "token_rotated", agent_id, request_id = request_id.unwrap_or(""));
     }
 
+    pub fn token_self_issued(&self, deployment_hash: &str, reason: &str) {
+        warn!(target: "audit", event = "token_self_issued", deployment_hash, reason);
+    }
+
     pub fn internal_error(
         &self,
         agent_id: Option<&str>,

@@ -8,6 +8,7 @@ COPY src src
 COPY templates templates
 COPY static static
 COPY config.json config.json
+COPY stacker/crates stacker/crates
 
 # Build a statically linked binary to avoid runtime glibc mismatches.
 RUN rustup target add x86_64-unknown-linux-musl && \

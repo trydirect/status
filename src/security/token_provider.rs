@@ -108,6 +108,28 @@ impl TokenProvider {
             return Ok(true);
         }
 
+        // Strategy 3: self-issue a new token and write it to Vault.
+        // Stacker validates by reading from the same Vault KV path, so a token
+        // the agent writes there is immediately accepted on the next poll.
+        if let Some(vault) = &self.vault_client {
+            let new_token = generate_secure_token();
+            match vault
+                .store_agent_token(&self.deployment_hash, &new_token, None)
+                .await
+            {
+                Ok(()) => {
+                    let mut token = self.token.write().await;
+                    *token = new_token;
+                    super::audit_log::AuditLogger::new()
+                        .token_self_issued(&self.deployment_hash, "primary_strategies_failed");
+                    return Ok(true);
+                }
+                Err(e) => {
+                    warn!(error = %e, "Vault self-issue failed; token unchanged");
+                }
+            }
+        }
+
         debug!("No new token available after refresh attempt");
         Ok(false)
     }
@@ -119,6 +141,14 @@ impl TokenProvider {
             *token = new_token;
         }
     }
+}
+
+fn generate_secure_token() -> String {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes).expect("CSPRNG failure");
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 #[cfg(test)]
@@ -189,5 +219,101 @@ mod tests {
         let tp2 = tp.clone();
         tp2.swap("b".into()).await;
         assert_eq!(tp.get().await, "b");
+    }
+
+    #[tokio::test]
+    async fn refresh_self_issues_token_when_vault_has_no_entry() {
+        use crate::security::vault_client::VaultClient;
+        use mockito::Server;
+
+        let _guard = env_lock().lock().unwrap();
+
+        let mut server = Server::new_async().await;
+
+        // Strategy 1: Vault read returns 404 (KV entry was deleted)
+        let read = server
+            .mock("GET", "/v1/status_panel/dep-abc/status_panel_token")
+            .with_status(404)
+            .with_body(r#"{"errors":[]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Strategy 3: Vault write accepted (must be called exactly once)
+        let write = server
+            .mock("POST", "/v1/status_panel/dep-abc/status_panel_token")
+            .with_status(200)
+            .with_body("{}")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _addr = EnvGuard::set("VAULT_ADDRESS", &server.url());
+        let _tok = EnvGuard::set("VAULT_TOKEN", "vault-root");
+        let _prefix = EnvGuard::set("VAULT_AGENT_PATH_PREFIX", "status_panel");
+        // Strategy 2 is a no-op: env token matches current
+        let _agent = EnvGuard::set("AGENT_TOKEN", "stale-token");
+
+        let vault = VaultClient::from_env().unwrap().unwrap();
+        let tp = TokenProvider::new("stale-token".into(), Some(vault), "dep-abc".into());
+
+        let changed = tp.refresh().await.unwrap();
+        assert!(changed, "expected self-issued token to be applied");
+
+        let new_token = tp.get().await;
+        assert_ne!(new_token, "stale-token");
+        assert_eq!(new_token.len(), 64, "expected 32-byte hex token");
+        assert!(new_token.chars().all(|c| c.is_ascii_hexdigit()));
+
+        read.assert_async().await;
+        write.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_token_when_vault_write_forbidden() {
+        use crate::security::vault_client::VaultClient;
+        use mockito::Server;
+
+        let _guard = env_lock().lock().unwrap();
+
+        let mut server = Server::new_async().await;
+
+        // Strategy 1: Vault read returns 404
+        let _read = server
+            .mock("GET", "/v1/status_panel/dep-xyz/status_panel_token")
+            .with_status(404)
+            .with_body(r#"{"errors":[]}"#)
+            .create_async()
+            .await;
+
+        // Strategy 3: Vault write rejected (agent lacks write capability)
+        let write = server
+            .mock("POST", "/v1/status_panel/dep-xyz/status_panel_token")
+            .with_status(403)
+            .with_body(r#"{"errors":["permission denied"]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _addr = EnvGuard::set("VAULT_ADDRESS", &server.url());
+        let _tok = EnvGuard::set("VAULT_TOKEN", "vault-root");
+        let _prefix = EnvGuard::set("VAULT_AGENT_PATH_PREFIX", "status_panel");
+        let _agent = EnvGuard::set("AGENT_TOKEN", "stale-token");
+
+        let vault = VaultClient::from_env().unwrap().unwrap();
+        let tp = TokenProvider::new("stale-token".into(), Some(vault), "dep-xyz".into());
+
+        let changed = tp.refresh().await.unwrap();
+        assert!(
+            !changed,
+            "Strategy 3 must not claim success on write failure"
+        );
+        assert_eq!(
+            tp.get().await,
+            "stale-token",
+            "token must not change on failure"
+        );
+
+        write.assert_async().await;
     }
 }

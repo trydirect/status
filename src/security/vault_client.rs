@@ -49,7 +49,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Identity, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -105,7 +105,7 @@ struct VaultNpmSecretEnvelope {
 
 #[derive(Debug, Deserialize, Default)]
 struct VaultNpmSecretPayload {
-    schema_version: Option<u32>,
+    schema_version: Option<serde_json::Value>,
     host: Option<String>,
     email: Option<String>,
     password: Option<String>,
@@ -369,13 +369,22 @@ trait VaultTransport: Send + Sync {
 #[derive(Debug, Default)]
 struct ReqwestVaultTransport;
 
+impl ReqwestVaultTransport {
+    fn build_client() -> Result<Client> {
+        let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
+
+        if let Some(identity) = load_mtls_identity() {
+            builder = builder.identity(identity);
+        }
+
+        builder.build().context("creating HTTP client")
+    }
+}
+
 #[async_trait]
 impl VaultTransport for ReqwestVaultTransport {
     async fn get(&self, url: &str, token: &str) -> Result<VaultHttpResponse> {
-        let response = Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .context("creating HTTP client")?
+        let response = Self::build_client()?
             .get(url)
             .header("X-Vault-Token", token)
             .send()
@@ -393,10 +402,7 @@ impl VaultTransport for ReqwestVaultTransport {
         token: &str,
         payload: &serde_json::Value,
     ) -> Result<VaultHttpResponse> {
-        let response = Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .context("creating HTTP client")?
+        let response = Self::build_client()?
             .post(url)
             .header("X-Vault-Token", token)
             .json(payload)
@@ -407,6 +413,37 @@ impl VaultTransport for ReqwestVaultTransport {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         Ok(VaultHttpResponse { status, body })
+    }
+}
+
+/// Load mTLS client certificate identity from environment variables.
+///
+/// Supports two modes:
+/// 1. Inline PEM via `VAULT_CLIENT_CERT` and `VAULT_CLIENT_KEY` env vars
+/// 2. File paths via `VAULT_CLIENT_CERT_PATH` and `VAULT_CLIENT_KEY_PATH` env vars
+///
+/// Returns `None` if neither set (mTLS is optional — degradation path).
+fn load_mtls_identity() -> Option<Identity> {
+    let cert_pem = std::env::var("VAULT_CLIENT_CERT").ok().or_else(|| {
+        let path = std::env::var("VAULT_CLIENT_CERT_PATH").ok()?;
+        std::fs::read_to_string(path).ok()
+    })?;
+
+    let key_pem = std::env::var("VAULT_CLIENT_KEY").ok().or_else(|| {
+        let path = std::env::var("VAULT_CLIENT_KEY_PATH").ok()?;
+        std::fs::read_to_string(path).ok()
+    })?;
+
+    let identity_pem = format!("{}\n{}", cert_pem, key_pem);
+    match Identity::from_pem(identity_pem.as_bytes()) {
+        Ok(identity) => {
+            debug!("mTLS client identity loaded for Vault connections");
+            Some(identity)
+        }
+        Err(e) => {
+            warn!("Failed to load mTLS client identity: {}", e);
+            None
+        }
     }
 }
 
@@ -495,10 +532,14 @@ impl VaultClient {
                 // Configure HTTP client with security-conscious defaults:
                 // - 10 second timeout prevents resource exhaustion from hanging connections
                 // - TLS certificate validation enabled by default (reqwest behavior)
-                let http_client = Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .context("creating HTTP client")?;
+                // - mTLS client identity loaded from VAULT_CLIENT_CERT / VAULT_CLIENT_KEY
+                let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
+
+                if let Some(identity) = load_mtls_identity() {
+                    builder = builder.identity(identity);
+                }
+
+                let http_client = builder.build().context("creating HTTP client")?;
 
                 // Note: We log the base_url but NEVER log the token
                 debug!("Vault client initialized with base_url={}", base);
@@ -637,7 +678,12 @@ impl VaultClient {
         payload: VaultNpmSecretPayload,
         path: &str,
     ) -> std::result::Result<NpmCredentials, NpmCredentialError> {
-        if payload.schema_version != Some(1) {
+        let schema_version_is_one = match payload.schema_version.as_ref() {
+            Some(serde_json::Value::Number(value)) => value.as_u64() == Some(1),
+            Some(serde_json::Value::String(value)) => value.trim() == "1",
+            _ => false,
+        };
+        if !schema_version_is_one {
             return Err(NpmCredentialError::InvalidPayload {
                 path: path.to_string(),
                 reason: "schema_version must be 1".to_string(),
@@ -1581,6 +1627,75 @@ mod tests {
         assert_eq!(credentials.host(), "http://nginx-proxy-manager:81");
         assert_eq!(credentials.email(), "admin@example.com");
         assert_eq!(credentials.password(), "secret");
+    }
+
+    #[tokio::test]
+    async fn fetch_npm_credentials_accepts_string_schema_version() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("STATUS_PANEL_NPM_CREDENTIAL_PATH");
+
+        let mut fixture = npm_fixture_payload();
+        fixture["schema_version"] = serde_json::Value::String("1".to_string());
+        let transport = Arc::new(StubTransport::new(vec![
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: r#"{"data":{"ttl":3600}}"#.to_string(),
+            },
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: serde_json::json!({
+                    "data": fixture
+                })
+                .to_string(),
+            },
+        ]));
+        let client = VaultClient::with_transport(
+            "http://vault.test".to_string(),
+            "token".to_string(),
+            "secret/base/status_panel".to_string(),
+            transport,
+        );
+
+        let credentials = client
+            .fetch_npm_credentials("server-123")
+            .await
+            .expect("credentials");
+
+        assert_eq!(credentials.host(), "http://nginx-proxy-manager:81");
+        assert_eq!(credentials.email(), "admin@example.com");
+        assert_eq!(credentials.password(), "secret");
+    }
+
+    #[tokio::test]
+    async fn fetch_npm_credentials_rejects_unsupported_string_schema_version() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("STATUS_PANEL_NPM_CREDENTIAL_PATH");
+
+        let mut fixture = npm_fixture_payload();
+        fixture["schema_version"] = serde_json::Value::String("2".to_string());
+        let transport: Arc<dyn VaultTransport> = Arc::new(StubTransport::new(vec![
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: r#"{"data":{"ttl":3600}}"#.to_string(),
+            },
+            VaultHttpResponse {
+                status: StatusCode::OK,
+                body: serde_json::json!({ "data": fixture }).to_string(),
+            },
+        ]));
+        let client = VaultClient::with_transport(
+            "http://vault.test".to_string(),
+            "token".to_string(),
+            "secret/base/status_panel".to_string(),
+            transport,
+        );
+
+        let error = client
+            .fetch_npm_credentials("server-123")
+            .await
+            .expect_err("schema version validation");
+
+        assert!(matches!(error, NpmCredentialError::InvalidPayload { .. }));
     }
 
     #[tokio::test]

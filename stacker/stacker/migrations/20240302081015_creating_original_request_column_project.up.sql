@@ -1,0 +1,1 @@
+ALTER table project ADD COLUMN request_json JSON NOT NULL DEFAULT '{}';

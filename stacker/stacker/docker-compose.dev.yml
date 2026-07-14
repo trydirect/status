@@ -1,0 +1,115 @@
+version: "2.2"
+
+volumes:
+  stackerdb:
+    driver: local
+
+  redis-data:
+    driver: local
+
+networks:
+  stacker-network:
+    driver: bridge
+  # Connect to the main TryDirect network for RabbitMQ access
+  trydirect-network:
+    external: true
+    name: try.direct_default
+
+services:
+  stacker:
+    image: trydirect/stacker:0.0.9
+    container_name: stacker-dev
+    restart: always
+    networks:
+      - stacker-network
+      - trydirect-network
+    volumes:
+      # Mount local compiled binary for fast iteration
+      - ./target/debug/server:/app/server:ro
+      # Project configuration and assets
+      - ./files:/app/files
+      - ./docker/local/configuration.yaml:/app/configuration.yaml
+      - ./access_control.conf:/app/access_control.conf
+      - ./migrations:/app/migrations
+      - ./docker/local/.env:/app/.env
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./docker/local/.env
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=1
+      # Vault — must point to the real Vault service in the TryDirect network
+      - VAULT_ADDRESS=https://vault.try.direct
+      - VAULT_TOKEN=${STACKER_VAULT_TOKEN:-change-me}
+    depends_on:
+      stackerdb:
+        condition: service_healthy
+    entrypoint: ["/app/server"]
+
+  # MQ Listener - Consumes deployment progress messages from Install Service
+  # and updates deployment status in Stacker database
+  stacker-mq-listener:
+    image: trydirect/stacker:0.0.9
+    container_name: stacker-mq-listener-dev
+    restart: always
+    networks:
+      - stacker-network
+      - trydirect-network
+    volumes:
+      # Mount local compiled console binary for fast iteration
+      - ./target/debug/console:/app/console:ro
+      # Project configuration and assets
+      - ./docker/local/configuration.yaml:/app/configuration.yaml
+      - ./docker/local/.env:/app/.env
+    env_file:
+      - ./docker/local/.env
+    environment:
+      - RUST_LOG=info,stacker=debug
+      - RUST_BACKTRACE=1
+      # Override AMQP host to connect to main TryDirect RabbitMQ
+      - AMQP_HOST=mq
+    depends_on:
+      stackerdb:
+        condition: service_healthy
+    entrypoint: ["/app/console", "mq", "listen"]
+
+  redis:
+    container_name: redis-dev
+    image: redis
+    restart: always
+    networks:
+      - stacker-network
+    ports:
+      - 6379:6379
+    volumes:
+      - redis-data:/data
+    sysctls:
+      net.core.somaxconn: 1024
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        tag: "container_{{.Name}}"
+
+  stackerdb:
+    container_name: stackerdb-dev
+    networks:
+      - stacker-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    build:
+      context: ./stackerdb
+      dockerfile: Dockerfile
+    image: trydirect/stackerdb:18.3-pgcron
+    restart: always
+    ports:
+      - 5432:5432
+    env_file:
+      - ./docker/local/.env
+    volumes:
+      - stackerdb:/var/lib/postgresql/data
+      - ./docker/local/postgresql.conf:/etc/postgresql/postgresql.conf

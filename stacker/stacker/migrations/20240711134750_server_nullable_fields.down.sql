@@ -1,0 +1,6 @@
+-- Add down migration script here
+
+ALTER TABLE server ALTER COLUMN region SET NOT NULL;
+ALTER TABLE server ALTER COLUMN server SET NOT NULL;
+ALTER TABLE server ALTER COLUMN zone SET NOT NULL;
+ALTER TABLE server ALTER COLUMN os SET NOT NULL;

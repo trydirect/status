@@ -1,0 +1,22 @@
+[package]
+name = "pipe-adapter-mail"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+async-std = "1"
+async-imap = { version = "0.11.2", default-features = false, features = ["runtime-async-std"] }
+async-native-tls = "0.5"
+async-pop = { version = "1.1.3", default-features = false, features = ["runtime-async-std", "async-native-tls", "sasl"] }
+futures-util = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
+mailparse = "0.16.1"
+pipe-adapter-sdk = { path = "../pipe-adapter-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["net"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

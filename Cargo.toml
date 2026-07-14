@@ -1,6 +1,6 @@
 [package]
 name = "status-panel"
-version = "0.1.9"
+version = "0.2.1"
 edition = "2021"
 
 [features]
@@ -20,6 +20,8 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Keep OpenSSL vendored so musl cross-builds can compile transitive mail adapters.
+native-tls = { version = "0.2.18", features = ["vendored"] }
 # Pin minimum rustls-webpki to fix RUSTSEC-2026-0049 (CRL matching logic)
 rustls-webpki = ">=0.103.10"
 ring = "0.17"
@@ -54,6 +56,8 @@ dotenvy = "0.15"
 rustc_version_runtime = "0.3"
 zeroize = "1"
 tempfile = "3"
+pipe-adapter-sdk = { path = "stacker/crates/pipe-adapter-sdk" }
+pipe-adapter-mail = { path = "stacker/crates/pipe-adapter-mail" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }

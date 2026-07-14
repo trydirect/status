@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stack_template_version SET is_latest = false WHERE template_id = $1 AND is_latest = true",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0dab58aa1022e2c1f4320f232195f54d89279057657c92305f606522fa142cf7"
+}

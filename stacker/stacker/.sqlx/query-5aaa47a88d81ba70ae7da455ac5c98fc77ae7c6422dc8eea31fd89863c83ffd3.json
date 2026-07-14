@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM chat_conversations WHERE user_id = $1 AND project_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5aaa47a88d81ba70ae7da455ac5c98fc77ae7c6422dc8eea31fd89863c83ffd3"
+}
