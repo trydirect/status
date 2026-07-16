@@ -119,6 +119,26 @@ fn name_matches(container_name: &str, app_code: &str) -> bool {
     false
 }
 
+/// Stacker's stable service-identity label, set by the control plane on every
+/// project service. Preferred over Docker Compose's `com.docker.compose.service`
+/// because it carries the app code the control plane resolves by and survives
+/// compose service renames (the generated main service is named `app`, but its
+/// `my.stacker.service` label is the project code).
+const STACKER_SERVICE_LABEL: &str = "my.stacker.service";
+const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+
+/// If a container's labels identify it as `app_code`, return which label
+/// matched (for logging). Prefers the stacker-owned label over Compose's.
+fn label_matches_app(labels: &HashMap<String, String>, app_code: &str) -> Option<&'static str> {
+    if labels.get(STACKER_SERVICE_LABEL).map(String::as_str) == Some(app_code) {
+        return Some(STACKER_SERVICE_LABEL);
+    }
+    if labels.get(COMPOSE_SERVICE_LABEL).map(String::as_str) == Some(app_code) {
+        return Some(COMPOSE_SERVICE_LABEL);
+    }
+    None
+}
+
 pub async fn resolve_container_name(name: &str) -> Result<String> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
@@ -143,15 +163,14 @@ pub async fn resolve_container_name(name: &str) -> Result<String> {
                 available_containers.push(normalized.to_string());
 
                 if let Some(labels) = container.labels.as_ref() {
-                    if let Some(service) = labels.get("com.docker.compose.service") {
-                        if service == name {
-                            tracing::info!(
-                                app_code = name,
-                                resolved_name = normalized,
-                                "Container name resolved via compose service label"
-                            );
-                            return Ok(normalized.to_string());
-                        }
+                    if let Some(matched_label) = label_matches_app(labels, name) {
+                        tracing::info!(
+                            app_code = name,
+                            resolved_name = normalized,
+                            matched_label,
+                            "Container name resolved via service label"
+                        );
+                        return Ok(normalized.to_string());
                     }
                 }
 
@@ -872,6 +891,33 @@ mod tests {
     fn test_name_matches_exact() {
         assert!(name_matches("komodo", "komodo"));
         assert!(name_matches("/komodo", "komodo"));
+    }
+
+    #[test]
+    fn label_matches_prefers_stacker_service_over_compose() {
+        let mut labels = HashMap::new();
+        // Generated main service: compose service name is "app", but the
+        // stacker label carries the project code.
+        labels.insert(COMPOSE_SERVICE_LABEL.to_string(), "app".to_string());
+        labels.insert(STACKER_SERVICE_LABEL.to_string(), "wordpress-matomo".to_string());
+
+        // Resolves by the stacker label even though the compose service is "app".
+        assert_eq!(
+            label_matches_app(&labels, "wordpress-matomo"),
+            Some(STACKER_SERVICE_LABEL)
+        );
+        // The Docker Compose service name still resolves.
+        assert_eq!(label_matches_app(&labels, "app"), Some(COMPOSE_SERVICE_LABEL));
+        // No spurious match.
+        assert_eq!(label_matches_app(&labels, "matomo"), None);
+    }
+
+    #[test]
+    fn label_matches_compose_only_still_works() {
+        let mut labels = HashMap::new();
+        labels.insert(COMPOSE_SERVICE_LABEL.to_string(), "matomo".to_string());
+        assert_eq!(label_matches_app(&labels, "matomo"), Some(COMPOSE_SERVICE_LABEL));
+        assert_eq!(label_matches_app(&labels, "app"), None);
     }
 
     #[test]

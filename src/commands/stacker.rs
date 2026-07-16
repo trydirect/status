@@ -8466,11 +8466,25 @@ fn build_probe_result_payload(
         .map(|protocol| probe_issue_for_protocol(protocol))
         .collect::<Vec<_>>();
 
+    // Surface the resolved container in the report so callers can act on it —
+    // e.g. the CLI's direct-container retry when an app-scoped probe finds
+    // nothing. Without this the report always carried an empty `containers`
+    // list even after the agent resolved the container internally.
+    let containers = if container_resolved.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({
+            "name": container_resolved,
+            "ports": ports.iter().map(|port| port.to_string()).collect::<Vec<_>>(),
+        })]
+    };
+
     json!({
         "type": "probe_endpoints",
         "deployment_hash": deployment_hash,
         "app_code": app_code,
         "protocols_detected": protocols_detected,
+        "containers": containers,
         "endpoints": endpoints,
         "forms": forms,
         "diagnostics": ProbeDiagnostics {
@@ -12759,6 +12773,10 @@ mod probe_endpoints_command_tests {
 
         assert_eq!(payload["type"], "probe_endpoints");
         assert_eq!(payload["protocols_detected"], json!([]));
+        // The resolved container is surfaced so callers (e.g. the CLI's
+        // direct-container retry) can act on an otherwise-empty probe.
+        assert_eq!(payload["containers"][0]["name"], "status-panel-web-1");
+        assert_eq!(payload["containers"][0]["ports"], json!(["3000"]));
         assert_eq!(
             payload["diagnostics"]["protocols_requested"],
             json!(["html_forms", "rest"])
