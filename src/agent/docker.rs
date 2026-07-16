@@ -899,7 +899,10 @@ mod tests {
         // Generated main service: compose service name is "app", but the
         // stacker label carries the project code.
         labels.insert(COMPOSE_SERVICE_LABEL.to_string(), "app".to_string());
-        labels.insert(STACKER_SERVICE_LABEL.to_string(), "wordpress-matomo".to_string());
+        labels.insert(
+            STACKER_SERVICE_LABEL.to_string(),
+            "wordpress-matomo".to_string(),
+        );
 
         // Resolves by the stacker label even though the compose service is "app".
         assert_eq!(
@@ -907,7 +910,10 @@ mod tests {
             Some(STACKER_SERVICE_LABEL)
         );
         // The Docker Compose service name still resolves.
-        assert_eq!(label_matches_app(&labels, "app"), Some(COMPOSE_SERVICE_LABEL));
+        assert_eq!(
+            label_matches_app(&labels, "app"),
+            Some(COMPOSE_SERVICE_LABEL)
+        );
         // No spurious match.
         assert_eq!(label_matches_app(&labels, "matomo"), None);
     }
@@ -916,7 +922,10 @@ mod tests {
     fn label_matches_compose_only_still_works() {
         let mut labels = HashMap::new();
         labels.insert(COMPOSE_SERVICE_LABEL.to_string(), "matomo".to_string());
-        assert_eq!(label_matches_app(&labels, "matomo"), Some(COMPOSE_SERVICE_LABEL));
+        assert_eq!(
+            label_matches_app(&labels, "matomo"),
+            Some(COMPOSE_SERVICE_LABEL)
+        );
         assert_eq!(label_matches_app(&labels, "app"), None);
     }
 
