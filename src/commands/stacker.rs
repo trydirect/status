@@ -8349,66 +8349,71 @@ fn derive_health_status(container_state: &str, has_errors: bool) -> &'static str
 }
 
 #[cfg(feature = "docker")]
-async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
+/// Hard timeout for a single `docker` CLI subprocess so an unresponsive daemon
+/// can't hang a probe. Covers spawn + execution.
+#[cfg(feature = "docker")]
+const DOCKER_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run a `docker` CLI subprocess with [`DOCKER_CLI_TIMEOUT`]. Returns `None` on
+/// spawn error or timeout (callers treat that as "no data").
+#[cfg(feature = "docker")]
+async fn docker_cli_output(args: &[&str]) -> Option<std::process::Output> {
     use tokio::process::Command;
+    match tokio::time::timeout(
+        DOCKER_CLI_TIMEOUT,
+        Command::new("docker").args(args).output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => Some(output),
+        _ => None,
+    }
+}
 
-    let output = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .Config.ExposedPorts}}",
-            container_name,
-        ])
-        .output()
-        .await
-        .context("docker inspect for ports")?;
-
-    let mut ports = Vec::new();
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let trimmed_output = stdout.trim();
+#[cfg(feature = "docker")]
+fn parse_ports_json(stdout: &[u8], ports: &mut Vec<u16>) {
+    let stdout = String::from_utf8_lossy(stdout);
+    if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(stdout.trim()) {
         // Parse JSON like {"80/tcp":{},"8080/tcp":{}}
-        if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(trimmed_output) {
-            for port_str in map.keys() {
-                if let Some(port_num) = port_str.split('/').next() {
-                    if let Ok(port) = port_num.parse::<u16>() {
-                        if !ports.contains(&port) {
-                            ports.push(port);
-                        }
+        for port_str in map.keys() {
+            if let Some(port_num) = port_str.split('/').next() {
+                if let Ok(port) = port_num.parse::<u16>() {
+                    if !ports.contains(&port) {
+                        ports.push(port);
                     }
                 }
             }
         }
     }
+}
+
+async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
+    let mut ports = Vec::new();
+
+    if let Some(output) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .Config.ExposedPorts}}",
+        container_name,
+    ])
+    .await
+    {
+        if output.status.success() {
+            parse_ports_json(&output.stdout, &mut ports);
+        }
+    }
 
     // Also check network settings port bindings
-    let output2 = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Ports}}",
-            container_name,
-        ])
-        .output()
-        .await;
-
-    if let Ok(output2) = output2 {
+    if let Some(output2) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .NetworkSettings.Ports}}",
+        container_name,
+    ])
+    .await
+    {
         if output2.status.success() {
-            let stdout = String::from_utf8_lossy(&output2.stdout);
-            let trimmed_output = stdout.trim();
-            if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(trimmed_output)
-            {
-                for port_str in map.keys() {
-                    if let Some(port_num) = port_str.split('/').next() {
-                        if let Ok(port) = port_num.parse::<u16>() {
-                            if !ports.contains(&port) {
-                                ports.push(port);
-                            }
-                        }
-                    }
-                }
-            }
+            parse_ports_json(&output2.stdout, &mut ports);
         }
     }
 
@@ -8507,15 +8512,20 @@ async fn execute_http_body_probe(
     path: &str,
     timeout_secs: u32,
 ) -> HttpProbeExecution {
+    // Exec-first: `docker exec … curl http://localhost:<port>` reaches the app
+    // from inside its own network namespace — no shared network, and it avoids
+    // the per-IP connect timeouts of the agent HTTP path when the agent is not
+    // on the project's network. Fall back to the agent HTTP client (reqwest to
+    // the container DNS name / IP) only when the container has no HTTP client
+    // or no shell.
     let mut execution =
-        execute_http_body_probe_from_agent(app_code, container_name, port, path, timeout_secs)
-            .await;
+        execute_http_body_probe_from_container_exec(container_name, port, path, timeout_secs).await;
     if execution.response.is_none() {
-        let container_execution =
-            execute_http_body_probe_from_container_exec(container_name, port, path, timeout_secs)
+        let agent_execution =
+            execute_http_body_probe_from_agent(app_code, container_name, port, path, timeout_secs)
                 .await;
-        execution.attempts.extend(container_execution.attempts);
-        execution.response = container_execution.response;
+        execution.attempts.extend(agent_execution.attempts);
+        execution.response = agent_execution.response;
     }
     execution
 }
@@ -8528,15 +8538,21 @@ async fn execute_http_status_probe(
     path: &str,
     timeout_secs: u32,
 ) -> HttpProbeExecution {
+    // Exec-first (see `execute_http_body_probe` for rationale).
     let mut execution =
-        execute_http_status_probe_from_agent(app_code, container_name, port, path, timeout_secs)
+        execute_http_status_probe_from_container_exec(container_name, port, path, timeout_secs)
             .await;
     if execution.response.is_none() {
-        let container_execution =
-            execute_http_status_probe_from_container_exec(container_name, port, path, timeout_secs)
-                .await;
-        execution.attempts.extend(container_execution.attempts);
-        execution.response = container_execution.response;
+        let agent_execution = execute_http_status_probe_from_agent(
+            app_code,
+            container_name,
+            port,
+            path,
+            timeout_secs,
+        )
+        .await;
+        execution.attempts.extend(agent_execution.attempts);
+        execution.response = agent_execution.response;
     }
     execution
 }
@@ -8712,7 +8728,7 @@ async fn execute_http_body_probe_from_container_exec(
     let command = build_http_body_probe_command(&url, timeout_secs);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs((timeout_secs + 2) as u64),
-        docker::exec_in_container_with_output(container_name, &command),
+        docker::exec_in_container_with_output_resolved(container_name, &command),
     )
     .await;
     let probe_result = match result {
@@ -8799,7 +8815,7 @@ async fn execute_http_status_probe_from_container_exec(
     let command = build_http_status_probe_command(&url, timeout_secs);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs((timeout_secs + 2) as u64),
-        docker::exec_in_container_with_output(container_name, &command),
+        docker::exec_in_container_with_output_resolved(container_name, &command),
     )
     .await;
     let probe_result = match result {
@@ -8867,6 +8883,9 @@ async fn execute_http_status_probe_from_container_exec(
 fn probe_http_client(timeout_secs: u32) -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs as u64))
+        // Fail fast on unreachable container IPs (agent not on the project
+        // network) instead of blocking for the full request timeout per URL.
+        .connect_timeout(std::time::Duration::from_secs(1))
         .build()
         .ok()
 }
@@ -8909,16 +8928,14 @@ fn push_probe_base_url(urls: &mut Vec<ProbeBaseUrl>, host: &str, port: u16, app_
 
 #[cfg(feature = "docker")]
 async fn get_container_ip_addresses(container_name: &str) -> Vec<String> {
-    let output = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Networks}}",
-            container_name,
-        ])
-        .output()
-        .await;
-    let Ok(output) = output else {
+    let Some(output) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .NetworkSettings.Networks}}",
+        container_name,
+    ])
+    .await
+    else {
         return Vec::new();
     };
     if !output.status.success() {

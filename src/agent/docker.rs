@@ -10,7 +10,34 @@ use bollard::query_parameters::{
 use bollard::Docker;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{debug, error};
+
+/// Upper bound for a single Docker control-plane operation (list/inspect/exec
+/// setup). Wraps bollard calls so an unresponsive daemon can never hang a
+/// resolver — it covers both connection and execution, since the timeout spans
+/// the whole request including connect.
+const DOCKER_OP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run a Docker control-plane future with [`DOCKER_OP_TIMEOUT`], mapping an
+/// elapsed timeout into an error rather than hanging. Accepts any error type
+/// bollard returns (it maps into `anyhow`).
+async fn with_docker_timeout<T, E>(
+    what: &str,
+    fut: impl std::future::Future<Output = std::result::Result<T, E>>,
+) -> Result<T>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match tokio::time::timeout(DOCKER_OP_TIMEOUT, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(anyhow::Error::new(err).context(format!("docker {what}"))),
+        Err(_) => Err(anyhow::anyhow!(
+            "docker {what} timed out after {}s",
+            DOCKER_OP_TIMEOUT.as_secs()
+        )),
+    }
+}
 
 #[derive(Serialize, Clone, Debug)]
 pub struct ContainerInfo {
@@ -143,10 +170,7 @@ pub async fn resolve_container_name(name: &str) -> Result<String> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
-    let list = docker
-        .list_containers(opts)
-        .await
-        .context("list containers")?;
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
 
     tracing::debug!(
         app_code = name,
@@ -200,10 +224,7 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
-    let list = docker
-        .list_containers(opts)
-        .await
-        .context("list containers")?;
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
     Ok(list
         .into_iter()
         .map(|c| {
@@ -234,10 +255,7 @@ pub async fn list_containers_with_logs(tail: &str) -> Result<Vec<ContainerInfo>>
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
-    let list = docker
-        .list_containers(opts)
-        .await
-        .context("list containers")?;
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
 
     let mut result = Vec::with_capacity(list.len());
 
@@ -391,10 +409,7 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
-    let list = docker
-        .list_containers(opts)
-        .await
-        .context("list containers")?;
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
 
     let mut health = Vec::with_capacity(list.len());
 
@@ -807,18 +822,30 @@ pub async fn exec_in_container_argv(name: &str, argv: Vec<String>) -> Result<()>
 /// Execute a shell command inside a running container and return output.
 /// Returns (exit_code, stdout, stderr) tuple.
 pub async fn exec_in_container_with_output(name: &str, cmd: &str) -> Result<(i64, String, String)> {
+    let resolved_name = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+    exec_in_container_with_output_resolved(&resolved_name, cmd).await
+}
+
+/// Like [`exec_in_container_with_output`] but assumes `name` is already a real,
+/// resolved container name and skips the `resolve_container_name` lookup. Use
+/// this in hot paths (e.g. endpoint probing) that resolve the container once up
+/// front, to avoid a full `list_containers` API call on every invocation.
+pub async fn exec_in_container_with_output_resolved(
+    resolved_name: &str,
+    cmd: &str,
+) -> Result<(i64, String, String)> {
     use bollard::exec::StartExecResults;
     use futures_util::StreamExt;
 
     let docker = docker_client()?;
-    let resolved_name = resolve_container_name(name)
-        .await
-        .unwrap_or_else(|_| name.to_string());
+    let name = resolved_name;
 
     // Create exec instance
     let exec = docker
         .create_exec(
-            &resolved_name,
+            resolved_name,
             CreateExecOptions {
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
