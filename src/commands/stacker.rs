@@ -8348,7 +8348,6 @@ fn derive_health_status(container_state: &str, has_errors: bool) -> &'static str
     }
 }
 
-#[cfg(feature = "docker")]
 /// Hard timeout for a single `docker` CLI subprocess so an unresponsive daemon
 /// can't hang a probe. Covers spawn + execution.
 #[cfg(feature = "docker")]
@@ -8387,6 +8386,7 @@ fn parse_ports_json(stdout: &[u8], ports: &mut Vec<u16>) {
     }
 }
 
+#[cfg(feature = "docker")]
 async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
     let mut ports = Vec::new();
 
