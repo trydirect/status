@@ -884,6 +884,8 @@ pub struct ActivatePipeCommand {
     source_adapter: Option<PipeAdapterReference>,
     #[serde(default)]
     source_container: Option<String>,
+    #[serde(default)]
+    source_url: Option<String>,
     #[serde(default = "default_pipe_source_endpoint")]
     source_endpoint: String,
     #[serde(default = "default_pipe_source_method")]
@@ -932,6 +934,8 @@ pub struct TriggerPipeCommand {
     source_adapter: Option<PipeAdapterReference>,
     #[serde(default)]
     source_container: Option<String>,
+    #[serde(default)]
+    source_url: Option<String>,
     #[serde(default = "default_pipe_source_endpoint")]
     source_endpoint: String,
     #[serde(default = "default_pipe_source_method")]
@@ -1040,6 +1044,7 @@ struct PipeLifecycleSnapshot {
 struct PipeRegistration {
     source_adapter: Option<PipeAdapterReference>,
     source_container: Option<String>,
+    source_url: Option<String>,
     source_endpoint: String,
     source_method: String,
     source_broker_url: Option<String>,
@@ -1446,6 +1451,7 @@ impl PipeRuntime {
             source_adapter: None,
             input_data: Some(payload),
             source_container: None,
+            source_url: None,
             source_endpoint: default_pipe_source_endpoint(),
             source_method: default_pipe_source_method(),
             target_adapter: None,
@@ -1480,6 +1486,7 @@ impl From<ActivatePipeCommand> for PipeRegistration {
         Self {
             source_adapter: value.source_adapter,
             source_container: value.source_container,
+            source_url: value.source_url,
             source_endpoint: value.source_endpoint,
             source_method: value.source_method,
             source_broker_url: value.source_broker_url,
@@ -3680,6 +3687,10 @@ fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistr
         .source_broker_url
         .as_deref()
         .map(redact_url_credentials);
+    registration.source_url = registration
+        .source_url
+        .as_deref()
+        .map(redact_url_credentials);
     registration.target_adapter = registration
         .target_adapter
         .take()
@@ -3785,6 +3796,14 @@ fn merge_trigger_with_registration(
             .is_none()
         {
             merged.source_container = registration.source_container.clone();
+        }
+        if merged
+            .source_url
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            merged.source_url = registration.source_url.clone();
         }
         if merged.source_endpoint == default_pipe_source_endpoint() {
             merged.source_endpoint = registration.source_endpoint.clone();
@@ -4559,13 +4578,12 @@ async fn handle_trigger_pipe(
     let source_data = match resolved.input_data.clone() {
         Some(value) => value,
         None => match resolved
-            .source_container
+            .source_url
             .as_deref()
             .filter(|value| !value.is_empty())
         {
-            Some(container) => match fetch_trigger_pipe_source_request(
-                container,
-                &resolved.source_endpoint,
+            Some(url) => match fetch_external_pipe_source_request(
+                url,
                 &resolved.source_method,
             )
             .await
@@ -4628,33 +4646,104 @@ async fn handle_trigger_pipe(
                     return Ok(result);
                 }
             },
-            None => {
-                let error = "trigger_pipe requires input_data or source_container";
-                pipe_runtime
-                    .mark_failed(
-                        &data.deployment_hash,
-                        &data.pipe_instance_id,
-                        now_timestamp(),
-                        error.to_string(),
-                    )
-                    .await;
-                result.status = "failed".into();
-                result.result = Some(json!({
-                    "type": "trigger_pipe",
-                    "deployment_hash": data.deployment_hash,
-                    "pipe_instance_id": data.pipe_instance_id,
-                    "success": false,
-                    "source_data": Value::Null,
-                    "mapped_data": Value::Null,
-                    "target_response": Value::Null,
-                    "error": error,
-                    "triggered_at": now_timestamp(),
-                    "trigger_type": resolved.trigger_type,
-                    "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
-                }));
-                result.error = Some(error.into());
-                return Ok(result);
-            }
+            None => match resolved
+                .source_container
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                Some(container) => match fetch_trigger_pipe_source_request(
+                    container,
+                    &resolved.source_endpoint,
+                    &resolved.source_method,
+                )
+                .await
+                {
+                    Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+                        response_body
+                    }
+                    Ok((status_code, response_body)) => {
+                        let error = format!("source fetch failed with status {}", status_code);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": response_body,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                    Err(err) => {
+                        let error = format!("failed to fetch trigger_pipe source: {}", err);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": Value::Null,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                },
+                None => {
+                    let error = "trigger_pipe requires input_data, source_url, or source_container";
+                    pipe_runtime
+                        .mark_failed(
+                            &data.deployment_hash,
+                            &data.pipe_instance_id,
+                            now_timestamp(),
+                            error.to_string(),
+                        )
+                        .await;
+                    result.status = "failed".into();
+                    result.result = Some(json!({
+                        "type": "trigger_pipe",
+                        "deployment_hash": data.deployment_hash,
+                        "pipe_instance_id": data.pipe_instance_id,
+                        "success": false,
+                        "source_data": Value::Null,
+                        "mapped_data": Value::Null,
+                        "target_response": Value::Null,
+                        "error": error,
+                        "triggered_at": now_timestamp(),
+                        "trigger_type": resolved.trigger_type,
+                        "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                    }));
+                    result.error = Some(error.into());
+                    return Ok(result);
+                }
+            },
         },
     };
 
