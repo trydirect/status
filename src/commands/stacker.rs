@@ -327,7 +327,7 @@ mod trigger_pipe_handler_tests {
         assert_eq!(result.status, "failed");
         assert_eq!(
             result.error.as_deref(),
-            Some("trigger_pipe requires input_data or source_container")
+            Some("trigger_pipe requires input_data, source_url, or source_container")
         );
     }
 
