@@ -103,6 +103,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -143,6 +144,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -200,6 +202,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({})),
             trigger_type: "manual".into(),
         };
@@ -316,6 +319,7 @@ mod trigger_pipe_handler_tests {
             target_container: Some("target-app".into()),
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -350,6 +354,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/ws-target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -389,6 +394,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/grpc-target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -428,6 +434,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -467,6 +474,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -514,6 +522,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -545,6 +554,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -596,6 +606,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -655,6 +666,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -677,6 +689,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -922,6 +935,8 @@ pub struct ActivatePipeCommand {
     #[serde(default = "default_pipe_target_method")]
     target_method: String,
     #[serde(default)]
+    target_headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
     field_mapping: Option<Value>,
     #[serde(default = "default_activate_pipe_trigger_type")]
     trigger_type: String,
@@ -963,6 +978,8 @@ pub struct TriggerPipeCommand {
     target_endpoint: String,
     #[serde(default = "default_pipe_target_method")]
     target_method: String,
+    #[serde(default)]
+    target_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     field_mapping: Option<Value>,
     #[serde(default = "default_pipe_trigger_type")]
@@ -1069,6 +1086,7 @@ struct PipeRegistration {
     target_container: Option<String>,
     target_endpoint: String,
     target_method: String,
+    target_headers: Option<std::collections::HashMap<String, String>>,
     field_mapping: Option<Value>,
     trigger_type: String,
     lifecycle: PipeLifecycleSnapshot,
@@ -1472,6 +1490,7 @@ impl PipeRuntime {
             target_container: None,
             target_endpoint: default_pipe_target_endpoint(),
             target_method: default_pipe_target_method(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: trigger_type.to_string(),
         };
@@ -1511,6 +1530,7 @@ impl From<ActivatePipeCommand> for PipeRegistration {
             target_container: value.target_container,
             target_endpoint: value.target_endpoint,
             target_method: value.target_method,
+            target_headers: value.target_headers,
             field_mapping: value.field_mapping,
             trigger_type: value.trigger_type,
             lifecycle: PipeLifecycleSnapshot::active(String::new()),
@@ -3712,12 +3732,24 @@ fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistr
         .target_url
         .as_deref()
         .map(redact_url_credentials);
+    if let Some(ref mut headers) = registration.target_headers {
+        for value in headers.values_mut() {
+            if is_sensitive_header_value(value) {
+                *value = "[REDACTED]".into();
+            }
+        }
+    }
     registration
 }
 
 fn redact_pipe_adapter_reference(mut adapter: PipeAdapterReference) -> PipeAdapterReference {
     adapter.config = adapter.config.take().map(redact_json_secrets);
     adapter
+}
+
+fn is_sensitive_header_value(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower.starts_with("bearer ") || lower.starts_with("basic ") || value.len() > 20
 }
 
 fn redact_json_secrets(value: Value) -> Value {
@@ -3849,6 +3881,9 @@ fn merge_trigger_with_registration(
         if merged.target_method == default_pipe_target_method() {
             merged.target_method = registration.target_method.clone();
         }
+        if merged.target_headers.is_none() {
+            merged.target_headers = registration.target_headers.clone();
+        }
         if merged.field_mapping.is_none() {
             merged.field_mapping = registration.field_mapping.clone();
         }
@@ -3908,6 +3943,7 @@ async fn send_trigger_pipe_request(
     url: &str,
     method: &str,
     payload: &Value,
+    headers: &Option<std::collections::HashMap<String, String>>,
 ) -> Result<(u16, Value)> {
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .with_context(|| format!("invalid target_method '{}'", method))?;
@@ -3916,9 +3952,14 @@ async fn send_trigger_pipe_request(
         .build()
         .context("building trigger_pipe http client")?;
 
-    let response = client
-        .request(method, url)
-        .json(payload)
+    let mut request = client.request(method, url).json(payload);
+    if let Some(ref hdrs) = headers {
+        for (key, value) in hdrs {
+            request = request.header(key.as_str(), value.as_str());
+        }
+    }
+
+    let response = request
         .send()
         .await
         .with_context(|| format!("sending trigger_pipe request to {}", url))?;
@@ -4890,8 +4931,13 @@ async fn handle_trigger_pipe(
                     .map_err(|e| anyhow::anyhow!(e))
                 }
             } else {
-                send_trigger_pipe_request(&target_value, &resolved.target_method, &mapped_data)
-                    .await
+                send_trigger_pipe_request(
+                    &target_value,
+                    &resolved.target_method,
+                    &mapped_data,
+                    &resolved.target_headers,
+                )
+                .await
             }
         }
         "container" => {
@@ -10020,6 +10066,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "webhook".into(),
         });
@@ -10085,6 +10132,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "webhook".into(),
         });
@@ -10146,6 +10194,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "poll".into(),
         });
@@ -10269,6 +10318,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "rabbitmq".into(),
         });
@@ -10326,6 +10376,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "subject": "$.subject" })),
             trigger_type: "manual".into(),
         });
