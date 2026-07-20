@@ -10395,6 +10395,7 @@ mod tests {
             target_container: None,
             target_endpoint: default_pipe_target_endpoint(),
             target_method: default_pipe_target_method(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: default_pipe_trigger_type(),
         };
