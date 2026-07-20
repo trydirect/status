@@ -4582,70 +4582,67 @@ async fn handle_trigger_pipe(
             .as_deref()
             .filter(|value| !value.is_empty())
         {
-            Some(url) => match fetch_external_pipe_source_request(
-                url,
-                &resolved.source_method,
-            )
-            .await
-            {
-                Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
-                    response_body
+            Some(url) => {
+                match fetch_external_pipe_source_request(url, &resolved.source_method).await {
+                    Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+                        response_body
+                    }
+                    Ok((status_code, response_body)) => {
+                        let error = format!("source fetch failed with status {}", status_code);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": response_body,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                    Err(err) => {
+                        let error = format!("failed to fetch trigger_pipe source: {}", err);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": Value::Null,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
                 }
-                Ok((status_code, response_body)) => {
-                    let error = format!("source fetch failed with status {}", status_code);
-                    pipe_runtime
-                        .mark_failed(
-                            &data.deployment_hash,
-                            &data.pipe_instance_id,
-                            now_timestamp(),
-                            error.clone(),
-                        )
-                        .await;
-                    result.status = "failed".into();
-                    result.result = Some(json!({
-                        "type": "trigger_pipe",
-                        "deployment_hash": data.deployment_hash,
-                        "pipe_instance_id": data.pipe_instance_id,
-                        "success": false,
-                        "source_data": response_body,
-                        "mapped_data": Value::Null,
-                        "target_response": Value::Null,
-                        "error": error,
-                        "triggered_at": now_timestamp(),
-                        "trigger_type": resolved.trigger_type,
-                        "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
-                    }));
-                    result.error = Some(error);
-                    return Ok(result);
-                }
-                Err(err) => {
-                    let error = format!("failed to fetch trigger_pipe source: {}", err);
-                    pipe_runtime
-                        .mark_failed(
-                            &data.deployment_hash,
-                            &data.pipe_instance_id,
-                            now_timestamp(),
-                            error.clone(),
-                        )
-                        .await;
-                    result.status = "failed".into();
-                    result.result = Some(json!({
-                        "type": "trigger_pipe",
-                        "deployment_hash": data.deployment_hash,
-                        "pipe_instance_id": data.pipe_instance_id,
-                        "success": false,
-                        "source_data": Value::Null,
-                        "mapped_data": Value::Null,
-                        "target_response": Value::Null,
-                        "error": error,
-                        "triggered_at": now_timestamp(),
-                        "trigger_type": resolved.trigger_type,
-                        "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
-                    }));
-                    result.error = Some(error);
-                    return Ok(result);
-                }
-            },
+            }
             None => match resolved
                 .source_container
                 .as_deref()
