@@ -1,5 +1,5 @@
 #![cfg(feature = "docker")]
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use bollard::container::LogOutput;
 use bollard::exec::CreateExecOptions;
 use bollard::models::{ContainerStatsResponse, ContainerSummaryStateEnum};
@@ -218,6 +218,34 @@ pub async fn resolve_container_name(name: &str) -> Result<String> {
 
     // Return original name (will fail at Docker API level with helpful error)
     Ok(name.to_string())
+}
+
+pub async fn get_container_port(name: &str) -> Result<u16> {
+    let docker = docker_client()?;
+    let opts: Option<ListContainersOptions> =
+        Some(ListContainersOptionsBuilder::default().all(true).build());
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
+
+    let resolved = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+
+    for container in &list {
+        if let Some(names) = &container.names {
+            for entry in names {
+                let normalized = entry.trim_start_matches('/');
+                if normalized == resolved {
+                    if let Some(ports) = &container.ports {
+                        for port in ports {
+                            return Ok(port.private_port);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    bail!("no exposed port found for container '{}'", name)
 }
 
 pub async fn list_containers() -> Result<Vec<ContainerInfo>> {

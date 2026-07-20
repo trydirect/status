@@ -708,6 +708,64 @@ mod trigger_pipe_handler_tests {
             Some(&json!("failed"))
         );
     }
+
+    #[tokio::test]
+    async fn send_trigger_pipe_container_request_via_http_delivers_payload() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/webhook/pipe")
+            .match_body(Matcher::Exact(r#"{"email":"dev@try.direct"}"#.into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"accepted":true}"#)
+            .create_async()
+            .await;
+
+        let url = format!("{}/webhook/pipe", server.url());
+        let (status, body) = super::send_trigger_pipe_container_request_via_http(
+            &url,
+            "POST",
+            &json!({ "email": "dev@try.direct" }),
+            &None,
+        )
+        .await
+        .expect("container_http request should succeed");
+
+        mock.assert_async().await;
+        assert_eq!(status, 200);
+        assert_eq!(body, json!({ "accepted": true }));
+    }
+
+    #[tokio::test]
+    async fn send_trigger_pipe_container_request_via_http_sends_custom_headers() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/conversations")
+            .match_header("X-Custom", "test-value")
+            .match_header("Content-Type", "application/json")
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":1}"#)
+            .create_async()
+            .await;
+
+        let url = format!("{}/api/v1/conversations", server.url());
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Custom".to_string(), "test-value".to_string());
+
+        let (status, body) = super::send_trigger_pipe_container_request_via_http(
+            &url,
+            "POST",
+            &json!({ "message": "hello" }),
+            &Some(headers),
+        )
+        .await
+        .expect("container_http request with headers should succeed");
+
+        mock.assert_async().await;
+        assert_eq!(status, 201);
+        assert_eq!(body, json!({ "id": 1 }));
+    }
 }
 
 impl std::fmt::Display for ContainerRuntime {
@@ -4100,6 +4158,45 @@ async fn send_trigger_pipe_container_request(
     bail!("target_container requires docker feature")
 }
 
+async fn send_trigger_pipe_container_request_via_http(
+    url: &str,
+    method: &str,
+    payload: &Value,
+    headers: &Option<std::collections::HashMap<String, String>>,
+) -> Result<(u16, Value)> {
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("invalid target_method '{}'", method))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building container_http client")?;
+
+    let mut request = client.request(method, url).json(payload);
+    if let Some(ref hdrs) = headers {
+        for (key, value) in hdrs {
+            request = request.header(key.as_str(), value.as_str());
+        }
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("sending container_http request to {}", url))?;
+
+    let status = response.status().as_u16();
+    let body_text = response
+        .text()
+        .await
+        .context("reading container_http response body")?;
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
+}
+
 async fn run_poll_source_worker(
     runtime: PipeRuntime,
     key: PipeRuntimeKey,
@@ -4941,11 +5038,18 @@ async fn handle_trigger_pipe(
             }
         }
         "container" => {
-            send_trigger_pipe_container_request(
-                &target_value,
+            let port = crate::agent::docker::get_container_port(&target_value)
+                .await
+                .unwrap_or(80);
+            let container_url = build_pipe_target_url(
+                &format!("http://{}:{}", target_value, port),
                 &resolved.target_endpoint,
+            );
+            send_trigger_pipe_container_request_via_http(
+                &container_url,
                 &resolved.target_method,
                 &mapped_data,
+                &resolved.target_headers,
             )
             .await
         }
