@@ -236,7 +236,7 @@ pub async fn get_container_port(name: &str) -> Result<u16> {
                 let normalized = entry.trim_start_matches('/');
                 if normalized == resolved {
                     if let Some(ports) = &container.ports {
-                        for port in ports {
+                        if let Some(port) = ports.iter().next() {
                             return Ok(port.private_port);
                         }
                     }

@@ -3974,6 +3974,7 @@ fn build_http_status_probe_command(url: &str, timeout_secs: u32) -> String {
 }
 
 #[cfg(feature = "docker")]
+#[allow(dead_code)]
 fn build_trigger_pipe_container_command(endpoint: &str, method: &str, payload: &Value) -> String {
     let json_payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
     let escaped_payload = shell_escape_single_quotes(&json_payload);
@@ -4111,6 +4112,7 @@ async fn fetch_trigger_pipe_source_request(
 }
 
 #[cfg(feature = "docker")]
+#[allow(dead_code)]
 async fn send_trigger_pipe_container_request(
     container: &str,
     endpoint: &str,
@@ -4149,6 +4151,7 @@ async fn send_trigger_pipe_container_request(
 }
 
 #[cfg(not(feature = "docker"))]
+#[allow(dead_code)]
 async fn send_trigger_pipe_container_request(
     _container: &str,
     _endpoint: &str,
