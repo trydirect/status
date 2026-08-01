@@ -4161,6 +4161,7 @@ async fn send_trigger_pipe_container_request(
     bail!("target_container requires docker feature")
 }
 
+#[cfg(feature = "docker")]
 async fn send_trigger_pipe_container_request_via_http(
     url: &str,
     method: &str,
@@ -5040,6 +5041,7 @@ async fn handle_trigger_pipe(
                 .await
             }
         }
+        #[cfg(feature = "docker")]
         "container" => {
             let port = crate::agent::docker::get_container_port(&target_value)
                 .await
@@ -5056,6 +5058,8 @@ async fn handle_trigger_pipe(
             )
             .await
         }
+        #[cfg(not(feature = "docker"))]
+        "container" => Err(anyhow::anyhow!("container target requires docker feature")),
         _ => unreachable!(),
     };
 
