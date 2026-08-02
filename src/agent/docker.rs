@@ -1,5 +1,5 @@
 #![cfg(feature = "docker")]
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use bollard::container::LogOutput;
 use bollard::exec::CreateExecOptions;
 use bollard::models::{ContainerStatsResponse, ContainerSummaryStateEnum};
@@ -10,7 +10,34 @@ use bollard::query_parameters::{
 use bollard::Docker;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{debug, error};
+
+/// Upper bound for a single Docker control-plane operation (list/inspect/exec
+/// setup). Wraps bollard calls so an unresponsive daemon can never hang a
+/// resolver — it covers both connection and execution, since the timeout spans
+/// the whole request including connect.
+const DOCKER_OP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run a Docker control-plane future with [`DOCKER_OP_TIMEOUT`], mapping an
+/// elapsed timeout into an error rather than hanging. Accepts any error type
+/// bollard returns (it maps into `anyhow`).
+async fn with_docker_timeout<T, E>(
+    what: &str,
+    fut: impl std::future::Future<Output = std::result::Result<T, E>>,
+) -> Result<T>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match tokio::time::timeout(DOCKER_OP_TIMEOUT, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(anyhow::Error::new(err).context(format!("docker {what}"))),
+        Err(_) => Err(anyhow::anyhow!(
+            "docker {what} timed out after {}s",
+            DOCKER_OP_TIMEOUT.as_secs()
+        )),
+    }
+}
 
 #[derive(Serialize, Clone, Debug)]
 pub struct ContainerInfo {
@@ -119,14 +146,31 @@ fn name_matches(container_name: &str, app_code: &str) -> bool {
     false
 }
 
+/// Stacker's stable service-identity label, set by the control plane on every
+/// project service. Preferred over Docker Compose's `com.docker.compose.service`
+/// because it carries the app code the control plane resolves by and survives
+/// compose service renames (the generated main service is named `app`, but its
+/// `my.stacker.service` label is the project code).
+const STACKER_SERVICE_LABEL: &str = "my.stacker.service";
+const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+
+/// If a container's labels identify it as `app_code`, return which label
+/// matched (for logging). Prefers the stacker-owned label over Compose's.
+fn label_matches_app(labels: &HashMap<String, String>, app_code: &str) -> Option<&'static str> {
+    if labels.get(STACKER_SERVICE_LABEL).map(String::as_str) == Some(app_code) {
+        return Some(STACKER_SERVICE_LABEL);
+    }
+    if labels.get(COMPOSE_SERVICE_LABEL).map(String::as_str) == Some(app_code) {
+        return Some(COMPOSE_SERVICE_LABEL);
+    }
+    None
+}
+
 pub async fn resolve_container_name(name: &str) -> Result<String> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
-    let list = docker
-        .list_containers(opts)
-        .await
-        .context("list containers")?;
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
 
     tracing::debug!(
         app_code = name,
@@ -143,15 +187,14 @@ pub async fn resolve_container_name(name: &str) -> Result<String> {
                 available_containers.push(normalized.to_string());
 
                 if let Some(labels) = container.labels.as_ref() {
-                    if let Some(service) = labels.get("com.docker.compose.service") {
-                        if service == name {
-                            tracing::info!(
-                                app_code = name,
-                                resolved_name = normalized,
-                                "Container name resolved via compose service label"
-                            );
-                            return Ok(normalized.to_string());
-                        }
+                    if let Some(matched_label) = label_matches_app(labels, name) {
+                        tracing::info!(
+                            app_code = name,
+                            resolved_name = normalized,
+                            matched_label,
+                            "Container name resolved via service label"
+                        );
+                        return Ok(normalized.to_string());
                     }
                 }
 
@@ -177,14 +220,39 @@ pub async fn resolve_container_name(name: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
+pub async fn get_container_port(name: &str) -> Result<u16> {
+    let docker = docker_client()?;
+    let opts: Option<ListContainersOptions> =
+        Some(ListContainersOptionsBuilder::default().all(true).build());
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
+
+    let resolved = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+
+    for container in &list {
+        if let Some(names) = &container.names {
+            for entry in names {
+                let normalized = entry.trim_start_matches('/');
+                if normalized == resolved {
+                    if let Some(ports) = &container.ports {
+                        if let Some(port) = ports.iter().next() {
+                            return Ok(port.private_port);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    bail!("no exposed port found for container '{}'", name)
+}
+
 pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
-    let list = docker
-        .list_containers(opts)
-        .await
-        .context("list containers")?;
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
     Ok(list
         .into_iter()
         .map(|c| {
@@ -215,10 +283,7 @@ pub async fn list_containers_with_logs(tail: &str) -> Result<Vec<ContainerInfo>>
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
-    let list = docker
-        .list_containers(opts)
-        .await
-        .context("list containers")?;
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
 
     let mut result = Vec::with_capacity(list.len());
 
@@ -372,10 +437,7 @@ pub async fn list_container_health() -> Result<Vec<ContainerHealth>> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
         Some(ListContainersOptionsBuilder::default().all(true).build());
-    let list = docker
-        .list_containers(opts)
-        .await
-        .context("list containers")?;
+    let list = with_docker_timeout("list_containers", docker.list_containers(opts)).await?;
 
     let mut health = Vec::with_capacity(list.len());
 
@@ -788,18 +850,30 @@ pub async fn exec_in_container_argv(name: &str, argv: Vec<String>) -> Result<()>
 /// Execute a shell command inside a running container and return output.
 /// Returns (exit_code, stdout, stderr) tuple.
 pub async fn exec_in_container_with_output(name: &str, cmd: &str) -> Result<(i64, String, String)> {
+    let resolved_name = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+    exec_in_container_with_output_resolved(&resolved_name, cmd).await
+}
+
+/// Like [`exec_in_container_with_output`] but assumes `name` is already a real,
+/// resolved container name and skips the `resolve_container_name` lookup. Use
+/// this in hot paths (e.g. endpoint probing) that resolve the container once up
+/// front, to avoid a full `list_containers` API call on every invocation.
+pub async fn exec_in_container_with_output_resolved(
+    resolved_name: &str,
+    cmd: &str,
+) -> Result<(i64, String, String)> {
     use bollard::exec::StartExecResults;
     use futures_util::StreamExt;
 
     let docker = docker_client()?;
-    let resolved_name = resolve_container_name(name)
-        .await
-        .unwrap_or_else(|_| name.to_string());
+    let name = resolved_name;
 
     // Create exec instance
     let exec = docker
         .create_exec(
-            &resolved_name,
+            resolved_name,
             CreateExecOptions {
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
@@ -872,6 +946,42 @@ mod tests {
     fn test_name_matches_exact() {
         assert!(name_matches("komodo", "komodo"));
         assert!(name_matches("/komodo", "komodo"));
+    }
+
+    #[test]
+    fn label_matches_prefers_stacker_service_over_compose() {
+        let mut labels = HashMap::new();
+        // Generated main service: compose service name is "app", but the
+        // stacker label carries the project code.
+        labels.insert(COMPOSE_SERVICE_LABEL.to_string(), "app".to_string());
+        labels.insert(
+            STACKER_SERVICE_LABEL.to_string(),
+            "wordpress-matomo".to_string(),
+        );
+
+        // Resolves by the stacker label even though the compose service is "app".
+        assert_eq!(
+            label_matches_app(&labels, "wordpress-matomo"),
+            Some(STACKER_SERVICE_LABEL)
+        );
+        // The Docker Compose service name still resolves.
+        assert_eq!(
+            label_matches_app(&labels, "app"),
+            Some(COMPOSE_SERVICE_LABEL)
+        );
+        // No spurious match.
+        assert_eq!(label_matches_app(&labels, "matomo"), None);
+    }
+
+    #[test]
+    fn label_matches_compose_only_still_works() {
+        let mut labels = HashMap::new();
+        labels.insert(COMPOSE_SERVICE_LABEL.to_string(), "matomo".to_string());
+        assert_eq!(
+            label_matches_app(&labels, "matomo"),
+            Some(COMPOSE_SERVICE_LABEL)
+        );
+        assert_eq!(label_matches_app(&labels, "app"), None);
     }
 
     #[test]

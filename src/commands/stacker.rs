@@ -95,6 +95,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -102,6 +103,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -134,6 +136,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -141,6 +144,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -187,6 +191,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "subject": "Deployment ready", "body_text": "done" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: Some(PipeAdapterReference::new("smtp").with_config(json!({
@@ -197,6 +202,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({})),
             trigger_type: "manual".into(),
         };
@@ -305,6 +311,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "/source/data".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -312,6 +319,7 @@ mod trigger_pipe_handler_tests {
             target_container: Some("target-app".into()),
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -323,7 +331,7 @@ mod trigger_pipe_handler_tests {
         assert_eq!(result.status, "failed");
         assert_eq!(
             result.error.as_deref(),
-            Some("trigger_pipe requires input_data or source_container")
+            Some("trigger_pipe requires input_data, source_url, or source_container")
         );
     }
 
@@ -338,6 +346,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -345,6 +354,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/ws-target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -376,6 +386,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -383,6 +394,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/grpc-target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -414,6 +426,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -421,6 +434,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -452,6 +466,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -459,6 +474,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -494,6 +510,7 @@ mod trigger_pipe_handler_tests {
             pipe_instance_id: "pipe-runtime-1".into(),
             source_adapter: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -505,6 +522,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -528,6 +546,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "user": { "email": "runtime@try.direct" } })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -535,6 +554,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -574,6 +594,7 @@ mod trigger_pipe_handler_tests {
             pipe_instance_id: "pipe-runtime-2".into(),
             source_adapter: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -585,6 +606,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -632,6 +654,7 @@ mod trigger_pipe_handler_tests {
             pipe_instance_id: "pipe-runtime-3".into(),
             source_adapter: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -643,6 +666,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -657,6 +681,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "user": { "email": "runtime@try.direct" } })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -664,6 +689,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -681,6 +707,64 @@ mod trigger_pipe_handler_tests {
                 .and_then(|body| body.get("state")),
             Some(&json!("failed"))
         );
+    }
+
+    #[tokio::test]
+    async fn send_trigger_pipe_container_request_via_http_delivers_payload() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/webhook/pipe")
+            .match_body(Matcher::Exact(r#"{"email":"dev@try.direct"}"#.into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"accepted":true}"#)
+            .create_async()
+            .await;
+
+        let url = format!("{}/webhook/pipe", server.url());
+        let (status, body) = super::send_trigger_pipe_container_request_via_http(
+            &url,
+            "POST",
+            &json!({ "email": "dev@try.direct" }),
+            &None,
+        )
+        .await
+        .expect("container_http request should succeed");
+
+        mock.assert_async().await;
+        assert_eq!(status, 200);
+        assert_eq!(body, json!({ "accepted": true }));
+    }
+
+    #[tokio::test]
+    async fn send_trigger_pipe_container_request_via_http_sends_custom_headers() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/conversations")
+            .match_header("X-Custom", "test-value")
+            .match_header("Content-Type", "application/json")
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":1}"#)
+            .create_async()
+            .await;
+
+        let url = format!("{}/api/v1/conversations", server.url());
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Custom".to_string(), "test-value".to_string());
+
+        let (status, body) = super::send_trigger_pipe_container_request_via_http(
+            &url,
+            "POST",
+            &json!({ "message": "hello" }),
+            &Some(headers),
+        )
+        .await
+        .expect("container_http request with headers should succeed");
+
+        mock.assert_async().await;
+        assert_eq!(status, 201);
+        assert_eq!(body, json!({ "id": 1 }));
     }
 }
 
@@ -884,6 +968,8 @@ pub struct ActivatePipeCommand {
     source_adapter: Option<PipeAdapterReference>,
     #[serde(default)]
     source_container: Option<String>,
+    #[serde(default)]
+    source_url: Option<String>,
     #[serde(default = "default_pipe_source_endpoint")]
     source_endpoint: String,
     #[serde(default = "default_pipe_source_method")]
@@ -906,6 +992,8 @@ pub struct ActivatePipeCommand {
     target_endpoint: String,
     #[serde(default = "default_pipe_target_method")]
     target_method: String,
+    #[serde(default)]
+    target_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     field_mapping: Option<Value>,
     #[serde(default = "default_activate_pipe_trigger_type")]
@@ -932,6 +1020,8 @@ pub struct TriggerPipeCommand {
     source_adapter: Option<PipeAdapterReference>,
     #[serde(default)]
     source_container: Option<String>,
+    #[serde(default)]
+    source_url: Option<String>,
     #[serde(default = "default_pipe_source_endpoint")]
     source_endpoint: String,
     #[serde(default = "default_pipe_source_method")]
@@ -946,6 +1036,8 @@ pub struct TriggerPipeCommand {
     target_endpoint: String,
     #[serde(default = "default_pipe_target_method")]
     target_method: String,
+    #[serde(default)]
+    target_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     field_mapping: Option<Value>,
     #[serde(default = "default_pipe_trigger_type")]
@@ -1040,6 +1132,7 @@ struct PipeLifecycleSnapshot {
 struct PipeRegistration {
     source_adapter: Option<PipeAdapterReference>,
     source_container: Option<String>,
+    source_url: Option<String>,
     source_endpoint: String,
     source_method: String,
     source_broker_url: Option<String>,
@@ -1051,6 +1144,7 @@ struct PipeRegistration {
     target_container: Option<String>,
     target_endpoint: String,
     target_method: String,
+    target_headers: Option<std::collections::HashMap<String, String>>,
     field_mapping: Option<Value>,
     trigger_type: String,
     lifecycle: PipeLifecycleSnapshot,
@@ -1446,6 +1540,7 @@ impl PipeRuntime {
             source_adapter: None,
             input_data: Some(payload),
             source_container: None,
+            source_url: None,
             source_endpoint: default_pipe_source_endpoint(),
             source_method: default_pipe_source_method(),
             target_adapter: None,
@@ -1453,6 +1548,7 @@ impl PipeRuntime {
             target_container: None,
             target_endpoint: default_pipe_target_endpoint(),
             target_method: default_pipe_target_method(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: trigger_type.to_string(),
         };
@@ -1480,6 +1576,7 @@ impl From<ActivatePipeCommand> for PipeRegistration {
         Self {
             source_adapter: value.source_adapter,
             source_container: value.source_container,
+            source_url: value.source_url,
             source_endpoint: value.source_endpoint,
             source_method: value.source_method,
             source_broker_url: value.source_broker_url,
@@ -1491,6 +1588,7 @@ impl From<ActivatePipeCommand> for PipeRegistration {
             target_container: value.target_container,
             target_endpoint: value.target_endpoint,
             target_method: value.target_method,
+            target_headers: value.target_headers,
             field_mapping: value.field_mapping,
             trigger_type: value.trigger_type,
             lifecycle: PipeLifecycleSnapshot::active(String::new()),
@@ -3680,6 +3778,10 @@ fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistr
         .source_broker_url
         .as_deref()
         .map(redact_url_credentials);
+    registration.source_url = registration
+        .source_url
+        .as_deref()
+        .map(redact_url_credentials);
     registration.target_adapter = registration
         .target_adapter
         .take()
@@ -3688,12 +3790,24 @@ fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistr
         .target_url
         .as_deref()
         .map(redact_url_credentials);
+    if let Some(ref mut headers) = registration.target_headers {
+        for value in headers.values_mut() {
+            if is_sensitive_header_value(value) {
+                *value = "[REDACTED]".into();
+            }
+        }
+    }
     registration
 }
 
 fn redact_pipe_adapter_reference(mut adapter: PipeAdapterReference) -> PipeAdapterReference {
     adapter.config = adapter.config.take().map(redact_json_secrets);
     adapter
+}
+
+fn is_sensitive_header_value(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower.starts_with("bearer ") || lower.starts_with("basic ") || value.len() > 20
 }
 
 fn redact_json_secrets(value: Value) -> Value {
@@ -3786,6 +3900,14 @@ fn merge_trigger_with_registration(
         {
             merged.source_container = registration.source_container.clone();
         }
+        if merged
+            .source_url
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            merged.source_url = registration.source_url.clone();
+        }
         if merged.source_endpoint == default_pipe_source_endpoint() {
             merged.source_endpoint = registration.source_endpoint.clone();
         }
@@ -3816,6 +3938,9 @@ fn merge_trigger_with_registration(
         }
         if merged.target_method == default_pipe_target_method() {
             merged.target_method = registration.target_method.clone();
+        }
+        if merged.target_headers.is_none() {
+            merged.target_headers = registration.target_headers.clone();
         }
         if merged.field_mapping.is_none() {
             merged.field_mapping = registration.field_mapping.clone();
@@ -3849,6 +3974,7 @@ fn build_http_status_probe_command(url: &str, timeout_secs: u32) -> String {
 }
 
 #[cfg(feature = "docker")]
+#[allow(dead_code)]
 fn build_trigger_pipe_container_command(endpoint: &str, method: &str, payload: &Value) -> String {
     let json_payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
     let escaped_payload = shell_escape_single_quotes(&json_payload);
@@ -3876,6 +4002,7 @@ async fn send_trigger_pipe_request(
     url: &str,
     method: &str,
     payload: &Value,
+    headers: &Option<std::collections::HashMap<String, String>>,
 ) -> Result<(u16, Value)> {
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .with_context(|| format!("invalid target_method '{}'", method))?;
@@ -3884,9 +4011,14 @@ async fn send_trigger_pipe_request(
         .build()
         .context("building trigger_pipe http client")?;
 
-    let response = client
-        .request(method, url)
-        .json(payload)
+    let mut request = client.request(method, url).json(payload);
+    if let Some(ref hdrs) = headers {
+        for (key, value) in hdrs {
+            request = request.header(key.as_str(), value.as_str());
+        }
+    }
+
+    let response = request
         .send()
         .await
         .with_context(|| format!("sending trigger_pipe request to {}", url))?;
@@ -3980,6 +4112,7 @@ async fn fetch_trigger_pipe_source_request(
 }
 
 #[cfg(feature = "docker")]
+#[allow(dead_code)]
 async fn send_trigger_pipe_container_request(
     container: &str,
     endpoint: &str,
@@ -4018,6 +4151,7 @@ async fn send_trigger_pipe_container_request(
 }
 
 #[cfg(not(feature = "docker"))]
+#[allow(dead_code)]
 async fn send_trigger_pipe_container_request(
     _container: &str,
     _endpoint: &str,
@@ -4025,6 +4159,46 @@ async fn send_trigger_pipe_container_request(
     _payload: &Value,
 ) -> Result<(u16, Value)> {
     bail!("target_container requires docker feature")
+}
+
+#[cfg(feature = "docker")]
+async fn send_trigger_pipe_container_request_via_http(
+    url: &str,
+    method: &str,
+    payload: &Value,
+    headers: &Option<std::collections::HashMap<String, String>>,
+) -> Result<(u16, Value)> {
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("invalid target_method '{}'", method))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building container_http client")?;
+
+    let mut request = client.request(method, url).json(payload);
+    if let Some(ref hdrs) = headers {
+        for (key, value) in hdrs {
+            request = request.header(key.as_str(), value.as_str());
+        }
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("sending container_http request to {}", url))?;
+
+    let status = response.status().as_u16();
+    let body_text = response
+        .text()
+        .await
+        .context("reading container_http response body")?;
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
 }
 
 async fn run_poll_source_worker(
@@ -4559,55 +4733,149 @@ async fn handle_trigger_pipe(
     let source_data = match resolved.input_data.clone() {
         Some(value) => value,
         None => match resolved
-            .source_container
+            .source_url
             .as_deref()
             .filter(|value| !value.is_empty())
         {
-            Some(container) => match fetch_trigger_pipe_source_request(
-                container,
-                &resolved.source_endpoint,
-                &resolved.source_method,
-            )
-            .await
+            Some(url) => {
+                match fetch_external_pipe_source_request(url, &resolved.source_method).await {
+                    Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+                        response_body
+                    }
+                    Ok((status_code, response_body)) => {
+                        let error = format!("source fetch failed with status {}", status_code);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": response_body,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                    Err(err) => {
+                        let error = format!("failed to fetch trigger_pipe source: {}", err);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": Value::Null,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                }
+            }
+            None => match resolved
+                .source_container
+                .as_deref()
+                .filter(|value| !value.is_empty())
             {
-                Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
-                    response_body
-                }
-                Ok((status_code, response_body)) => {
-                    let error = format!("source fetch failed with status {}", status_code);
+                Some(container) => match fetch_trigger_pipe_source_request(
+                    container,
+                    &resolved.source_endpoint,
+                    &resolved.source_method,
+                )
+                .await
+                {
+                    Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+                        response_body
+                    }
+                    Ok((status_code, response_body)) => {
+                        let error = format!("source fetch failed with status {}", status_code);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": response_body,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                    Err(err) => {
+                        let error = format!("failed to fetch trigger_pipe source: {}", err);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": Value::Null,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                },
+                None => {
+                    let error = "trigger_pipe requires input_data, source_url, or source_container";
                     pipe_runtime
                         .mark_failed(
                             &data.deployment_hash,
                             &data.pipe_instance_id,
                             now_timestamp(),
-                            error.clone(),
-                        )
-                        .await;
-                    result.status = "failed".into();
-                    result.result = Some(json!({
-                        "type": "trigger_pipe",
-                        "deployment_hash": data.deployment_hash,
-                        "pipe_instance_id": data.pipe_instance_id,
-                        "success": false,
-                        "source_data": response_body,
-                        "mapped_data": Value::Null,
-                        "target_response": Value::Null,
-                        "error": error,
-                        "triggered_at": now_timestamp(),
-                        "trigger_type": resolved.trigger_type,
-                        "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
-                    }));
-                    result.error = Some(error);
-                    return Ok(result);
-                }
-                Err(err) => {
-                    let error = format!("failed to fetch trigger_pipe source: {}", err);
-                    pipe_runtime
-                        .mark_failed(
-                            &data.deployment_hash,
-                            &data.pipe_instance_id,
-                            now_timestamp(),
-                            error.clone(),
+                            error.to_string(),
                         )
                         .await;
                     result.status = "failed".into();
@@ -4624,37 +4892,10 @@ async fn handle_trigger_pipe(
                         "trigger_type": resolved.trigger_type,
                         "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
                     }));
-                    result.error = Some(error);
+                    result.error = Some(error.into());
                     return Ok(result);
                 }
             },
-            None => {
-                let error = "trigger_pipe requires input_data or source_container";
-                pipe_runtime
-                    .mark_failed(
-                        &data.deployment_hash,
-                        &data.pipe_instance_id,
-                        now_timestamp(),
-                        error.to_string(),
-                    )
-                    .await;
-                result.status = "failed".into();
-                result.result = Some(json!({
-                    "type": "trigger_pipe",
-                    "deployment_hash": data.deployment_hash,
-                    "pipe_instance_id": data.pipe_instance_id,
-                    "success": false,
-                    "source_data": Value::Null,
-                    "mapped_data": Value::Null,
-                    "target_response": Value::Null,
-                    "error": error,
-                    "triggered_at": now_timestamp(),
-                    "trigger_type": resolved.trigger_type,
-                    "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
-                }));
-                result.error = Some(error.into());
-                return Ok(result);
-            }
         },
     };
 
@@ -4791,19 +5032,34 @@ async fn handle_trigger_pipe(
                     .map_err(|e| anyhow::anyhow!(e))
                 }
             } else {
-                send_trigger_pipe_request(&target_value, &resolved.target_method, &mapped_data)
-                    .await
+                send_trigger_pipe_request(
+                    &target_value,
+                    &resolved.target_method,
+                    &mapped_data,
+                    &resolved.target_headers,
+                )
+                .await
             }
         }
+        #[cfg(feature = "docker")]
         "container" => {
-            send_trigger_pipe_container_request(
-                &target_value,
+            let port = crate::agent::docker::get_container_port(&target_value)
+                .await
+                .unwrap_or(80);
+            let container_url = build_pipe_target_url(
+                &format!("http://{}:{}", target_value, port),
                 &resolved.target_endpoint,
+            );
+            send_trigger_pipe_container_request_via_http(
+                &container_url,
                 &resolved.target_method,
                 &mapped_data,
+                &resolved.target_headers,
             )
             .await
         }
+        #[cfg(not(feature = "docker"))]
+        "container" => Err(anyhow::anyhow!("container target requires docker feature")),
         _ => unreachable!(),
     };
 
@@ -8348,67 +8604,72 @@ fn derive_health_status(container_state: &str, has_errors: bool) -> &'static str
     }
 }
 
+/// Hard timeout for a single `docker` CLI subprocess so an unresponsive daemon
+/// can't hang a probe. Covers spawn + execution.
 #[cfg(feature = "docker")]
-async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
+const DOCKER_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run a `docker` CLI subprocess with [`DOCKER_CLI_TIMEOUT`]. Returns `None` on
+/// spawn error or timeout (callers treat that as "no data").
+#[cfg(feature = "docker")]
+async fn docker_cli_output(args: &[&str]) -> Option<std::process::Output> {
     use tokio::process::Command;
+    match tokio::time::timeout(
+        DOCKER_CLI_TIMEOUT,
+        Command::new("docker").args(args).output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => Some(output),
+        _ => None,
+    }
+}
 
-    let output = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .Config.ExposedPorts}}",
-            container_name,
-        ])
-        .output()
-        .await
-        .context("docker inspect for ports")?;
-
-    let mut ports = Vec::new();
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let trimmed_output = stdout.trim();
+#[cfg(feature = "docker")]
+fn parse_ports_json(stdout: &[u8], ports: &mut Vec<u16>) {
+    let stdout = String::from_utf8_lossy(stdout);
+    if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(stdout.trim()) {
         // Parse JSON like {"80/tcp":{},"8080/tcp":{}}
-        if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(trimmed_output) {
-            for port_str in map.keys() {
-                if let Some(port_num) = port_str.split('/').next() {
-                    if let Ok(port) = port_num.parse::<u16>() {
-                        if !ports.contains(&port) {
-                            ports.push(port);
-                        }
+        for port_str in map.keys() {
+            if let Some(port_num) = port_str.split('/').next() {
+                if let Ok(port) = port_num.parse::<u16>() {
+                    if !ports.contains(&port) {
+                        ports.push(port);
                     }
                 }
             }
         }
     }
+}
+
+#[cfg(feature = "docker")]
+async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
+    let mut ports = Vec::new();
+
+    if let Some(output) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .Config.ExposedPorts}}",
+        container_name,
+    ])
+    .await
+    {
+        if output.status.success() {
+            parse_ports_json(&output.stdout, &mut ports);
+        }
+    }
 
     // Also check network settings port bindings
-    let output2 = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Ports}}",
-            container_name,
-        ])
-        .output()
-        .await;
-
-    if let Ok(output2) = output2 {
+    if let Some(output2) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .NetworkSettings.Ports}}",
+        container_name,
+    ])
+    .await
+    {
         if output2.status.success() {
-            let stdout = String::from_utf8_lossy(&output2.stdout);
-            let trimmed_output = stdout.trim();
-            if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(trimmed_output)
-            {
-                for port_str in map.keys() {
-                    if let Some(port_num) = port_str.split('/').next() {
-                        if let Ok(port) = port_num.parse::<u16>() {
-                            if !ports.contains(&port) {
-                                ports.push(port);
-                            }
-                        }
-                    }
-                }
-            }
+            parse_ports_json(&output2.stdout, &mut ports);
         }
     }
 
@@ -8466,11 +8727,25 @@ fn build_probe_result_payload(
         .map(|protocol| probe_issue_for_protocol(protocol))
         .collect::<Vec<_>>();
 
+    // Surface the resolved container in the report so callers can act on it —
+    // e.g. the CLI's direct-container retry when an app-scoped probe finds
+    // nothing. Without this the report always carried an empty `containers`
+    // list even after the agent resolved the container internally.
+    let containers = if container_resolved.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({
+            "name": container_resolved,
+            "ports": ports.iter().map(|port| port.to_string()).collect::<Vec<_>>(),
+        })]
+    };
+
     json!({
         "type": "probe_endpoints",
         "deployment_hash": deployment_hash,
         "app_code": app_code,
         "protocols_detected": protocols_detected,
+        "containers": containers,
         "endpoints": endpoints,
         "forms": forms,
         "diagnostics": ProbeDiagnostics {
@@ -8493,15 +8768,20 @@ async fn execute_http_body_probe(
     path: &str,
     timeout_secs: u32,
 ) -> HttpProbeExecution {
+    // Exec-first: `docker exec … curl http://localhost:<port>` reaches the app
+    // from inside its own network namespace — no shared network, and it avoids
+    // the per-IP connect timeouts of the agent HTTP path when the agent is not
+    // on the project's network. Fall back to the agent HTTP client (reqwest to
+    // the container DNS name / IP) only when the container has no HTTP client
+    // or no shell.
     let mut execution =
-        execute_http_body_probe_from_agent(app_code, container_name, port, path, timeout_secs)
-            .await;
+        execute_http_body_probe_from_container_exec(container_name, port, path, timeout_secs).await;
     if execution.response.is_none() {
-        let container_execution =
-            execute_http_body_probe_from_container_exec(container_name, port, path, timeout_secs)
+        let agent_execution =
+            execute_http_body_probe_from_agent(app_code, container_name, port, path, timeout_secs)
                 .await;
-        execution.attempts.extend(container_execution.attempts);
-        execution.response = container_execution.response;
+        execution.attempts.extend(agent_execution.attempts);
+        execution.response = agent_execution.response;
     }
     execution
 }
@@ -8514,15 +8794,21 @@ async fn execute_http_status_probe(
     path: &str,
     timeout_secs: u32,
 ) -> HttpProbeExecution {
+    // Exec-first (see `execute_http_body_probe` for rationale).
     let mut execution =
-        execute_http_status_probe_from_agent(app_code, container_name, port, path, timeout_secs)
+        execute_http_status_probe_from_container_exec(container_name, port, path, timeout_secs)
             .await;
     if execution.response.is_none() {
-        let container_execution =
-            execute_http_status_probe_from_container_exec(container_name, port, path, timeout_secs)
-                .await;
-        execution.attempts.extend(container_execution.attempts);
-        execution.response = container_execution.response;
+        let agent_execution = execute_http_status_probe_from_agent(
+            app_code,
+            container_name,
+            port,
+            path,
+            timeout_secs,
+        )
+        .await;
+        execution.attempts.extend(agent_execution.attempts);
+        execution.response = agent_execution.response;
     }
     execution
 }
@@ -8698,7 +8984,7 @@ async fn execute_http_body_probe_from_container_exec(
     let command = build_http_body_probe_command(&url, timeout_secs);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs((timeout_secs + 2) as u64),
-        docker::exec_in_container_with_output(container_name, &command),
+        docker::exec_in_container_with_output_resolved(container_name, &command),
     )
     .await;
     let probe_result = match result {
@@ -8785,7 +9071,7 @@ async fn execute_http_status_probe_from_container_exec(
     let command = build_http_status_probe_command(&url, timeout_secs);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs((timeout_secs + 2) as u64),
-        docker::exec_in_container_with_output(container_name, &command),
+        docker::exec_in_container_with_output_resolved(container_name, &command),
     )
     .await;
     let probe_result = match result {
@@ -8853,6 +9139,9 @@ async fn execute_http_status_probe_from_container_exec(
 fn probe_http_client(timeout_secs: u32) -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs as u64))
+        // Fail fast on unreachable container IPs (agent not on the project
+        // network) instead of blocking for the full request timeout per URL.
+        .connect_timeout(std::time::Duration::from_secs(1))
         .build()
         .ok()
 }
@@ -8895,16 +9184,14 @@ fn push_probe_base_url(urls: &mut Vec<ProbeBaseUrl>, host: &str, port: u16, app_
 
 #[cfg(feature = "docker")]
 async fn get_container_ip_addresses(container_name: &str) -> Vec<String> {
-    let output = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Networks}}",
-            container_name,
-        ])
-        .output()
-        .await;
-    let Ok(output) = output else {
+    let Some(output) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .NetworkSettings.Networks}}",
+        container_name,
+    ])
+    .await
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -9878,6 +10165,7 @@ mod tests {
             pipe_instance_id: "pipe-restore-1".into(),
             source_adapter: None,
             source_container: Some("source-app".into()),
+            source_url: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -9889,6 +10177,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "webhook".into(),
         });
@@ -9942,6 +10231,7 @@ mod tests {
             pipe_instance_id: "pipe-deactivate-1".into(),
             source_adapter: None,
             source_container: Some("source-app".into()),
+            source_url: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -9953,6 +10243,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "webhook".into(),
         });
@@ -10002,6 +10293,7 @@ mod tests {
             pipe_instance_id: "pipe-poll-1".into(),
             source_adapter: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "http://127.0.0.1:1/source".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -10013,6 +10305,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "poll".into(),
         });
@@ -10120,6 +10413,7 @@ mod tests {
                 "password": "pop3-secret"
             }))),
             source_container: None,
+            source_url: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
             source_broker_url: Some("amqp://guest:guest@localhost:5672/%2f".into()),
@@ -10135,6 +10429,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "rabbitmq".into(),
         });
@@ -10178,6 +10473,7 @@ mod tests {
                 "mailbox": "INBOX"
             }))),
             source_container: None,
+            source_url: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -10191,6 +10487,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "subject": "$.subject" })),
             trigger_type: "manual".into(),
         });
@@ -10201,6 +10498,7 @@ mod tests {
             source_adapter: None,
             input_data: Some(json!({ "subject": "hello" })),
             source_container: None,
+            source_url: None,
             source_endpoint: default_pipe_source_endpoint(),
             source_method: default_pipe_source_method(),
             target_adapter: None,
@@ -10208,6 +10506,7 @@ mod tests {
             target_container: None,
             target_endpoint: default_pipe_target_endpoint(),
             target_method: default_pipe_target_method(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: default_pipe_trigger_type(),
         };
@@ -12759,6 +13058,10 @@ mod probe_endpoints_command_tests {
 
         assert_eq!(payload["type"], "probe_endpoints");
         assert_eq!(payload["protocols_detected"], json!([]));
+        // The resolved container is surfaced so callers (e.g. the CLI's
+        // direct-container retry) can act on an otherwise-empty probe.
+        assert_eq!(payload["containers"][0]["name"], "status-panel-web-1");
+        assert_eq!(payload["containers"][0]["ports"], json!(["3000"]));
         assert_eq!(
             payload["diagnostics"]["protocols_requested"],
             json!(["html_forms", "rest"])
