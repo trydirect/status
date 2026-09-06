@@ -5192,7 +5192,9 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         for entry in &containers {
             let container_state = map_container_state(&entry.status).to_string();
             let mut item = json!({
-                "app_code": entry.name.trim_start_matches('/'),
+                // From the `my.stacker.service` label, never the container
+                // name — see docker::app_code_for_container.
+                "app_code": docker::app_code_for_container(&entry.labels, &entry.name),
                 "container_name": entry.name.trim_start_matches('/'),
                 "container_state": container_state,
                 "status": derive_health_status(&container_state, false),
@@ -5242,7 +5244,9 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         for entry in &system_containers {
             let container_state = map_container_state(&entry.status).to_string();
             let mut item = json!({
-                "app_code": entry.name.trim_start_matches('/'),
+                // From the `my.stacker.service` label, never the container
+                // name — see docker::app_code_for_container.
+                "app_code": docker::app_code_for_container(&entry.labels, &entry.name),
                 "container_name": entry.name.trim_start_matches('/'),
                 "container_state": container_state,
                 "status": derive_health_status(&container_state, false),

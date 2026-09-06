@@ -166,6 +166,31 @@ fn label_matches_app(labels: &HashMap<String, String>, app_code: &str) -> Option
     None
 }
 
+/// The app code a container belongs to, resolved from its labels.
+///
+/// The inverse of [`resolve_container_name`], and it must use the same label
+/// priority: `my.stacker.service` first, Compose's service name second, the
+/// container name only as a last resort for containers Stacker did not create
+/// (`statuspanel`, `statuspanel_agent`, anything hand-started).
+///
+/// Reporting the container name here is wrong and was the cause of a
+/// production defect: Compose names containers `{project}-{service}-{index}`,
+/// so a project deployed into `/home/trydirect/project` reports `project-app-1`
+/// where the control plane expects `floci`. Stacker cannot recover the app
+/// code from that — neither the deploy directory nor the compose service name
+/// carries it — so container discovery suggested `app` and `ui` instead of
+/// `floci` and `floci-ui`.
+///
+/// See `config/shared-fixtures/agent-contract/app-code-resolution.md`.
+pub fn app_code_for_container(labels: &HashMap<String, String>, container_name: &str) -> String {
+    labels
+        .get(STACKER_SERVICE_LABEL)
+        .or_else(|| labels.get(COMPOSE_SERVICE_LABEL))
+        .map(|code| code.trim().to_string())
+        .filter(|code| !code.is_empty())
+        .unwrap_or_else(|| container_name.trim_start_matches('/').to_string())
+}
+
 pub async fn resolve_container_name(name: &str) -> Result<String> {
     let docker = docker_client()?;
     let opts: Option<ListContainersOptions> =
@@ -941,6 +966,61 @@ pub async fn exec_in_container_with_output_resolved(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The production case: Compose named the container `project-app-1`, but
+    /// the app code is `floci` and lives only in the stacker label. Reporting
+    /// the container name made Stacker's discovery suggest `app`.
+    #[test]
+    fn app_code_comes_from_the_stacker_label_not_the_container_name() {
+        let l = labels(&[
+            ("my.stacker.service", "floci"),
+            ("com.docker.compose.service", "app"),
+        ]);
+        assert_eq!(app_code_for_container(&l, "project-app-1"), "floci");
+
+        let l = labels(&[
+            ("my.stacker.service", "floci-ui"),
+            ("com.docker.compose.service", "floci-ui"),
+        ]);
+        assert_eq!(app_code_for_container(&l, "project-floci-ui-1"), "floci-ui");
+    }
+
+    /// Same priority as `label_matches_app`, which resolves the other
+    /// direction: stacker label first, Compose second.
+    #[test]
+    fn app_code_falls_back_to_the_compose_label() {
+        let l = labels(&[("com.docker.compose.service", "web")]);
+        assert_eq!(app_code_for_container(&l, "someproject-web-1"), "web");
+    }
+
+    /// Containers Stacker did not create carry no labels; the name is all
+    /// there is, and that is correct for them.
+    #[test]
+    fn app_code_falls_back_to_the_container_name_when_unlabelled() {
+        assert_eq!(
+            app_code_for_container(&HashMap::new(), "statuspanel_agent"),
+            "statuspanel_agent"
+        );
+        assert_eq!(
+            app_code_for_container(&HashMap::new(), "/statuspanel"),
+            "statuspanel"
+        );
+    }
+
+    /// An empty label must not produce an empty app_code — Stacker rejects
+    /// those with "health.app_code is required".
+    #[test]
+    fn app_code_ignores_blank_labels() {
+        let l = labels(&[("my.stacker.service", "   ")]);
+        assert_eq!(app_code_for_container(&l, "project-app-1"), "project-app-1");
+    }
 
     #[test]
     fn test_name_matches_exact() {
