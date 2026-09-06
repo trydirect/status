@@ -8374,6 +8374,10 @@ async fn handle_list_containers(
                     });
                     json!({
                         "name": c.name,
+                        // The logical app code, from `my.stacker.service` —
+                        // container discovery keys on this. See
+                        // docker::app_code_for_container.
+                        "app_code": docker::app_code_for_container(&c.labels, &c.name),
                         "status": c.status,
                         "image": c.image,
                         "ports": c.ports,
