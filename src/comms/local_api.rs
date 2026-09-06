@@ -364,6 +364,11 @@ async fn login_page(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 // Login handler (POST)
+//
+// Both variants are axum responses, so the `Err` arm is inherently as large as
+// a rendered `Response`. Boxing it would only move the allocation without
+// changing what is returned to the client.
+#[allow(clippy::result_large_err)]
 async fn login_handler(
     State(state): State<SharedState>,
     client_ip: ClientIp,
