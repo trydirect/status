@@ -366,7 +366,6 @@ async fn execute_and_report(
     Ok(())
 }
 
-
 fn trace_event(event: &str) {
     use tracing::trace;
     trace!(event = event, "daemon event");

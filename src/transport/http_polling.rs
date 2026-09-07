@@ -424,7 +424,6 @@ pub async fn report_result(
     }
 }
 
-
 // ---- Retry-aware variants (use TokenProvider + automatic 401/403 refresh) ----
 
 /// Long-poll for a command with automatic token refresh on 401/403.
@@ -529,7 +528,6 @@ pub async fn report_result_with_retry(
         ))
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
@@ -787,7 +785,6 @@ mod tests {
         mock.assert();
     }
 
-    
     #[tokio::test]
     async fn wait_for_command_adds_hmac_headers() {
         let _guard = env_lock().lock().expect("env lock poisoned");
