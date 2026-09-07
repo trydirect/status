@@ -2144,8 +2144,24 @@ fn resolve_container_name(app_code: &str, container: &Option<String>) -> String 
     trimmed(app_code)
 }
 
+/// The container to actually operate on.
+///
+/// [`resolve_container_name`] only picks between the requested `container` and
+/// the `app_code`; neither is necessarily a container that exists. An app whose
+/// code is `floci` commonly runs as `project-app-1`, so every command that
+/// addressed Docker by that raw string failed to find anything — logs came back
+/// empty, restarts hit nothing.
+///
+/// [`docker::resolve_container_name`] closes that gap by matching the
+/// `my.stacker.service` label first and a set of anchored name patterns
+/// (`app-1`, `project-app-1`, `app_1`) second.
+///
+/// **Falls back to the raw name.** Stacks deployed before the labels existed
+/// have none, and their container names may match neither pattern; for those
+/// this returns exactly what the caller asked for, which is the behaviour that
+/// was there before. Label resolution is an addition, never a restriction.
 #[cfg(feature = "docker")]
-async fn resolve_probe_container_name(app_code: &str, container: &Option<String>) -> String {
+async fn resolve_target_container_name(app_code: &str, container: &Option<String>) -> String {
     let requested_name = resolve_container_name(app_code, container);
     docker::resolve_container_name(&requested_name)
         .await
@@ -5184,7 +5200,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         }
     };
 
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     // Return health for every container when app_code is "all" or empty.
     if data.app_code == "all" || data.app_code.is_empty() && !data.include_system {
@@ -5311,7 +5327,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 #[cfg(feature = "docker")]
 async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "logs");
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
     let window = match docker::get_container_logs_window(
         &target_name,
         data.cursor.clone(),
@@ -5376,7 +5392,7 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
 async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "restart");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     if let Err(e) = docker::restart(&target_name).await {
         errors.push(make_error(
@@ -5465,7 +5481,7 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
 async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "stop");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     if let Err(e) = docker::stop_with_timeout(&target_name, data.timeout).await {
         errors.push(make_error(
@@ -5530,7 +5546,7 @@ async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<Com
 async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "start");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     if let Err(e) = docker::start(&target_name).await {
         errors.push(make_error(
@@ -8243,7 +8259,7 @@ async fn handle_configure_proxy(
 #[cfg(feature = "docker")]
 async fn handle_exec(agent_cmd: &AgentCommand, data: &ExecCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "exec");
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     // Execute the command inside the container with timeout
     match tokio::time::timeout(
@@ -9593,7 +9609,7 @@ async fn handle_probe_endpoints(
         "probe_endpoints",
     );
     let requested_container = resolve_container_name(&data.app_code, &data.container);
-    let target_name = resolve_probe_container_name(&data.app_code, &data.container).await;
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     let mut protocols_detected: Vec<String> = Vec::new();
     let mut endpoints: Vec<Value> = Vec::new();
