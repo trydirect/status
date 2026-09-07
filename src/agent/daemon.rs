@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
-use serde::Serialize;
 use tokio::signal;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::Duration;
@@ -19,7 +18,7 @@ use crate::monitoring::{
 use crate::security::token_provider::TokenProvider;
 use crate::security::vault_client::VaultClient;
 use crate::transport::{http_polling, CommandResult};
-use serde_json::{json, Value};
+use serde_json::json;
 
 pub async fn run(config_path: String) -> Result<()> {
     let cfg = Config::from_file(&config_path)?;
@@ -364,188 +363,9 @@ async fn execute_and_report(
         "stacker acknowledged command result"
     );
 
-    if let Some(app_status) = build_app_status_update(&cmd_result) {
-        if let Err(e) = http_polling::update_app_status_with_retry(
-            &ctx.dashboard_url,
-            &ctx.agent_id,
-            &ctx.token_provider,
-            &app_status,
-        )
-        .await
-        {
-            warn!(
-                command_id = %cmd_result.command_id,
-                error = %e,
-                "failed to update app status"
-            );
-        } else {
-            info!(
-                command_id = %cmd_result.command_id,
-                status = %app_status.status,
-                "reported app status to stacker"
-            );
-        }
-    }
-
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct AppStatusUpdate {
-    deployment_hash: String,
-    app_code: String,
-    status: String,
-    logs: Vec<String>,
-    timestamp: String,
-}
-
-fn build_app_status_update(result: &CommandResult) -> Option<AppStatusUpdate> {
-    let deployment_hash = result.deployment_hash.clone()?;
-    let app_code = result.app_code.clone()?;
-    let command_type = result.command_type.as_deref()?;
-
-    let (status, logs) = match command_type {
-        "health" => parse_health_update(result),
-        "logs" => parse_logs_update(result),
-        "restart" => parse_restart_update(result),
-        _ => return None,
-    };
-
-    Some(AppStatusUpdate {
-        deployment_hash,
-        app_code,
-        status,
-        logs,
-        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-    })
-}
-
-fn parse_health_update(result: &CommandResult) -> (String, Vec<String>) {
-    if let Some(body) = result.result.as_ref() {
-        let container_state = body
-            .get("container_state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let mut logs = vec![format!(
-            "status={} container_state={}",
-            body.get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown"),
-            container_state
-        )];
-
-        if let Some(errors) = body.get("errors").and_then(|v| v.as_array()) {
-            for error in errors {
-                logs.push(format_error_entry(error));
-            }
-        }
-
-        let status = if result.status == "success" {
-            container_state_to_app_status(container_state)
-        } else {
-            "error"
-        };
-
-        (status.to_string(), logs)
-    } else {
-        ("error".to_string(), default_error_logs(result))
-    }
-}
-
-fn parse_logs_update(result: &CommandResult) -> (String, Vec<String>) {
-    if let Some(body) = result.result.as_ref() {
-        let logs = body
-            .get("lines")
-            .and_then(|v| v.as_array())
-            .map(|lines| {
-                lines
-                    .iter()
-                    .map(|line| {
-                        let ts = line.get("ts").and_then(|v| v.as_str()).unwrap_or("");
-                        let stream = line.get("stream").and_then(|v| v.as_str()).unwrap_or("");
-                        let message = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                        format!("{ts} [{stream}] {message}")
-                    })
-                    .collect::<Vec<String>>()
-            })
-            .unwrap_or_else(Vec::new);
-
-        let status = if result.status == "success" {
-            "running".to_string()
-        } else {
-            "error".to_string()
-        };
-
-        (status, logs)
-    } else {
-        ("error".to_string(), default_error_logs(result))
-    }
-}
-
-fn parse_restart_update(result: &CommandResult) -> (String, Vec<String>) {
-    if let Some(body) = result.result.as_ref() {
-        let container_state = body
-            .get("container_state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let mut logs = vec![format!(
-            "restart status={} container_state={}",
-            body.get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown"),
-            container_state
-        )];
-
-        if let Some(errors) = body.get("errors").and_then(|v| v.as_array()) {
-            for error in errors {
-                logs.push(format_error_entry(error));
-            }
-        }
-
-        let status = if result.status == "success" {
-            container_state_to_app_status(container_state)
-        } else {
-            "error"
-        };
-
-        (status.to_string(), logs)
-    } else {
-        ("error".to_string(), default_error_logs(result))
-    }
-}
-
-fn container_state_to_app_status(state: &str) -> &'static str {
-    let normalized = state.to_lowercase();
-    match normalized.as_str() {
-        "running" | "starting" => "running",
-        "paused" | "exited" | "stopped" => "stopped",
-        _ => "error",
-    }
-}
-
-fn format_error_entry(value: &Value) -> String {
-    let code = value
-        .get("code")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let message = value
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    if let Some(details) = value.get("details").and_then(|v| v.as_str()) {
-        format!("error({code}): {message} ({details})")
-    } else {
-        format!("error({code}): {message}")
-    }
-}
-
-fn default_error_logs(result: &CommandResult) -> Vec<String> {
-    vec![result
-        .error
-        .as_deref()
-        .unwrap_or("command failed without details")
-        .to_string()]
-}
 
 fn trace_event(event: &str) {
     use tracing::trace;

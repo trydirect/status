@@ -424,26 +424,6 @@ pub async fn report_result(
     }
 }
 
-/// Update app status after executing a command.
-pub async fn update_app_status<T: Serialize>(
-    base_url: &str,
-    agent_id: &str,
-    agent_token: &str,
-    payload: &T,
-) -> Result<()> {
-    let url = format!("{}/api/v1/apps/status", base_url);
-    let client = Client::new();
-    let resp = signed_post_json(&client, &url, agent_id, agent_token, payload).await?;
-
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "app status update failed: {}",
-            resp.status()
-        ))
-    }
-}
 
 // ---- Retry-aware variants (use TokenProvider + automatic 401/403 refresh) ----
 
@@ -550,28 +530,6 @@ pub async fn report_result_with_retry(
     }
 }
 
-/// Update app status with automatic token refresh on 401/403.
-pub async fn update_app_status_with_retry<T: Serialize>(
-    base_url: &str,
-    agent_id: &str,
-    token_provider: &TokenProvider,
-    payload: &T,
-) -> Result<()> {
-    let url = format!("{}/api/v1/apps/status", base_url);
-    let client = Client::new();
-    let config = RetryConfig::default();
-    let resp =
-        signed_post_with_retry(&client, &url, agent_id, token_provider, payload, &config).await?;
-
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "app status update failed: {}",
-            resp.status()
-        ))
-    }
-}
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
@@ -829,47 +787,7 @@ mod tests {
         mock.assert();
     }
 
-    #[tokio::test]
-    async fn update_app_status_posts_payload() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        env::set_var(TS_OVERRIDE_ENV, "1700000001");
-        env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-456");
-
-        let mut server = Server::new_async().await;
-        let base_url = server.url();
-        let agent_id = "agent-123";
-        let agent_token = "token-abc";
-        let payload = json!({
-            "deployment_hash": "dep-1",
-            "app_code": "web",
-            "status": "running"
-        });
-
-        let body = serde_json::to_vec(&payload).unwrap();
-        let signature = compute_signature_base64(agent_token, &body);
-        let ts = env::var(TS_OVERRIDE_ENV).unwrap();
-        let req_id = env::var(REQUEST_ID_OVERRIDE_ENV).unwrap();
-        let mock = server
-            .mock("POST", "/api/v1/apps/status")
-            .match_header("X-Agent-Id", Matcher::Exact(agent_id.into()))
-            .match_header(
-                "Authorization",
-                Matcher::Exact(format!("Bearer {}", agent_token)),
-            )
-            .match_header("X-Timestamp", Matcher::Exact(ts))
-            .match_header("X-Request-Id", Matcher::Exact(req_id))
-            .match_header("X-Agent-Signature", Matcher::Exact(signature))
-            .match_body(Matcher::Exact(String::from_utf8(body.clone()).unwrap()))
-            .with_status(200)
-            .create_async()
-            .await;
-
-        update_app_status(&base_url, agent_id, agent_token, &payload)
-            .await
-            .expect("update_app_status should succeed");
-        mock.assert();
-    }
-
+    
     #[tokio::test]
     async fn wait_for_command_adds_hmac_headers() {
         let _guard = env_lock().lock().expect("env lock poisoned");
