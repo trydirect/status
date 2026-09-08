@@ -5204,9 +5204,15 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     // Return health for every container when app_code is "all" or empty.
     if data.app_code == "all" || data.app_code.is_empty() && !data.include_system {
+        // The user's containers and the platform's, split by scope but sent in
+        // one reply. They used to be two mutually exclusive branches, so a
+        // caller got either everything flat or the system subset alone, and the
+        // dashboard had to guess which was which by matching names.
         let mut all_list = Vec::new();
+        let mut system_list = Vec::new();
         for entry in &containers {
             let container_state = map_container_state(&entry.status).to_string();
+            let scope = docker::scope_for_container(&entry.labels, &entry.name, &entry.image);
             let mut item = json!({
                 // From the `my.stacker.service` label, never the container
                 // name — see docker::app_code_for_container.
@@ -5214,12 +5220,20 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
                 "container_name": entry.name.trim_start_matches('/'),
                 "container_state": container_state,
                 "status": derive_health_status(&container_state, false),
+                "scope": scope.as_str(),
+                "image": entry.image.clone(),
             });
             if data.include_metrics {
                 item["metrics"] = build_metrics(entry);
             }
-            all_list.push(item);
+            match scope {
+                docker::ContainerScope::Platform => system_list.push(item),
+                docker::ContainerScope::Project => all_list.push(item),
+            }
         }
+        // Overall health covers the user's containers only. A degraded platform
+        // component is the platform's problem to show, not a reason to tell the
+        // user their stack is unhealthy.
         let overall = if all_list
             .iter()
             .all(|c| c.get("status").and_then(|v| v.as_str()) == Some("ok"))
@@ -5234,6 +5248,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
             "status": overall,
             "last_heartbeat_at": now_timestamp(),
             "containers": all_list,
+            "system_containers": system_list,
         });
         result.result = Some(body);
         return Ok(result);
@@ -5241,18 +5256,15 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     // Handle system containers request (status_panel, compose-agent, etc.)
     if data.include_system && (data.app_code.is_empty() || data.app_code == "system") {
-        let system_patterns = [
-            "status",
-            "status_panel",
-            "status-panel",
-            "compose-agent",
-            "compose_agent",
-        ];
+        // Classified, not name-matched. The list here used to include the bare
+        // substring "status", which also catches a user's `status-page`,
+        // `statuspage` or `orderstatus` and quietly moved their app out of
+        // their own Applications list.
         let system_containers: Vec<_> = containers
             .iter()
             .filter(|c| {
-                let name = c.name.trim_start_matches('/').to_lowercase();
-                system_patterns.iter().any(|p| name.contains(p))
+                docker::scope_for_container(&c.labels, &c.name, &c.image)
+                    == docker::ContainerScope::Platform
             })
             .collect();
 
@@ -8394,6 +8406,10 @@ async fn handle_list_containers(
                         // container discovery keys on this. See
                         // docker::app_code_for_container.
                         "app_code": docker::app_code_for_container(&c.labels, &c.name),
+                        // Who owns this container. The dashboard splits its
+                        // Containers and System Containers sections on this
+                        // instead of matching names.
+                        "scope": docker::scope_for_container(&c.labels, &c.name, &c.image).as_str(),
                         "status": c.status,
                         "image": c.image,
                         "ports": c.ports,

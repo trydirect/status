@@ -154,6 +154,111 @@ fn name_matches(container_name: &str, app_code: &str) -> bool {
 const STACKER_SERVICE_LABEL: &str = "my.stacker.service";
 const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 
+/// Marks who owns a container: `project` for the user's own, `platform` for one
+/// the platform installs and manages itself.
+const STACKER_SCOPE_LABEL: &str = "my.stacker.scope";
+const COMPOSE_WORKING_DIR_LABEL: &str = "com.docker.compose.project.working_dir";
+
+const SCOPE_PROJECT: &str = "project";
+const SCOPE_PLATFORM: &str = "platform";
+
+/// Directories platform-managed services are deployed into, by the convention
+/// in Stacker's `docs/APP_DEPLOYMENT.md`: project services live under the
+/// project directory, platform ones get their own.
+const PLATFORM_INSTALL_DIRS: &[&str] = &[
+    "/home/trydirect/statuspanel",
+    "/home/trydirect/nginx_proxy_manager",
+];
+
+/// Container names that identify a platform component when no label says so.
+/// Matched exactly after normalisation, never as substrings.
+const PLATFORM_CONTAINER_NAMES: &[&str] = &[
+    "statuspanel",
+    "statuspanel_agent",
+    "compose_agent",
+    "nginx_proxy_manager",
+];
+
+/// Who owns a container: the user's stack, or the platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerScope {
+    Project,
+    Platform,
+}
+
+impl ContainerScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContainerScope::Project => SCOPE_PROJECT,
+            ContainerScope::Platform => SCOPE_PLATFORM,
+        }
+    }
+}
+
+/// Lowercase, separators collapsed to `_`, so `Status Panel`,
+/// `status-panel` and `status_panel` compare equal.
+fn normalize_identity(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('/')
+        .to_lowercase()
+        .split(['-', '_', ' ', '.'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<&str>>()
+        .join("_")
+}
+
+/// Classify a container as the user's or the platform's.
+///
+/// Signals in descending order of reliability:
+///
+/// 1. `my.stacker.scope` — authoritative both ways. Stacker's compose generator
+///    already sets it on every service it emits;
+/// 2. the Compose working directory, against the deployment-scope convention;
+/// 3. the image name;
+/// 4. an **exact** container-name match after normalisation.
+///
+/// Anything unrecognised is the user's. Guessing "platform" would hide a
+/// container from its owner's Applications list, and a missing app looks like
+/// data loss while a misplaced platform container is merely untidy.
+///
+/// Substrings are deliberately not matched. The health handler used to classify
+/// by `name.contains("status")`, which also catches a user's `status-page`.
+pub fn scope_for_container(
+    labels: &HashMap<String, String>,
+    container_name: &str,
+    image: &str,
+) -> ContainerScope {
+    match labels.get(STACKER_SCOPE_LABEL).map(|s| s.trim()) {
+        Some(SCOPE_PLATFORM) => return ContainerScope::Platform,
+        Some(SCOPE_PROJECT) => return ContainerScope::Project,
+        _ => {}
+    }
+
+    if let Some(dir) = labels.get(COMPOSE_WORKING_DIR_LABEL) {
+        let dir = dir.trim().trim_end_matches('/');
+        if PLATFORM_INSTALL_DIRS.contains(&dir) {
+            return ContainerScope::Platform;
+        }
+    }
+
+    let image_identity = image
+        .split('/')
+        .next_back()
+        .and_then(|name| name.split(':').next())
+        .map(normalize_identity)
+        .unwrap_or_default();
+    if image_identity == "status" || image_identity == "nginx_proxy_manager" {
+        return ContainerScope::Platform;
+    }
+
+    if PLATFORM_CONTAINER_NAMES.contains(&normalize_identity(container_name).as_str()) {
+        return ContainerScope::Platform;
+    }
+
+    ContainerScope::Project
+}
+
 /// If a container's labels identify it as `app_code`, return which label
 /// matched (for logging). Prefers the stacker-owned label over Compose's.
 fn label_matches_app(labels: &HashMap<String, String>, app_code: &str) -> Option<&'static str> {
@@ -1105,6 +1210,112 @@ mod tests {
     #[test]
     fn test_name_matches_no_match() {
         assert!(!name_matches("telegraf", "komodo"));
+    }
+
+    fn scope_labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// The label decides, in both directions.
+    #[test]
+    fn scope_label_is_authoritative() {
+        assert_eq!(
+            scope_for_container(
+                &scope_labels(&[("my.stacker.scope", "platform")]),
+                "project-app-1",
+                "floci/floci:latest"
+            ),
+            ContainerScope::Platform
+        );
+        // A user's own caddy, labelled as theirs, stays theirs.
+        assert_eq!(
+            scope_for_container(
+                &scope_labels(&[("my.stacker.scope", "project")]),
+                "caddy",
+                "caddy:2"
+            ),
+            ContainerScope::Project
+        );
+    }
+
+    /// Platform services get their own directory; project ones live under the
+    /// project directory.
+    #[test]
+    fn scope_falls_back_to_the_compose_working_directory() {
+        assert_eq!(
+            scope_for_container(
+                &scope_labels(&[(
+                    "com.docker.compose.project.working_dir",
+                    "/home/trydirect/statuspanel"
+                )]),
+                "statuspanel_agent",
+                "trydirect/status:latest"
+            ),
+            ContainerScope::Platform
+        );
+        assert_eq!(
+            scope_for_container(
+                &scope_labels(&[(
+                    "com.docker.compose.project.working_dir",
+                    "/home/trydirect/project"
+                )]),
+                "project-app-1",
+                "floci/floci:latest"
+            ),
+            ContainerScope::Project
+        );
+    }
+
+    #[test]
+    fn scope_falls_back_to_image_then_name() {
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "whatever", "trydirect/status:latest"),
+            ContainerScope::Platform
+        );
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "statuspanel_agent", "someimage:1"),
+            ContainerScope::Platform
+        );
+    }
+
+    /// Names are matched exactly. The health handler used to filter on the bare
+    /// substring "status", which also moved a user's `status-page` out of their
+    /// own Applications list.
+    #[test]
+    fn scope_never_matches_substrings() {
+        for name in [
+            "status-page",
+            "statuspage",
+            "orderstatus",
+            "my-statuspanel-clone",
+        ] {
+            assert_eq!(
+                scope_for_container(&scope_labels(&[]), name, "someuser/someimage:1"),
+                ContainerScope::Project,
+                "{name} is a user's container"
+            );
+        }
+    }
+
+    /// Telegraf is monitoring infrastructure by nature, but the user installs
+    /// it by choice, so it is theirs.
+    #[test]
+    fn telegraf_belongs_to_the_user() {
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "telegraf", "telegraf:1.29"),
+            ContainerScope::Project
+        );
+    }
+
+    #[test]
+    fn scope_defaults_to_project() {
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "anything", "anything:1"),
+            ContainerScope::Project
+        );
         assert!(!name_matches("komodo-core", "komodo")); // "komodo" is prefix, not exact
         assert!(!name_matches("ferretdb", "komodo"));
     }
