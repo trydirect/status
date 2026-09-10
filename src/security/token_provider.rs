@@ -17,6 +17,11 @@ const REFRESH_COOLDOWN_SECS: i64 = 10;
 /// 2. Tries Vault (if configured) to get a new token.
 /// 3. Falls back to re-reading `AGENT_TOKEN` from the environment.
 /// 4. Returns whether the token actually changed.
+///
+/// It never mints a token of its own. Stacker authenticates against a digest
+/// held in Postgres, so a locally minted token cannot be accepted, and writing
+/// one to Vault would overwrite the token an operator published to recover the
+/// agent.
 #[derive(Debug, Clone)]
 pub struct TokenProvider {
     token: Arc<RwLock<String>>,
@@ -108,28 +113,20 @@ impl TokenProvider {
             return Ok(true);
         }
 
-        // Strategy 3: self-issue a new token and write it to Vault.
-        // Stacker validates by reading from the same Vault KV path, so a token
-        // the agent writes there is immediately accepted on the next poll.
-        if let Some(vault) = &self.vault_client {
-            let new_token = generate_secure_token();
-            match vault
-                .store_agent_token(&self.deployment_hash, &new_token, None)
-                .await
-            {
-                Ok(()) => {
-                    let mut token = self.token.write().await;
-                    *token = new_token;
-                    super::audit_log::AuditLogger::new()
-                        .token_self_issued(&self.deployment_hash, "primary_strategies_failed");
-                    return Ok(true);
-                }
-                Err(e) => {
-                    warn!(error = %e, "Vault self-issue failed; token unchanged");
-                }
-            }
-        }
-
+        // There used to be a third strategy here: mint a token locally and
+        // write it to Vault, on the reasoning that "Stacker validates by
+        // reading from the same Vault KV path, so a token the agent writes
+        // there is immediately accepted on the next poll".
+        //
+        // That stopped being true. Stacker stores a digest of the token in
+        // Postgres and compares against it; Vault is only how the value is
+        // distributed. A token minted here has no digest on the server, so it
+        // can never authenticate — and writing it to Vault destroys the one an
+        // operator just published with `stacker agent rotate-token`, taking the
+        // agent from "temporarily rejected" to "permanently locked out, and the
+        // recovery undone". Self-healing that removes the cure.
+        //
+        // A 401 that Vault cannot explain is an operator's problem now.
         debug!("No new token available after refresh attempt");
         Ok(false)
     }
@@ -141,14 +138,6 @@ impl TokenProvider {
             *token = new_token;
         }
     }
-}
-
-fn generate_secure_token() -> String {
-    use ring::rand::{SecureRandom, SystemRandom};
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes).expect("CSPRNG failure");
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 #[cfg(test)]
@@ -221,8 +210,12 @@ mod tests {
         assert_eq!(tp.get().await, "b");
     }
 
+    /// The behaviour this replaced: the agent used to mint a token here and
+    /// write it to Vault. Stacker authenticates against a digest in Postgres,
+    /// so such a token can never be accepted — and the write would destroy the
+    /// one an operator had just published to recover the agent.
     #[tokio::test]
-    async fn refresh_self_issues_token_when_vault_has_no_entry() {
+    async fn refresh_never_writes_a_token_of_its_own() {
         use crate::security::vault_client::VaultClient;
         use mockito::Server;
 
@@ -230,7 +223,7 @@ mod tests {
 
         let mut server = Server::new_async().await;
 
-        // Strategy 1: Vault read returns 404 (KV entry was deleted)
+        // Vault has nothing to offer: the entry is gone.
         let read = server
             .mock("GET", "/v1/status_panel/dep-abc/status_panel_token")
             .with_status(404)
@@ -239,38 +232,40 @@ mod tests {
             .create_async()
             .await;
 
-        // Strategy 3: Vault write accepted (must be called exactly once)
+        // Any write at all is the failure this test exists to catch.
         let write = server
             .mock("POST", "/v1/status_panel/dep-abc/status_panel_token")
             .with_status(200)
             .with_body("{}")
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
 
         let _addr = EnvGuard::set("VAULT_ADDRESS", &server.url());
         let _tok = EnvGuard::set("VAULT_TOKEN", "vault-root");
         let _prefix = EnvGuard::set("VAULT_AGENT_PATH_PREFIX", "status_panel");
-        // Strategy 2 is a no-op: env token matches current
+        // The environment offers nothing new either.
         let _agent = EnvGuard::set("AGENT_TOKEN", "stale-token");
 
         let vault = VaultClient::from_env().unwrap().unwrap();
         let tp = TokenProvider::new("stale-token".into(), Some(vault), "dep-abc".into());
 
         let changed = tp.refresh().await.unwrap();
-        assert!(changed, "expected self-issued token to be applied");
 
-        let new_token = tp.get().await;
-        assert_ne!(new_token, "stale-token");
-        assert_eq!(new_token.len(), 64, "expected 32-byte hex token");
-        assert!(new_token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!changed, "nothing was available, so nothing changed");
+        assert_eq!(
+            tp.get().await,
+            "stale-token",
+            "the token must be left exactly as it was"
+        );
 
         read.assert_async().await;
         write.assert_async().await;
     }
 
+    /// Vault remains the way a rotation arrives; only self-issue is gone.
     #[tokio::test]
-    async fn refresh_keeps_token_when_vault_write_forbidden() {
+    async fn refresh_still_adopts_a_token_vault_offers() {
         use crate::security::vault_client::VaultClient;
         use mockito::Server;
 
@@ -278,20 +273,19 @@ mod tests {
 
         let mut server = Server::new_async().await;
 
-        // Strategy 1: Vault read returns 404
-        let _read = server
-            .mock("GET", "/v1/status_panel/dep-xyz/status_panel_token")
-            .with_status(404)
-            .with_body(r#"{"errors":[]}"#)
+        let read = server
+            .mock("GET", "/v1/status_panel/dep-rot/status_panel_token")
+            .with_status(200)
+            .with_body(r#"{"data":{"data":{"token":"rotated-by-operator"}}}"#)
+            .expect(1)
             .create_async()
             .await;
 
-        // Strategy 3: Vault write rejected (agent lacks write capability)
         let write = server
-            .mock("POST", "/v1/status_panel/dep-xyz/status_panel_token")
-            .with_status(403)
-            .with_body(r#"{"errors":["permission denied"]}"#)
-            .expect(1)
+            .mock("POST", "/v1/status_panel/dep-rot/status_panel_token")
+            .with_status(200)
+            .with_body("{}")
+            .expect(0)
             .create_async()
             .await;
 
@@ -301,19 +295,12 @@ mod tests {
         let _agent = EnvGuard::set("AGENT_TOKEN", "stale-token");
 
         let vault = VaultClient::from_env().unwrap().unwrap();
-        let tp = TokenProvider::new("stale-token".into(), Some(vault), "dep-xyz".into());
+        let tp = TokenProvider::new("stale-token".into(), Some(vault), "dep-rot".into());
 
-        let changed = tp.refresh().await.unwrap();
-        assert!(
-            !changed,
-            "Strategy 3 must not claim success on write failure"
-        );
-        assert_eq!(
-            tp.get().await,
-            "stale-token",
-            "token must not change on failure"
-        );
+        assert!(tp.refresh().await.unwrap());
+        assert_eq!(tp.get().await, "rotated-by-operator");
 
+        read.assert_async().await;
         write.assert_async().await;
     }
 }
