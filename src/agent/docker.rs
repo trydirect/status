@@ -172,11 +172,17 @@ const PLATFORM_INSTALL_DIRS: &[&str] = &[
 
 /// Container names that identify a platform component when no label says so.
 /// Matched exactly after normalisation, never as substrings.
+///
+/// Telegraf is here because it is the platform's monitoring agent: the user
+/// asks for it, but it feeds the health panel rather than serving their
+/// traffic. Exact matching matters especially for it — a user's own
+/// `telegraf-proxy` is theirs, and a substring test would take it.
 const PLATFORM_CONTAINER_NAMES: &[&str] = &[
     "statuspanel",
     "statuspanel_agent",
     "compose_agent",
     "nginx_proxy_manager",
+    "telegraf",
 ];
 
 /// Who owns a container: the user's stack, or the platform.
@@ -1300,12 +1306,26 @@ mod tests {
         }
     }
 
-    /// Telegraf is monitoring infrastructure by nature, but the user installs
-    /// it by choice, so it is theirs.
+    /// Telegraf is the platform's monitoring agent: the user asks for it, but
+    /// it feeds the health panel rather than serving their traffic.
     #[test]
-    fn telegraf_belongs_to_the_user() {
+    fn telegraf_belongs_to_the_platform() {
         assert_eq!(
             scope_for_container(&scope_labels(&[]), "telegraf", "telegraf:1.29"),
+            ContainerScope::Platform
+        );
+    }
+
+    /// And only telegraf itself. A container the user named after it is still
+    /// theirs — the reason these names are matched exactly.
+    #[test]
+    fn a_users_telegraf_lookalike_stays_theirs() {
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "telegraf-proxy", "acme/proxy:1"),
+            ContainerScope::Project
+        );
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "my-telegraf", "acme/thing:1"),
             ContainerScope::Project
         );
     }
