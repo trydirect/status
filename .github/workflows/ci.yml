@@ -133,9 +133,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Read pinned toolchain
+        id: pin
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          # Install targets into the toolchain rust-toolchain.toml pins;
+          # targets added to `stable` are invisible to the pinned one and
+          # cross builds fail with "can't find crate for `core`".
+          toolchain: ${{ steps.pin.outputs.channel }}
           targets: ${{ matrix.target }}
 
       - name: Install musl tools
