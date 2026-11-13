@@ -29,6 +29,20 @@ Monitors health, collects metrics, manages Docker containers, and executes comma
 
 ## Quick Install
 
+**Homebrew (macOS / Linux):**
+
+```bash
+brew install trydirect/tap/status-panel
+```
+
+**Cargo:**
+
+```bash
+cargo install status-panel
+```
+
+**Install script:**
+
 ```bash
 curl -sSfL https://raw.githubusercontent.com/trydirect/status/master/install.sh | sh
 ```

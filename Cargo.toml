@@ -1,7 +1,31 @@
 [package]
 name = "status-panel"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
+description = "Self-hosted status page with uptime monitoring, incident dashboards and a probe agent for Docker stacks"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/trydirect/status"
+homepage = "https://github.com/trydirect/status"
+readme = "README.md"
+keywords = ["status-page", "monitoring", "uptime", "docker", "agent"]
+categories = ["command-line-utilities", "web-programming::http-server", "network-programming"]
+exclude = [
+    "web/**",
+    "stacker/**",
+    "docs/**",
+    "assets/**",
+    ".github/**",
+    "docker-compose*.yml",
+    "Dockerfile*",
+    "install.sh",
+    ".pylintrc",
+    ".vscode/**",
+    ".stacker/**",
+    "status.pid",
+    "development.md*",
+    "TODO.md",
+    "BUGS.md",
+]
 
 [features]
 default = ["docker"]
@@ -56,8 +80,8 @@ dotenvy = "0.15"
 rustc_version_runtime = "0.3"
 zeroize = "1"
 tempfile = "3"
-pipe-adapter-sdk = { path = "stacker/crates/pipe-adapter-sdk" }
-pipe-adapter-mail = { path = "stacker/crates/pipe-adapter-mail" }
+pipe-adapter-sdk = { path = "stacker/crates/pipe-adapter-sdk", version = "0.1.0" }
+pipe-adapter-mail = { path = "stacker/crates/pipe-adapter-mail", version = "0.1.0" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }

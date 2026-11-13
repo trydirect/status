@@ -111,13 +111,24 @@ jobs:
         run: cargo clippy --no-default-features --features minimal -- -D warnings
 
   build-release-binaries:
-    name: Build Release Binaries (Linux x86_64)
-    runs-on: ubuntu-latest
+    name: Build Release Binaries (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     needs: build-and-test
     if: github.ref == 'refs/heads/production' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
     strategy:
+      fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -128,7 +139,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache cargo build artifacts
@@ -140,17 +151,21 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Strip binary
+        if: runner.os == 'Linux'
         run: strip target/${{ matrix.target }}/release/status
 
       - name: Create artifact name
         id: artifact
         run: |
           BRANCH=${GITHUB_REF#refs/*/}
-          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
-            SIMPLE_NAME="status-linux-x86_64-musl"
-          else
-            SIMPLE_NAME="status-linux-x86_64"
-          fi
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu) SIMPLE_NAME="status-linux-x86_64" ;;
+            x86_64-unknown-linux-musl) SIMPLE_NAME="status-linux-x86_64-musl" ;;
+            aarch64-unknown-linux-musl) SIMPLE_NAME="status-linux-aarch64-musl" ;;
+            aarch64-apple-darwin) SIMPLE_NAME="status-macos-aarch64" ;;
+            x86_64-apple-darwin) SIMPLE_NAME="status-macos-x86_64" ;;
+            *) echo "unknown target: ${{ matrix.target }}"; exit 1 ;;
+          esac
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             echo "name=${SIMPLE_NAME}-${BRANCH}" >> $GITHUB_OUTPUT
           else
@@ -176,18 +191,45 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - name: Download musl binary artifact
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download binary artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: status-linux-x86_64-musl-*
+          pattern: status-*
           merge-multiple: true
 
       - name: Prepare release assets
         run: |
-          ls -la status-linux-x86_64-musl
+          VERSION=${GITHUB_REF_NAME#v}
+          mkdir -p dist
+
+          # Back-compat raw asset (unchanged from previous releases)
           chmod +x status-linux-x86_64-musl
           sha256sum status-linux-x86_64-musl > status-linux-x86_64-musl.sha256
+
+          # Tarballs for Homebrew: binary + UI assets + licenses
+          package() {
+            local binary="$1" triple="$2"
+            local stage="stage-${triple}"
+            mkdir -p "${stage}"
+            # upload-artifact strips the executable bit, restore it explicitly
+            install -m 755 "${binary}" "${stage}/status"
+            cp -r templates static LICENSE-MIT LICENSE-APACHE README.md "${stage}/"
+            tar -czf "dist/status-panel-${VERSION}-${triple}.tar.gz" \
+              -C "${stage}" status templates static LICENSE-MIT LICENSE-APACHE README.md
+          }
+          package status-macos-aarch64 aarch64-apple-darwin
+          package status-macos-x86_64 x86_64-apple-darwin
+          package status-linux-x86_64-musl x86_64-unknown-linux-musl
+          package status-linux-aarch64-musl aarch64-unknown-linux-musl
+
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          ls -la dist
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -196,6 +238,32 @@ jobs:
           files: |
             status-linux-x86_64-musl
             status-linux-x86_64-musl.sha256
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - name: Update Homebrew tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sha() { sha256sum "$1" | cut -d' ' -f1; }
+          export SHA256_AARCH64_APPLE_DARWIN=$(sha dist/status-panel-${VERSION}-aarch64-apple-darwin.tar.gz)
+          export SHA256_X86_64_APPLE_DARWIN=$(sha dist/status-panel-${VERSION}-x86_64-apple-darwin.tar.gz)
+          export SHA256_AARCH64_UNKNOWN_LINUX_MUSL=$(sha dist/status-panel-${VERSION}-aarch64-unknown-linux-musl.tar.gz)
+          export SHA256_X86_64_UNKNOWN_LINUX_MUSL=$(sha dist/status-panel-${VERSION}-x86_64-unknown-linux-musl.tar.gz)
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/trydirect/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          scripts/render-homebrew-formula.sh "${VERSION}" tap/Formula/status-panel.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/status-panel.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged, nothing to commit"
+          else
+            git commit -m "status-panel ${VERSION}"
+            git push
+          fi
 
   docker-build:
     name: Docker Build & Push (branches/tags)
