@@ -3,7 +3,7 @@ class StatusPanel < Formula
   homepage "https://github.com/trydirect/status"
   # No `version` line: brew audit --strict rejects it as redundant,
   # because Homebrew scans the version out of the release URL.
-  license "MIT OR Apache-2.0"
+  license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
