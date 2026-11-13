@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+### Fixed
+- `deploy_app` now honours its `image` field: the requested image is rewritten into the `app_code` service's `image:` of the compose the deploy runs (payload `compose_content` when provided, otherwise the compose file on disk) before `docker compose pull/up`, instead of being silently ignored while the command reported `status: "deployed"` (stacker BUGS.md §35). The override touches that service only — other services, ports, and volumes survive — and a deploy whose override cannot be applied fails with `image_override_failed` rather than running the compose's own image.
+
 ## 0.2.2 — 2026-11-13
 ### Added
 - Published to crates.io (`cargo install status-panel`) and Homebrew (`brew install trydirect/tap/status-panel`); GitHub releases now ship per-target tarballs (`status-panel-<version>-<target>.tar.gz`) with the `status` binary, web UI assets, and licenses, and the Homebrew tap formula is updated automatically on release.

@@ -848,6 +848,74 @@ pub fn inject_runtime_into_compose(compose_content: &str, runtime: &ContainerRun
     serde_yaml::to_string(&doc).unwrap_or_else(|_| compose_content.to_string())
 }
 
+/// Override the `image` of a single service in a docker-compose YAML string.
+/// Only that service's `image:` is rewritten — every other service and field
+/// survives. Returns `None` when the YAML cannot be parsed or the service is
+/// absent, in which case the caller's content must be left alone.
+#[cfg(feature = "docker")]
+pub fn override_service_image_in_compose(
+    compose_content: &str,
+    service: &str,
+    image: &str,
+) -> Option<String> {
+    let service = service.trim();
+    if service.is_empty() {
+        return None;
+    }
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(compose_content).ok()?;
+    let service_def = doc
+        .get_mut("services")?
+        .get_mut(service)?
+        .as_mapping_mut()?;
+    service_def.insert(
+        serde_yaml::Value::String("image".into()),
+        serde_yaml::Value::String(image.trim().into()),
+    );
+    serde_yaml::to_string(&doc).ok()
+}
+
+/// Rewrite the target service's `image` in the compose file already on disk.
+/// Returns `Ok(false)` when there is no compose file yet (the deploy's own
+/// existence check reports that), `Ok(true)` once the override is on disk, and
+/// `Err` when the requested image could not be applied.
+#[cfg(feature = "docker")]
+async fn override_service_image_in_compose_file(
+    compose_file: &str,
+    app_code: &str,
+    image: &str,
+) -> Result<bool, String> {
+    let existing = match tokio::fs::read_to_string(compose_file).await {
+        Ok(existing) => existing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(format!(
+                "Failed to read compose file {}: {}",
+                compose_file, e
+            ))
+        }
+    };
+    let updated = override_service_image_in_compose(&existing, app_code, image).ok_or_else(|| {
+        format!(
+            "Requested image '{}' could not be applied to service '{}' in {} (unknown service or unparsable compose)",
+            image, app_code, compose_file
+        )
+    })?;
+    if updated == existing {
+        return Ok(true);
+    }
+    backup_existing_file_if_changed(std::path::Path::new(compose_file), updated.as_bytes())
+        .map_err(|e| {
+            format!(
+                "Failed to back up compose file before image override: {}",
+                e
+            )
+        })?;
+    tokio::fs::write(compose_file, &updated)
+        .await
+        .map_err(|e| format!("Failed to write compose file with image override: {}", e))?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone)]
 pub enum StackerCommand {
     Health(HealthCommand),
@@ -1641,6 +1709,14 @@ pub struct DeployAppCommand {
     #[serde(default)]
     compose_content: Option<String>,
     /// Optional: specific image to use (overrides compose file)
+    ///
+    /// Rewrites `image:` of the `app_code` service in the compose the deploy
+    /// runs — inside `compose_content` when provided, otherwise in the compose
+    /// file at the resolved `compose_file` — before `docker compose pull/up`.
+    /// The override applies to that service only and wins over the compose's
+    /// own `image:`; blank values are ignored. When it cannot be applied
+    /// (unknown service or unparsable compose) the deploy fails with
+    /// `image_override_failed` instead of silently running the compose's image.
     #[serde(default)]
     image: Option<String>,
     /// Optional: environment variables to set
@@ -6611,26 +6687,29 @@ fn prune_sibling_backups(path: &std::path::Path, keep: usize) -> Result<()> {
     Ok(())
 }
 
-/// Handle deploy_app command - uses docker compose to deploy a new app/service
+/// Materialize the compose file a deploy will run.
+///
+/// The command payload's `compose_content` wins over the compose already at
+/// `compose_file`. The compose is what `docker compose pull/up` actually run,
+/// so the command's overrides are applied to whichever compose is used before
+/// it is deployed: Kata runtime injection (when requested and available) and
+/// the `image` override. `image` rewrites only the `app_code` service's
+/// `image:` — blank values are ignored — and fails the deploy with
+/// `image_override_failed` when it cannot be applied, so a requested image is
+/// never silently ignored in favour of the compose's own. Non-fatal notes are
+/// pushed to `errors`; failures that must stop the deploy are returned as `Err`.
 #[cfg(feature = "docker")]
-async fn handle_deploy_app(
-    agent_cmd: &AgentCommand,
+async fn materialize_deploy_compose(
     data: &DeployAppCommand,
-) -> Result<CommandResult> {
-    use crate::security::vault_client::VaultClient;
-    use tokio::process::Command;
-
-    let mut result = base_result(
-        agent_cmd,
-        &data.deployment_hash,
-        &data.app_code,
-        "deploy_app",
-    );
-    let mut errors: Vec<CommandError> = Vec::new();
-
-    // Determine the compose working directory
-    let (compose_dir, compose_file) =
-        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
+    compose_dir: &str,
+    compose_file: &str,
+    errors: &mut Vec<CommandError>,
+) -> Result<(), CommandError> {
+    let image = data
+        .image
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
     // If compose_content is provided, write it to disk (for new deployments)
     if let Some(compose_content) = &data.compose_content {
@@ -6669,64 +6748,90 @@ async fn handle_deploy_app(
             compose_content.clone()
         };
 
+        // `docker compose pull/up` use the compose's own `image:`, so the
+        // requested image has to land in the `app_code` service's compose entry
+        // before the payload is written to disk.
+        let final_compose = match image {
+            Some(image) => {
+                match override_service_image_in_compose(&final_compose, &data.app_code, image) {
+                    Some(updated) => updated,
+                    None => {
+                        let message = format!(
+                            "Requested image '{}' could not be applied to service '{}' in the compose payload (unknown service or unparsable compose)",
+                            image, data.app_code
+                        );
+                        return Err(make_error("image_override_failed", message, None));
+                    }
+                }
+            }
+            None => final_compose,
+        };
+
         // Create the directory if it doesn't exist
-        if let Err(e) = tokio::fs::create_dir_all(&compose_dir).await {
-            let error = make_error(
+        if let Err(e) = tokio::fs::create_dir_all(compose_dir).await {
+            return Err(make_error(
                 "dir_create_failed",
                 format!("Failed to create directory {}: {}", compose_dir, e),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
 
         // Write the compose file
         if let Err(e) = backup_existing_file_if_changed(
-            std::path::Path::new(&compose_file),
+            std::path::Path::new(compose_file),
             final_compose.as_bytes(),
         ) {
-            let error = make_error(
+            return Err(make_error(
                 "compose_backup_failed",
                 format!(
                     "Failed to back up docker-compose.yml before overwrite: {}",
                     e
                 ),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
-        if let Err(e) = tokio::fs::write(&compose_file, &final_compose).await {
-            let error = make_error(
+        if let Err(e) = tokio::fs::write(compose_file, &final_compose).await {
+            return Err(make_error(
                 "compose_write_failed",
                 format!("Failed to write docker-compose.yml: {}", e),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
 
         tracing::info!(
             compose_file = %compose_file,
             "docker-compose.yml written successfully"
         );
-    } else if let Some(runtime) = &data.runtime {
+        return Ok(());
+    }
+
+    // No compose content in the payload: the requested image has to land in the
+    // compose already on disk — that is what `docker compose` would run.
+    if let Some(image) = image {
+        match override_service_image_in_compose_file(compose_file, &data.app_code, image).await {
+            Ok(true) => tracing::info!(
+                compose_file = %compose_file,
+                service = %data.app_code,
+                image = %image,
+                "Applied image override to existing compose file"
+            ),
+            // No compose on disk yet — the deploy's existence check reports it.
+            Ok(false) => {}
+            Err(message) => return Err(make_error("image_override_failed", message, None)),
+        }
+    }
+
+    if let Some(runtime) = &data.runtime {
         // Compose content not in payload — modify existing file on disk if runtime is requested
         if *runtime == ContainerRuntime::Kata {
-            match tokio::fs::try_exists(&compose_file).await {
+            match tokio::fs::try_exists(compose_file).await {
                 Ok(true) => {
                     let kata_available = detect_kata_runtime().await;
                     if kata_available {
-                        if let Ok(existing) = tokio::fs::read_to_string(&compose_file).await {
+                        if let Ok(existing) = tokio::fs::read_to_string(compose_file).await {
                             let injected = inject_runtime_into_compose(&existing, runtime);
                             if let Err(e) = backup_existing_file_if_changed(
-                                std::path::Path::new(&compose_file),
+                                std::path::Path::new(compose_file),
                                 injected.as_bytes(),
                             ) {
                                 errors.push(make_error(
@@ -6737,8 +6842,7 @@ async fn handle_deploy_app(
                                     ),
                                     None,
                                 ));
-                            } else if let Err(e) = tokio::fs::write(&compose_file, &injected).await
-                            {
+                            } else if let Err(e) = tokio::fs::write(compose_file, &injected).await {
                                 errors.push(make_error(
                                     "runtime_inject_warning",
                                     format!(
@@ -6778,6 +6882,42 @@ async fn handle_deploy_app(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Handle deploy_app command - uses docker compose to deploy a new app/service
+#[cfg(feature = "docker")]
+async fn handle_deploy_app(
+    agent_cmd: &AgentCommand,
+    data: &DeployAppCommand,
+) -> Result<CommandResult> {
+    use crate::security::vault_client::VaultClient;
+    use tokio::process::Command;
+
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "deploy_app",
+    );
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    // Determine the compose working directory
+    let (compose_dir, compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
+
+    // Materialize the compose the deploy will run — the payload's
+    // compose_content wins over the compose already on disk — applying the
+    // command's overrides before anything is pulled or deployed.
+    if let Err(error) =
+        materialize_deploy_compose(data, &compose_dir, &compose_file, &mut errors).await
+    {
+        result.status = "failed".into();
+        result.error = Some(error.message.clone());
+        result.errors = Some(vec![error]);
+        return Ok(result);
     }
 
     let has_env_config_file = data
@@ -11250,6 +11390,196 @@ services:
 
         assert_eq!(compose_dir, deploy_dir.to_string_lossy());
         assert_eq!(resolved_file, compose_file.to_string_lossy());
+    }
+}
+
+/// Regression tests for `deploy_app`'s `image` field (stacker/BUGS.md §35):
+/// the documented contract is "Optional: specific image to use (overrides
+/// compose file)", but the deploy used to materialize the compose exactly as
+/// written and never read `image`, so `docker compose pull/up` ran the
+/// compose's own image while the command reported `status: "deployed"`.
+///
+/// Precedence when materializing the compose a deploy runs:
+/// - payload `compose_content` wins over the compose file already on disk;
+/// - `image` wins over the `image:` of the `app_code` service in whichever
+///   compose is used, and touches that service only;
+/// - a blank `image` is ignored.
+#[cfg(all(test, feature = "docker"))]
+mod deploy_image_override_tests {
+    use super::*;
+
+    /// The compose shape observed live in stacker/BUGS.md §35: the n8n service
+    /// carries the stale image, with a second service and volumes that must
+    /// survive the override untouched.
+    const N8N_COMPOSE: &str = r#"services:
+  n8n:
+    image: n8nio/n8n:2.45.4
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+  db:
+    image: postgres:16
+volumes:
+  n8n_data: {}
+"#;
+
+    fn deploy_command(params: Value) -> DeployAppCommand {
+        serde_json::from_value(params).expect("deploy_app payload should deserialize")
+    }
+
+    async fn materialize(
+        compose_dir: &std::path::Path,
+        data: &DeployAppCommand,
+    ) -> Result<(), CommandError> {
+        let compose_dir = compose_dir.to_string_lossy().to_string();
+        let compose_file = format!("{}/docker-compose.yml", compose_dir);
+        materialize_deploy_compose(data, &compose_dir, &compose_file, &mut Vec::new()).await
+    }
+
+    fn materialized_yaml(dir: &std::path::Path) -> serde_yaml::Value {
+        let written = std::fs::read_to_string(dir.join("docker-compose.yml"))
+            .expect("compose should be written");
+        serde_yaml::from_str(&written).expect("materialized compose should parse")
+    }
+
+    fn service_image(doc: &serde_yaml::Value, service: &str) -> String {
+        doc.get("services")
+            .and_then(|services| services.get(service))
+            .and_then(|service| service.get("image"))
+            .and_then(|image| image.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn image_override_rewrites_target_service_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+            "pull": true,
+            "force_recreate": true,
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(
+            service_image(&doc, "n8n"),
+            "n8nio/n8n:2.47.7",
+            "the requested image must win over the compose's image for the target service"
+        );
+        assert_eq!(
+            service_image(&doc, "db"),
+            "postgres:16",
+            "other services must keep their own image"
+        );
+
+        let n8n = doc.get("services").unwrap().get("n8n").unwrap();
+        assert_eq!(
+            n8n.get("ports").unwrap().get(0).unwrap().as_str().unwrap(),
+            "5678:5678",
+            "ports must survive the override"
+        );
+        assert_eq!(
+            n8n.get("volumes")
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "n8n_data:/home/node/.n8n",
+            "volumes must survive the override"
+        );
+        assert!(
+            doc.get("volumes").unwrap().get("n8n_data").is_some(),
+            "top-level volumes must survive the override"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_override_rewrites_compose_on_disk_without_payload_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("on-disk compose should be rewritten");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(service_image(&doc, "n8n"), "n8nio/n8n:2.47.7");
+        assert_eq!(
+            service_image(&doc, "db"),
+            "postgres:16",
+            "other services must keep their own image"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_override_fails_when_target_service_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "gateway",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        let error = materialize(dir.path(), &data).await.expect_err(
+            "an unappliable override must fail instead of deploying the compose's image",
+        );
+        assert_eq!(error.code, "image_override_failed");
+    }
+
+    #[tokio::test]
+    async fn without_image_the_compose_content_is_written_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+
+        let written = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        assert_eq!(
+            written, N8N_COMPOSE,
+            "no override must not rewrite the compose"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_image_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "   ",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+
+        let written = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        assert_eq!(
+            written, N8N_COMPOSE,
+            "a blank image must not rewrite the compose"
+        );
     }
 }
 
