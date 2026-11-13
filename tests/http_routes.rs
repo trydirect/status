@@ -310,6 +310,8 @@ async fn test_index_template_renders() {
             port: "8081".to_string(),
             title: Some("demo".to_string()),
         }],
+        image: String::new(),
+        labels: Default::default(),
     }];
 
     let apps_info = vec![status_panel::agent::config::AppInfo {

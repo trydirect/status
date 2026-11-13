@@ -3,6 +3,11 @@
 ## Unreleased
 ### Fixed
 - `deploy_app` now honours its `image` field: the requested image is rewritten into the `app_code` service's `image:` of the compose the deploy runs (payload `compose_content` when provided, otherwise the compose file on disk) before `docker compose pull/up`, instead of being silently ignored while the command reported `status: "deployed"` (stacker BUGS.md §35). The override touches that service only — other services, ports, and volumes survive — and a deploy whose override cannot be applied fails with `image_override_failed` rather than running the compose's own image.
+- Container commands resolve their target once (PR #140 review): `logs`/`restart`/`stop`/`start`/`exec` no longer re-resolve an already-resolved container name — a second lookup could select a different container (`project-app-1-1` matches the fuzzy pattern for `project-app-1`) — and name resolution now prefers the service label, then the exact container name, then the fuzzy patterns.
+- `list_containers` reports `app_code` and `scope` in every listing mode, not just when health metrics are requested; the plain listing also carries `image` and `labels` (PR #140 review).
+- A blank `my.stacker.service` label no longer masks a valid Compose service label when deriving a container's app code (PR #140 review).
+- The bundled discovery consumer retains the `app_code` the agent reports for each container, so a container named `project-app-1` matches its registered app `floci` instead of being suggested as unregistered (PR #140 review).
+- Homebrew formula template uses `license any_of: ["MIT", "Apache-2.0"]` as Homebrew's alternatives syntax requires (PR #140 review); a rendering test pins it.
 
 ## 0.2.2 — 2026-11-13
 ### Added

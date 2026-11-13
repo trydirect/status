@@ -2236,6 +2236,11 @@ fn resolve_container_name(app_code: &str, container: &Option<String>) -> String 
 /// have none, and their container names may match neither pattern; for those
 /// this returns exactly what the caller asked for, which is the behaviour that
 /// was there before. Label resolution is an addition, never a restriction.
+///
+/// Command handlers resolve exactly once here and then call the
+/// `docker::*_resolved` helpers, which skip the lookup: re-resolving an
+/// already-resolved name is a redundant Docker API call and can select a
+/// different container (PR #140 review).
 #[cfg(feature = "docker")]
 async fn resolve_target_container_name(app_code: &str, container: &Option<String>) -> String {
     let requested_name = resolve_container_name(app_code, container);
@@ -5416,7 +5421,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "logs");
     let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
-    let window = match docker::get_container_logs_window(
+    let window = match docker::get_container_logs_window_resolved(
         &target_name,
         data.cursor.clone(),
         Some(data.limit),
@@ -5482,7 +5487,7 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
     let mut errors: Vec<CommandError> = Vec::new();
     let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::restart(&target_name).await {
+    if let Err(e) = docker::restart_resolved(&target_name).await {
         errors.push(make_error(
             "restart_failed",
             format!("Restart failed for `{}`", target_name),
@@ -5490,13 +5495,13 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
         ));
 
         if data.force {
-            if let Err(stop_err) = docker::stop(&target_name).await {
+            if let Err(stop_err) = docker::stop_resolved(&target_name).await {
                 errors.push(make_error(
                     "force_stop_failed",
                     format!("Force stop failed for `{}`", target_name),
                     Some(stop_err.to_string()),
                 ));
-            } else if let Err(retry_err) = docker::restart(&target_name).await {
+            } else if let Err(retry_err) = docker::restart_resolved(&target_name).await {
                 errors.push(make_error(
                     "force_restart_failed",
                     format!("Forced restart failed for `{}`", target_name),
@@ -5571,7 +5576,7 @@ async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<Com
     let mut errors: Vec<CommandError> = Vec::new();
     let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::stop_with_timeout(&target_name, data.timeout).await {
+    if let Err(e) = docker::stop_with_timeout_resolved(&target_name, data.timeout).await {
         errors.push(make_error(
             "stop_failed",
             format!("Stop failed for `{}`", target_name),
@@ -5636,7 +5641,7 @@ async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<C
     let mut errors: Vec<CommandError> = Vec::new();
     let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::start(&target_name).await {
+    if let Err(e) = docker::start_resolved(&target_name).await {
         errors.push(make_error(
             "start_failed",
             format!("Start failed for `{}`", target_name),
@@ -5796,7 +5801,8 @@ async fn handle_error_summary(
     for container in target_containers {
         // Get logs for this container
         let logs_result =
-            docker::get_container_logs_window(&container.name, None, Some(LOGS_MAX_LIMIT)).await;
+            docker::get_container_logs_window_resolved(&container.name, None, Some(LOGS_MAX_LIMIT))
+                .await;
 
         let mut error_count = 0u64;
         let mut warning_count = 0u64;
@@ -6198,7 +6204,7 @@ async fn handle_apply_config(
             .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
 
         if let Some(c) = container {
-            match docker::restart(&c.name).await {
+            match docker::restart_resolved(&c.name).await {
                 Ok(()) => {
                     body["container_restarted"] = json!(true);
                     body["restarted_at"] = json!(now_timestamp());
@@ -8416,7 +8422,7 @@ async fn handle_exec(agent_cmd: &AgentCommand, data: &ExecCommand) -> Result<Com
     // Execute the command inside the container with timeout
     match tokio::time::timeout(
         std::time::Duration::from_secs(data.timeout as u64),
-        docker::exec_in_container_with_output(&target_name, &data.command),
+        docker::exec_in_container_with_output_resolved(&target_name, &data.command),
     )
     .await
     {
@@ -8513,6 +8519,27 @@ async fn handle_server_resources(
     Ok(result)
 }
 
+/// One `list_containers` entry built from a plain (non-health) container
+/// listing. Every listing mode carries the identity fields — the logical app
+/// code and who owns the container — because container discovery and the
+/// dashboard split key on them, and disabling resource metrics must not make
+/// them disappear (PR #140 review).
+#[cfg(feature = "docker")]
+fn container_list_entry(
+    name: &str,
+    status: &str,
+    image: &str,
+    labels: &HashMap<String, String>,
+) -> Value {
+    json!({
+        "name": name,
+        "app_code": docker::app_code_for_container(labels, name),
+        "scope": docker::scope_for_container(labels, name, image).as_str(),
+        "status": status,
+        "image": image,
+    })
+}
+
 /// Handle list_containers command - list all containers with optional health/logs
 #[cfg(feature = "docker")]
 async fn handle_list_containers(
@@ -8583,13 +8610,10 @@ async fn handle_list_containers(
                 .map(|c| {
                     container_meta.push(ContainerMatchMeta {
                         name: c.name.clone(),
-                        image: String::new(),
-                        labels: HashMap::new(),
+                        image: c.image.clone(),
+                        labels: c.labels.clone(),
                     });
-                    json!({
-                        "name": c.name,
-                        "status": c.status,
-                    })
+                    container_list_entry(&c.name, &c.status, &c.image, &c.labels)
                 })
                 .collect::<Vec<_>>(),
             Err(e) => {
@@ -8610,7 +8634,7 @@ async fn handle_list_containers(
     if data.include_logs {
         for container in containers.iter_mut() {
             if let Some(name) = container.get("name").and_then(|n| n.as_str()) {
-                match docker::get_container_logs(name, &data.log_lines.to_string()).await {
+                match docker::get_container_logs_resolved(name, &data.log_lines.to_string()).await {
                     Ok(logs) => {
                         container
                             .as_object_mut()
@@ -12357,6 +12381,25 @@ mod list_containers_command_tests {
         };
         cmd = cmd.normalize();
         assert_eq!(cmd.log_lines, 100); // Should be clamped to 100
+    }
+
+    /// `list_containers` entries carry the logical identity fields even when
+    /// health metrics are disabled — container discovery and the dashboard
+    /// split key on them (PR #140 review).
+    #[cfg(feature = "docker")]
+    #[test]
+    fn plain_list_entry_carries_app_identity() {
+        let mut labels = HashMap::new();
+        labels.insert("my.stacker.service".to_string(), "n8n".to_string());
+
+        let entry =
+            super::container_list_entry("project-n8n-1", "running", "n8nio/n8n:2.45.4", &labels);
+
+        assert_eq!(entry["app_code"], "n8n");
+        assert_eq!(entry["scope"], "project");
+        assert_eq!(entry["image"], "n8nio/n8n:2.45.4");
+        assert_eq!(entry["name"], "project-n8n-1");
+        assert_eq!(entry["status"], "running");
     }
 
     #[test]

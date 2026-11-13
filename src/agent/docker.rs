@@ -45,6 +45,10 @@ pub struct ContainerInfo {
     pub status: String,
     pub logs: String,
     pub ports: Vec<PortInfo>,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub image: String,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -294,12 +298,52 @@ fn label_matches_app(labels: &HashMap<String, String>, app_code: &str) -> Option
 ///
 /// See `config/shared-fixtures/agent-contract/app-code-resolution.md`.
 pub fn app_code_for_container(labels: &HashMap<String, String>, container_name: &str) -> String {
-    labels
-        .get(STACKER_SERVICE_LABEL)
-        .or_else(|| labels.get(COMPOSE_SERVICE_LABEL))
-        .map(|code| code.trim().to_string())
-        .filter(|code| !code.is_empty())
+    // Filter each candidate before selecting the first usable one: a blank
+    // `my.stacker.service` must fall through to the Compose label, not jump
+    // straight to the container name.
+    [STACKER_SERVICE_LABEL, COMPOSE_SERVICE_LABEL]
+        .iter()
+        .find_map(|label| {
+            labels
+                .get(*label)
+                .map(|code| code.trim())
+                .filter(|code| !code.is_empty())
+        })
+        .map(|code| code.to_string())
         .unwrap_or_else(|| container_name.trim_start_matches('/').to_string())
+}
+
+/// The container `requested` resolves to within a candidate listing, as
+/// `(container name, matched service label)` when a label identified it.
+///
+/// Priority: a service-label match is authoritative (`my.stacker.service`
+/// first, Compose's service name second — [`label_matches_app`]), then an
+/// exact container-name match, then the anchored fuzzy name patterns. A
+/// single first-hit pass over the listing lets a fuzzy pattern shadow what
+/// the caller named exactly: `project-app-1-1` matches the `app-DIGIT`
+/// pattern for `project-app-1`, so re-resolving an already-resolved name
+/// could land on the wrong container (PR #140 review).
+fn resolve_in_listing<'a>(
+    candidates: &'a [(String, Option<&'a HashMap<String, String>>)],
+    requested: &str,
+) -> Option<(&'a str, Option<&'static str>)> {
+    for (candidate_name, labels) in candidates {
+        if let Some(matched_label) = labels.and_then(|labels| label_matches_app(labels, requested))
+        {
+            return Some((candidate_name.as_str(), Some(matched_label)));
+        }
+    }
+    for (candidate_name, _) in candidates {
+        if candidate_name.trim_start_matches('/') == requested {
+            return Some((candidate_name.as_str(), None));
+        }
+    }
+    for (candidate_name, _) in candidates {
+        if name_matches(candidate_name, requested) {
+            return Some((candidate_name.as_str(), None));
+        }
+    }
+    None
 }
 
 pub async fn resolve_container_name(name: &str) -> Result<String> {
@@ -314,41 +358,40 @@ pub async fn resolve_container_name(name: &str) -> Result<String> {
         "Attempting to resolve container name"
     );
 
-    let mut available_containers = Vec::new();
-
-    for container in list {
-        if let Some(names) = container.names {
+    let mut candidates: Vec<(String, Option<&HashMap<String, String>>)> = Vec::new();
+    for container in &list {
+        if let Some(names) = &container.names {
             for entry in names {
                 let normalized = entry.trim_start_matches('/');
-                available_containers.push(normalized.to_string());
-
-                if let Some(labels) = container.labels.as_ref() {
-                    if let Some(matched_label) = label_matches_app(labels, name) {
-                        tracing::info!(
-                            app_code = name,
-                            resolved_name = normalized,
-                            matched_label,
-                            "Container name resolved via service label"
-                        );
-                        return Ok(normalized.to_string());
-                    }
-                }
-
-                if name_matches(&entry, name) {
-                    tracing::info!(
-                        app_code = name,
-                        resolved_name = normalized,
-                        "Container name resolved successfully"
-                    );
-                    return Ok(normalized.to_string());
-                }
+                candidates.push((normalized.to_string(), container.labels.as_ref()));
             }
         }
     }
 
+    if let Some((resolved, matched_label)) = resolve_in_listing(&candidates, name) {
+        match matched_label {
+            Some(matched_label) => {
+                tracing::info!(
+                    app_code = name,
+                    resolved_name = resolved,
+                    matched_label,
+                    "Container name resolved via service label"
+                );
+            }
+            None => {
+                tracing::info!(
+                    app_code = name,
+                    resolved_name = resolved,
+                    "Container name resolved successfully"
+                );
+            }
+        }
+        return Ok(resolved.to_string());
+    }
+
     tracing::warn!(
         app_code = name,
-        available_containers = ?available_containers,
+        available_containers = ?candidates.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
         "No matching container found. Attempted patterns: exact match, prefix, suffix, contains",
     );
 
@@ -410,6 +453,8 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
                 status,
                 logs: String::new(),
                 ports: vec![],
+                image: c.image.unwrap_or_default(),
+                labels: c.labels.unwrap_or_default(),
             }
         })
         .collect())
@@ -445,6 +490,8 @@ pub async fn list_containers_with_logs(tail: &str) -> Result<Vec<ContainerInfo>>
             status,
             logs,
             ports: vec![],
+            image: c.image.unwrap_or_default(),
+            labels: c.labels.unwrap_or_default(),
         });
     }
 
@@ -661,13 +708,23 @@ pub async fn get_container_logs_window(
     cursor: Option<String>,
     limit: Option<usize>,
 ) -> Result<LogWindow> {
+    let resolved_name = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+    get_container_logs_window_resolved(&resolved_name, cursor, limit).await
+}
+
+/// Like [`get_container_logs_window`] but skips the `resolve_container_name`
+/// lookup; see [`restart_resolved`].
+pub async fn get_container_logs_window_resolved(
+    resolved_name: &str,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> Result<LogWindow> {
     use bollard::query_parameters::LogsOptionsBuilder;
     use futures_util::StreamExt;
 
     let docker = docker_client()?;
-    let resolved_name = resolve_container_name(name)
-        .await
-        .unwrap_or_else(|_| name.to_string());
     let mut builder = LogsOptionsBuilder::default();
     builder = builder
         .stdout(true)
@@ -687,7 +744,7 @@ pub async fn get_container_logs_window(
     }
 
     let opts = builder.build();
-    let mut logs = docker.logs(&resolved_name, Some(opts));
+    let mut logs = docker.logs(resolved_name, Some(opts));
     let mut frames: Vec<LogFrame> = Vec::new();
     let mut truncated = false;
     let mut last_cursor: Option<String> = None;
@@ -696,7 +753,7 @@ pub async fn get_container_logs_window(
         let output = match item {
             Ok(v) => v,
             Err(e) => {
-                error!(container = name, error = %e, "error reading log stream");
+                error!(container = resolved_name, error = %e, "error reading log stream");
                 continue;
             }
         };
@@ -751,10 +808,16 @@ fn parse_cursor_to_epoch(cursor: &str) -> Option<i64> {
 }
 
 pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    get_container_logs_resolved(&resolved_name, tail).await
+}
+
+/// Like [`get_container_logs`] but skips the `resolve_container_name` lookup;
+/// see [`restart_resolved`].
+pub async fn get_container_logs_resolved(resolved_name: &str, tail: &str) -> Result<String> {
+    let docker = docker_client()?;
     use bollard::query_parameters::LogsOptionsBuilder;
     use futures_util::StreamExt;
     let opts = LogsOptionsBuilder::default()
@@ -763,7 +826,7 @@ pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
         .follow(false)
         .tail(tail)
         .build();
-    let mut logs = docker.logs(&resolved_name, Some(opts));
+    let mut logs = docker.logs(resolved_name, Some(opts));
     let mut log_text = String::new();
     while let Some(log_line) = logs.next().await {
         match log_line {
@@ -775,61 +838,91 @@ pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
 }
 
 pub async fn restart(name: &str) -> Result<()> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    restart_resolved(&resolved_name).await
+}
+
+/// Like [`restart`] but assumes `name` is already a real, resolved container
+/// name or ID and skips the `resolve_container_name` lookup. Use this in
+/// callers that resolved the target once up front: re-resolving an
+/// already-resolved name is a redundant `list_containers` call and can even
+/// select a different container (PR #140 review).
+pub async fn restart_resolved(resolved_name: &str) -> Result<()> {
+    let docker = docker_client()?;
     docker
-        .restart_container(&resolved_name, None::<RestartContainerOptions>)
+        .restart_container(resolved_name, None::<RestartContainerOptions>)
         .await
         .context("restart container")?;
-    debug!("restarted container: {}", name);
+    debug!("restarted container: {}", resolved_name);
     Ok(())
 }
 
 pub async fn stop(name: &str) -> Result<()> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    stop_resolved(&resolved_name).await
+}
+
+/// Like [`stop`] but skips the `resolve_container_name` lookup; see
+/// [`restart_resolved`].
+pub async fn stop_resolved(resolved_name: &str) -> Result<()> {
+    let docker = docker_client()?;
     docker
-        .stop_container(&resolved_name, None::<StopContainerOptions>)
+        .stop_container(resolved_name, None::<StopContainerOptions>)
         .await
         .context("stop container")?;
-    debug!("stopped container: {}", name);
+    debug!("stopped container: {}", resolved_name);
     Ok(())
 }
 
 pub async fn stop_with_timeout(name: &str, timeout_secs: u32) -> Result<()> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    stop_with_timeout_resolved(&resolved_name, timeout_secs).await
+}
+
+/// Like [`stop_with_timeout`] but skips the `resolve_container_name` lookup;
+/// see [`restart_resolved`].
+pub async fn stop_with_timeout_resolved(resolved_name: &str, timeout_secs: u32) -> Result<()> {
+    let docker = docker_client()?;
     let opts = StopContainerOptions {
         t: Some(timeout_secs as i32),
         signal: None,
     };
     docker
-        .stop_container(&resolved_name, Some(opts))
+        .stop_container(resolved_name, Some(opts))
         .await
         .context("stop container with timeout")?;
-    debug!("stopped container: {} (timeout: {}s)", name, timeout_secs);
+    debug!(
+        "stopped container: {} (timeout: {}s)",
+        resolved_name, timeout_secs
+    );
     Ok(())
 }
 
 pub async fn start(name: &str) -> Result<()> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    start_resolved(&resolved_name).await
+}
+
+/// Like [`start`] but skips the `resolve_container_name` lookup; see
+/// [`restart_resolved`].
+pub async fn start_resolved(resolved_name: &str) -> Result<()> {
+    let docker = docker_client()?;
     docker
         .start_container(
-            &resolved_name,
+            resolved_name,
             None::<bollard::query_parameters::StartContainerOptions>,
         )
         .await
         .context("start container")?;
-    debug!("started container: {}", name);
+    debug!("started container: {}", resolved_name);
     Ok(())
 }
 
@@ -1131,6 +1224,66 @@ mod tests {
     fn app_code_ignores_blank_labels() {
         let l = labels(&[("my.stacker.service", "   ")]);
         assert_eq!(app_code_for_container(&l, "project-app-1"), "project-app-1");
+    }
+
+    /// A blank Stacker label must not mask a valid Compose service label: each
+    /// candidate is filtered before the first usable identity is selected, or
+    /// the documented `my.stacker.service` → Compose → name priority silently
+    /// degrades to the container name.
+    #[test]
+    fn app_code_falls_through_blank_stacker_label_to_compose() {
+        let l = labels(&[
+            ("my.stacker.service", " "),
+            ("com.docker.compose.service", "web"),
+        ]);
+        assert_eq!(app_code_for_container(&l, "someproject-web-1"), "web");
+    }
+
+    /// The exact container the caller named must win over the anchored fuzzy
+    /// patterns: re-resolving an already-resolved name must not land on an
+    /// earlier-listed `project-app-1-1`, which matches the `app-DIGIT` pattern
+    /// for `project-app-1` (PR #140 review).
+    #[test]
+    fn resolve_in_listing_exact_name_beats_fuzzy_replica_patterns() {
+        let l = labels(&[("com.docker.compose.service", "app")]);
+        let candidates = vec![
+            ("project-app-1-1".to_string(), Some(&l)),
+            ("project-app-1".to_string(), Some(&l)),
+        ];
+        assert_eq!(
+            resolve_in_listing(&candidates, "project-app-1"),
+            Some(("project-app-1", None))
+        );
+    }
+
+    /// A service-label match is authoritative and must not be shadowed by a
+    /// fuzzy pattern that an earlier candidate happens to hit.
+    #[test]
+    fn resolve_in_listing_label_beats_earlier_fuzzy_pattern() {
+        let l = labels(&[("my.stacker.service", "app")]);
+        let candidates = vec![
+            ("project-app-2".to_string(), None),
+            ("project-app-1".to_string(), Some(&l)),
+        ];
+        assert_eq!(
+            resolve_in_listing(&candidates, "app"),
+            Some(("project-app-1", Some(STACKER_SERVICE_LABEL)))
+        );
+    }
+
+    /// The historical resolution paths keep working: app code to container via
+    /// the service label, raw container names as-is.
+    #[test]
+    fn resolve_in_listing_keeps_label_and_exact_resolution() {
+        let l = labels(&[("my.stacker.service", "floci")]);
+        let candidates = vec![("project-app-1".to_string(), Some(&l))];
+        assert_eq!(
+            resolve_in_listing(&candidates, "floci"),
+            Some(("project-app-1", Some(STACKER_SERVICE_LABEL)))
+        );
+
+        let bare = vec![("komodo".to_string(), None)];
+        assert_eq!(resolve_in_listing(&bare, "komodo"), Some(("komodo", None)));
     }
 
     #[test]
