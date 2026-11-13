@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.2 — 2026-11-13
+### Added
+- Published to crates.io (`cargo install status-panel`) and Homebrew (`brew install trydirect/tap/status-panel`); GitHub releases now ship per-target tarballs (`status-panel-<version>-<target>.tar.gz`) with the `status` binary, web UI assets, and licenses, and the Homebrew tap formula is updated automatically on release.
+- Pipe delivery supports `target_headers` for authenticated targets and `source_url` for external HTTP sources fetched by the agent (no curl needed inside the container).
+
+### Changed
+- `list_containers` and container resolution report `app_code` from the stacker label and resolve the real container before addressing Docker; platform containers (e.g. telegraf) are counted as the platform's, not the user's; the agent's call to `/api/v1/apps/status` is gone.
+- The agent no longer mints tokens it cannot use.
+- Probing uses curl again, with a probe timeout; label matching for container targets.
+- Rust toolchain pinned to 1.98.1; release builds install cross targets into the pinned toolchain (fixes `can't find crate for core` on musl and macOS x86_64 targets).
+
+## 0.2.1 — 2026-07-13
+### Added
+- Vault mTLS: client-certificate support for the Status Panel agent's Vault connection; `DEFAULT_VAULT_URL` moved to `:8443`.
+- Autonomous agent token recovery via Vault self-issue.
+
+### Changed
+- README reworked with an Integrations section; deployment lock files removed and covered by `.gitignore` patterns.
+
+## 0.2.0 — 2026-06-01
+### Added
+- Pipe adapter crates (`pipe-adapter-sdk`, `pipe-adapter-mail`) vendored in-repo so CI is PR-safe; SMTP pipe delivery works end to end.
+- Real website deployment example; `status` shows ports.
+
+### Changed
+- Better container resolving; command probing moved from curl to reqwest.
+- Vault NPM credentials accept `schema_version` as both numeric `1` and string `"1"`; npm Vault read path fixed.
+
 ## 0.1.9 — 2026-05-15
 ### Added
 - `deploy_app` now creates adjacent `.stacker-bak-*` backups before overwriting managed compose, env, or config bundle files, retaining the five most recent backups per file.
