@@ -167,8 +167,8 @@ pub enum NpmCredentialError {
     MissingSecret { path: String },
     #[error("Vault secret at {path} is invalid: {reason}")]
     InvalidPayload { path: String, reason: String },
-    #[error("Vault is unavailable")]
-    VaultUnavailable,
+    #[error("Vault is unavailable: {reason}")]
+    VaultUnavailable { reason: String },
     #[error("Vault authentication was revoked")]
     AuthRevoked,
     #[error("This agent is not the proxy owner")]
@@ -192,7 +192,7 @@ impl NpmCredentialError {
         match self {
             Self::MissingSecret { .. } => "npm_credentials_missing",
             Self::InvalidPayload { .. } => "npm_credentials_invalid",
-            Self::VaultUnavailable => "vault_unavailable",
+            Self::VaultUnavailable { .. } => "vault_unavailable",
             Self::AuthRevoked => "vault_auth_revoked",
             Self::NotProxyOwner => "not_proxy_owner",
             Self::MissingVaultConfiguration => "vault_not_configured",
@@ -212,8 +212,11 @@ impl NpmCredentialError {
             Self::InvalidPayload { path, .. } => {
                 format!("NPM credentials in Vault are invalid at {}", path)
             }
-            Self::VaultUnavailable => {
-                "Vault is unavailable while resolving NPM credentials".to_string()
+            Self::VaultUnavailable { reason } => {
+                format!(
+                    "Vault is unavailable while resolving NPM credentials: {}",
+                    reason
+                )
             }
             Self::AuthRevoked => {
                 "Vault token is no longer authorized to read NPM credentials".to_string()
@@ -373,7 +376,9 @@ impl ReqwestVaultTransport {
     fn build_client() -> Result<Client> {
         let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
 
-        if let Some(identity) = load_mtls_identity() {
+        let identity = load_mtls_identity()
+            .map_err(|error| anyhow::anyhow!("Vault mTLS client identity unusable: {error}"))?;
+        if let Some(identity) = identity {
             builder = builder.identity(identity);
         }
 
@@ -416,33 +421,64 @@ impl VaultTransport for ReqwestVaultTransport {
     }
 }
 
+/// Vault endpoint for error messages: scheme + authority only, never the
+/// path (which carries the secret path and server id).
+fn sanitized_endpoint(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split('/').next().unwrap_or(rest);
+            format!("{}://{}", scheme, authority)
+        }
+        None => url.split('/').next().unwrap_or(url).to_string(),
+    }
+}
+
 /// Load mTLS client certificate identity from environment variables.
 ///
 /// Supports two modes:
 /// 1. Inline PEM via `VAULT_CLIENT_CERT` and `VAULT_CLIENT_KEY` env vars
 /// 2. File paths via `VAULT_CLIENT_CERT_PATH` and `VAULT_CLIENT_KEY_PATH` env vars
 ///
-/// Returns `None` if neither set (mTLS is optional — degradation path).
-fn load_mtls_identity() -> Option<Identity> {
-    let cert_pem = std::env::var("VAULT_CLIENT_CERT").ok().or_else(|| {
-        let path = std::env::var("VAULT_CLIENT_CERT_PATH").ok()?;
-        std::fs::read_to_string(path).ok()
-    })?;
+/// `Ok(None)` when nothing is configured (mTLS is optional — degradation
+/// path). When a certificate IS configured but cannot be read or parsed the
+/// call fails instead: a configured-but-unusable client cert is a
+/// misconfiguration, and degrading it to a plain TLS connection silently
+/// broke every Vault read (stacker BUGS.md #38 — remote proxy commands then
+/// died with a context-free vault_unavailable).
+fn load_mtls_identity() -> Result<Option<Identity>, String> {
+    let cert_pem = match std::env::var("VAULT_CLIENT_CERT") {
+        Ok(pem) => Some(pem),
+        Err(_) => match std::env::var("VAULT_CLIENT_CERT_PATH") {
+            Ok(path) => Some(std::fs::read_to_string(&path).map_err(|error| {
+                format!("VAULT_CLIENT_CERT_PATH '{}' is unreadable: {}", path, error)
+            })?),
+            Err(_) => None,
+        },
+    };
 
-    let key_pem = std::env::var("VAULT_CLIENT_KEY").ok().or_else(|| {
-        let path = std::env::var("VAULT_CLIENT_KEY_PATH").ok()?;
-        std::fs::read_to_string(path).ok()
-    })?;
+    let key_pem = match std::env::var("VAULT_CLIENT_KEY") {
+        Ok(pem) => Some(pem),
+        Err(_) => match std::env::var("VAULT_CLIENT_KEY_PATH") {
+            Ok(path) => Some(std::fs::read_to_string(&path).map_err(|error| {
+                format!("VAULT_CLIENT_KEY_PATH '{}' is unreadable: {}", path, error)
+            })?),
+            Err(_) => None,
+        },
+    };
 
-    let identity_pem = format!("{}\n{}", cert_pem, key_pem);
-    match Identity::from_pem(identity_pem.as_bytes()) {
-        Ok(identity) => {
+    match (cert_pem, key_pem) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(
+            "only one of the Vault mTLS certificate and key is configured (check \
+             VAULT_CLIENT_CERT[_PATH] / VAULT_CLIENT_KEY[_PATH])"
+                .to_string(),
+        ),
+        (Some(cert_pem), Some(key_pem)) => {
+            let identity_pem = format!("{}\n{}", cert_pem, key_pem);
+            let identity = Identity::from_pem(identity_pem.as_bytes())
+                .map_err(|error| format!("Vault mTLS identity could not be built: {}", error))?;
             debug!("mTLS client identity loaded for Vault connections");
-            Some(identity)
-        }
-        Err(e) => {
-            warn!("Failed to load mTLS client identity: {}", e);
-            None
+            Ok(Some(identity))
         }
     }
 }
@@ -535,7 +571,10 @@ impl VaultClient {
                 // - mTLS client identity loaded from VAULT_CLIENT_CERT / VAULT_CLIENT_KEY
                 let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
 
-                if let Some(identity) = load_mtls_identity() {
+                let identity = load_mtls_identity().map_err(|error| {
+                    anyhow::anyhow!("Vault mTLS client identity unusable: {error}")
+                })?;
+                if let Some(identity) = identity {
                     builder = builder.identity(identity);
                 }
 
@@ -742,7 +781,13 @@ impl VaultClient {
                 .await
                 .map_err(|error| {
                     warn!(path = %path, error = %error, "Vault NPM credential lookup failed");
-                    NpmCredentialError::VaultUnavailable
+                    NpmCredentialError::VaultUnavailable {
+                        reason: format!(
+                            "request to {} failed: {}",
+                            sanitized_endpoint(&self.base_url),
+                            error
+                        ),
+                    }
                 })?;
 
             match response.status {
@@ -761,7 +806,13 @@ impl VaultClient {
                 }
                 status if !status.is_success() => {
                     warn!(path = %path, status = %status, "Vault returned an unexpected status");
-                    return Err(NpmCredentialError::VaultUnavailable);
+                    return Err(NpmCredentialError::VaultUnavailable {
+                        reason: format!(
+                            "{} returned HTTP {}",
+                            sanitized_endpoint(&self.base_url),
+                            status
+                        ),
+                    });
                 }
                 _ => {}
             }
@@ -1752,5 +1803,54 @@ mod tests {
             .expect_err("auth mode validation");
 
         assert!(matches!(error, NpmCredentialError::UnknownAuthMode { .. }));
+    }
+
+    // stacker BUGS.md #38: the failure must carry the endpoint and cause — a
+    // context-free "Vault is unavailable" left every remote proxy command
+    // undiagnosable.
+    #[test]
+    fn vault_unavailable_operator_message_carries_reason() {
+        let error = NpmCredentialError::VaultUnavailable {
+            reason: "https://vault.try.direct:8443 — connection refused".to_string(),
+        };
+        assert_eq!(error.code(), "vault_unavailable");
+        let message = error.operator_message();
+        assert!(
+            message.contains("https://vault.try.direct:8443"),
+            "{message}"
+        );
+        assert!(message.contains("connection refused"), "{message}");
+    }
+
+    #[test]
+    fn sanitized_endpoint_drops_path_and_query() {
+        assert_eq!(
+            sanitized_endpoint(
+                "https://vault.try.direct:8443/v1/secret/base/status_panel/hosts/9/npm_credentials"
+            ),
+            "https://vault.try.direct:8443"
+        );
+        assert_eq!(sanitized_endpoint("http://vault:8200"), "http://vault:8200");
+    }
+
+    // stacker BUGS.md #38: a configured-but-unusable client certificate is a
+    // misconfiguration — it must fail loudly instead of silently degrading to
+    // a TLS connection Vault refuses.
+    #[test]
+    fn load_mtls_identity_fails_loudly_when_configured_certificate_is_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("VAULT_CLIENT_CERT");
+        std::env::remove_var("VAULT_CLIENT_KEY");
+        std::env::set_var("VAULT_CLIENT_CERT_PATH", "/nonexistent/mtls-client.crt");
+        std::env::set_var("VAULT_CLIENT_KEY_PATH", "/nonexistent/mtls-client.key");
+
+        let error = load_mtls_identity().expect_err("missing cert files must fail");
+        assert!(error.contains("VAULT_CLIENT_CERT_PATH"), "{error}");
+
+        std::env::remove_var("VAULT_CLIENT_CERT_PATH");
+        std::env::remove_var("VAULT_CLIENT_KEY_PATH");
+        assert!(load_mtls_identity()
+            .expect("unconfigured mTLS degrades gracefully")
+            .is_none());
     }
 }

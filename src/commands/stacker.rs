@@ -3604,7 +3604,12 @@ async fn resolve_npm_config(
             error = %error,
             "Failed to initialize Vault client for configure_proxy"
         );
-        NpmCredentialError::VaultUnavailable
+        NpmCredentialError::VaultUnavailable {
+            reason: format!(
+                "the agent's Vault client could not be initialized: {:#}",
+                error
+            ),
+        }
     })? {
         let server_id = resolve_server_id()?;
         let credentials = vault_client.fetch_npm_credentials(&server_id).await?;
