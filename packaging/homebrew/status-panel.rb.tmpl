@@ -1,0 +1,47 @@
+class StatusPanel < Formula
+  desc "Self-hosted status page with uptime monitoring and a probe agent"
+  homepage "https://github.com/trydirect/status"
+  # No `version` line: brew audit --strict rejects it as redundant,
+  # because Homebrew scans the version out of the release URL.
+  license any_of: ["MIT", "Apache-2.0"]
+
+  on_macos do
+    on_arm do
+      url "https://github.com/trydirect/status/releases/download/v@VERSION@/status-panel-@VERSION@-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256_AARCH64_APPLE_DARWIN@"
+    end
+    on_intel do
+      url "https://github.com/trydirect/status/releases/download/v@VERSION@/status-panel-@VERSION@-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256_X86_64_APPLE_DARWIN@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/trydirect/status/releases/download/v@VERSION@/status-panel-@VERSION@-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_AARCH64_UNKNOWN_LINUX_MUSL@"
+    end
+    on_intel do
+      url "https://github.com/trydirect/status/releases/download/v@VERSION@/status-panel-@VERSION@-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_X86_64_UNKNOWN_LINUX_MUSL@"
+    end
+  end
+
+  def install
+    bin.install "status"
+    pkgshare.install "templates", "static"
+    pkgshare.install "LICENSE-MIT", "LICENSE-APACHE", "README.md"
+  end
+
+  def caveats
+    <<~EOS
+      The web UI loads templates/ and static/ from the current working directory.
+      To serve the UI from another directory, copy them there first:
+        cp -r #{pkgshare}/templates #{pkgshare}/static .
+    EOS
+  end
+
+  test do
+    assert_match(/\d+\.\d+\.\d+/, shell_output("#{bin}/status --version"))
+  end
+end

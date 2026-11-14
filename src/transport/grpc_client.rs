@@ -4,6 +4,11 @@ use std::time::Duration;
 use tracing::info;
 
 pub mod pipe_proto {
+    // tonic generates client methods returning Result<_, tonic::Status>, and
+    // Status is large enough to trip result_large_err on clippy 1.98+. The
+    // code comes from build.rs, so the lint can only be silenced here.
+    #![allow(clippy::result_large_err)]
+
     tonic::include_proto!("pipe");
 }
 
