@@ -848,24 +848,22 @@ pub fn inject_runtime_into_compose(compose_content: &str, runtime: &ContainerRun
     serde_yaml::to_string(&doc).unwrap_or_else(|_| compose_content.to_string())
 }
 
-/// Override the `image` of a single service in a docker-compose YAML string.
-/// Only that service's `image:` is rewritten — every other service and field
-/// survives. Returns `None` when the YAML cannot be parsed or the service is
-/// absent, in which case the caller's content must be left alone.
+/// Override the `image` of the service `app_code` addresses in a
+/// docker-compose YAML string. Only that service's `image:` is rewritten —
+/// every other service and field survives. Returns `None` when the YAML
+/// cannot be parsed or no service resolves, in which case the caller's
+/// content must be left alone.
 #[cfg(feature = "docker")]
 pub fn override_service_image_in_compose(
     compose_content: &str,
-    service: &str,
+    app_code: &str,
     image: &str,
 ) -> Option<String> {
-    let service = service.trim();
-    if service.is_empty() {
-        return None;
-    }
+    let service_key = resolve_compose_service_key(compose_content, app_code)?;
     let mut doc: serde_yaml::Value = serde_yaml::from_str(compose_content).ok()?;
     let service_def = doc
         .get_mut("services")?
-        .get_mut(service)?
+        .get_mut(service_key.as_str())?
         .as_mapping_mut()?;
     service_def.insert(
         serde_yaml::Value::String("image".into()),
@@ -874,46 +872,158 @@ pub fn override_service_image_in_compose(
     serde_yaml::to_string(&doc).ok()
 }
 
-/// Rewrite the target service's `image` in the compose file already on disk.
-/// Returns `Ok(false)` when there is no compose file yet (the deploy's own
-/// existence check reports that), `Ok(true)` once the override is on disk, and
-/// `Err` when the requested image could not be applied.
+/// The compose service key `app_code` addresses.
+///
+/// The logical app code is not always the service key: the CLI generator names
+/// a service `proxy-manager` but labels it
+/// `my.stacker.service=nginx_proxy_manager` (`stacker/stacker/src/cli/generator/compose.rs`).
+/// Resolution: a unique `my.stacker.service` label match wins, then an exact
+/// service-key match (the fallback for stacks without the label), then `None` —
+/// callers fall back to the app code itself, because label resolution is an
+/// addition, never a restriction (PR #140 review).
 #[cfg(feature = "docker")]
-async fn override_service_image_in_compose_file(
+pub fn resolve_compose_service_key(compose_content: &str, app_code: &str) -> Option<String> {
+    let app_code = app_code.trim();
+    if app_code.is_empty() {
+        return None;
+    }
+    let doc: serde_yaml::Value = serde_yaml::from_str(compose_content).ok()?;
+    let services = doc.get("services")?;
+
+    let mut labeled_keys = Vec::new();
+    if let Some(mapping) = services.as_mapping() {
+        for (key, def) in mapping {
+            if service_def_label(def, docker::STACKER_SERVICE_LABEL).map(str::trim)
+                == Some(app_code)
+            {
+                if let Some(key) = key.as_str() {
+                    labeled_keys.push(key.to_string());
+                }
+            }
+        }
+    }
+    if labeled_keys.len() == 1 {
+        return labeled_keys.pop();
+    }
+    if services.get(app_code).is_some() {
+        return Some(app_code.to_string());
+    }
+    None
+}
+
+/// A service definition's label value from its `labels:` block, which Compose
+/// accepts as either a mapping or a list of `key=value` strings.
+#[cfg(feature = "docker")]
+fn service_def_label<'a>(def: &'a serde_yaml::Value, label: &str) -> Option<&'a str> {
+    let labels = def.get("labels")?;
+    if let Some(value) = labels.get(label).and_then(|value| value.as_str()) {
+        return Some(value);
+    }
+    for entry in labels.as_sequence()? {
+        let entry = entry.as_str()?;
+        if let Some((key, value)) = entry.split_once('=') {
+            if key.trim() == label {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Replace a file atomically: back up the current content if it changes, write
+/// a sibling temp file, sync it, and rename it over the original — an
+/// interrupted write can never leave the live file truncated (PR #140 review).
+/// Mirrors the pattern of `write_config_to_disk_with_force`.
+#[cfg(feature = "docker")]
+async fn replace_file_atomically(path: &str, content: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let path = std::path::Path::new(path);
+    backup_existing_file_if_changed(path, content)?;
+    let temp_path = sibling_temp_path(path)?;
+    let write_result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .context(format!(
+                "Failed to create temp file: {}",
+                temp_path.display()
+            ))?;
+        file.write_all(content)
+            .context("Failed to write compose temp file")?;
+        file.sync_all()
+            .context("Failed to sync compose temp file")?;
+        std::fs::rename(&temp_path, path).context(format!(
+            "Failed to atomically move compose into place: {}",
+            path.display()
+        ))?;
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
+}
+
+/// Finalize the compose a deploy will run, and return the service key it
+/// resolves to.
+///
+/// The requested image is applied here — after every `config_files` and env
+/// write — to the compose as it exists at deploy time: a `config_files` entry
+/// targeting the compose file replaces the whole file after it is
+/// materialized, and a drift check would reject an earlier rewrite
+/// (PR #140 review). The returned service key resolves `app_code` the same
+/// way (unique `my.stacker.service` label match, then exact key) and is what
+/// `compose pull/up` must address.
+#[cfg(feature = "docker")]
+async fn finalize_deploy_compose(
     compose_file: &str,
     app_code: &str,
-    image: &str,
-) -> Result<bool, String> {
-    let existing = match tokio::fs::read_to_string(compose_file).await {
-        Ok(existing) => existing,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(format!(
-                "Failed to read compose file {}: {}",
-                compose_file, e
-            ))
-        }
-    };
-    let updated = override_service_image_in_compose(&existing, app_code, image).ok_or_else(|| {
-        format!(
-            "Requested image '{}' could not be applied to service '{}' in {} (unknown service or unparsable compose)",
-            image, app_code, compose_file
+    image: Option<&str>,
+) -> Result<String, CommandError> {
+    let existing = tokio::fs::read_to_string(compose_file).await.map_err(|e| {
+        make_error(
+            "image_override_failed",
+            format!("Failed to read compose file {}: {}", compose_file, e),
+            None,
         )
     })?;
-    if updated == existing {
-        return Ok(true);
+    let service_key = resolve_compose_service_key(&existing, app_code)
+        .unwrap_or_else(|| app_code.trim().to_string());
+
+    if let Some(image) = image.map(str::trim).filter(|value| !value.is_empty()) {
+        let updated = override_service_image_in_compose(&existing, app_code, image).ok_or_else(
+            || {
+                make_error(
+                    "image_override_failed",
+                    format!(
+                        "Requested image '{}' could not be applied to service '{}' in {} (unknown service or unparsable compose)",
+                        image, app_code, compose_file
+                    ),
+                    None,
+                )
+            },
+        )?;
+        if updated != existing {
+            replace_file_atomically(compose_file, updated.as_bytes())
+                .await
+                .map_err(|e| {
+                    make_error(
+                        "image_override_failed",
+                        format!("Failed to write compose file with image override: {}", e),
+                        None,
+                    )
+                })?;
+        }
     }
-    backup_existing_file_if_changed(std::path::Path::new(compose_file), updated.as_bytes())
-        .map_err(|e| {
-            format!(
-                "Failed to back up compose file before image override: {}",
-                e
-            )
-        })?;
-    tokio::fs::write(compose_file, &updated)
-        .await
-        .map_err(|e| format!("Failed to write compose file with image override: {}", e))?;
-    Ok(true)
+
+    Ok(service_key)
 }
 
 #[derive(Debug, Clone)]
@@ -1710,13 +1820,16 @@ pub struct DeployAppCommand {
     compose_content: Option<String>,
     /// Optional: specific image to use (overrides compose file)
     ///
-    /// Rewrites `image:` of the `app_code` service in the compose the deploy
-    /// runs — inside `compose_content` when provided, otherwise in the compose
-    /// file at the resolved `compose_file` — before `docker compose pull/up`.
-    /// The override applies to that service only and wins over the compose's
-    /// own `image:`; blank values are ignored. When it cannot be applied
-    /// (unknown service or unparsable compose) the deploy fails with
-    /// `image_override_failed` instead of silently running the compose's image.
+    /// Rewrites `image:` of the service `app_code` resolves to — a unique
+    /// `my.stacker.service` label match, then the exact service key — in the
+    /// compose the deploy runs. Applied at finalize time, after every
+    /// `config_files`/env write and right before `docker compose pull/up`, so
+    /// it wins over the compose's own `image:` regardless of what supplied the
+    /// file (a `config_files` entry may replace the compose after it is
+    /// materialized). Only that service is touched; blank values are ignored.
+    /// When it cannot be applied (unknown service or unparsable compose) the
+    /// deploy fails with `image_override_failed` instead of silently running
+    /// the compose's image.
     #[serde(default)]
     image: Option<String>,
     /// Optional: environment variables to set
@@ -6696,14 +6809,13 @@ fn prune_sibling_backups(path: &std::path::Path, keep: usize) -> Result<()> {
 /// Materialize the compose file a deploy will run.
 ///
 /// The command payload's `compose_content` wins over the compose already at
-/// `compose_file`. The compose is what `docker compose pull/up` actually run,
-/// so the command's overrides are applied to whichever compose is used before
-/// it is deployed: Kata runtime injection (when requested and available) and
-/// the `image` override. `image` rewrites only the `app_code` service's
-/// `image:` — blank values are ignored — and fails the deploy with
-/// `image_override_failed` when it cannot be applied, so a requested image is
-/// never silently ignored in favour of the compose's own. Non-fatal notes are
-/// pushed to `errors`; failures that must stop the deploy are returned as `Err`.
+/// `compose_file`; the command's Kata runtime override (when requested and
+/// available) is applied to whichever compose is used before it is written.
+/// The requested `image` is deliberately NOT applied here — see
+/// [`finalize_deploy_compose`]: a `config_files` entry can replace the compose
+/// after this step, so the override is finalized later, right before pull/up.
+/// Non-fatal notes are pushed to `errors`; failures that must stop the deploy
+/// are returned as `Err`.
 #[cfg(feature = "docker")]
 async fn materialize_deploy_compose(
     data: &DeployAppCommand,
@@ -6711,12 +6823,6 @@ async fn materialize_deploy_compose(
     compose_file: &str,
     errors: &mut Vec<CommandError>,
 ) -> Result<(), CommandError> {
-    let image = data
-        .image
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
     // If compose_content is provided, write it to disk (for new deployments)
     if let Some(compose_content) = &data.compose_content {
         tracing::info!(
@@ -6752,25 +6858,6 @@ async fn materialize_deploy_compose(
             }
         } else {
             compose_content.clone()
-        };
-
-        // `docker compose pull/up` use the compose's own `image:`, so the
-        // requested image has to land in the `app_code` service's compose entry
-        // before the payload is written to disk.
-        let final_compose = match image {
-            Some(image) => {
-                match override_service_image_in_compose(&final_compose, &data.app_code, image) {
-                    Some(updated) => updated,
-                    None => {
-                        let message = format!(
-                            "Requested image '{}' could not be applied to service '{}' in the compose payload (unknown service or unparsable compose)",
-                            image, data.app_code
-                        );
-                        return Err(make_error("image_override_failed", message, None));
-                    }
-                }
-            }
-            None => final_compose,
         };
 
         // Create the directory if it doesn't exist
@@ -6809,22 +6896,6 @@ async fn materialize_deploy_compose(
             "docker-compose.yml written successfully"
         );
         return Ok(());
-    }
-
-    // No compose content in the payload: the requested image has to land in the
-    // compose already on disk — that is what `docker compose` would run.
-    if let Some(image) = image {
-        match override_service_image_in_compose_file(compose_file, &data.app_code, image).await {
-            Ok(true) => tracing::info!(
-                compose_file = %compose_file,
-                service = %data.app_code,
-                image = %image,
-                "Applied image override to existing compose file"
-            ),
-            // No compose on disk yet — the deploy's existence check reports it.
-            Ok(false) => {}
-            Err(message) => return Err(make_error("image_override_failed", message, None)),
-        }
     }
 
     if let Some(runtime) = &data.runtime {
@@ -7105,6 +7176,26 @@ async fn handle_deploy_app(
         return Ok(result);
     }
 
+    // Finalize the compose before deploying: apply the requested image to the
+    // final file — after every config/env write, so a `config_files` entry
+    // targeting the compose cannot replace the override and drift checks see
+    // the original file — and resolve the service key the deploy addresses
+    // (PR #140 review).
+    let image = data
+        .image
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let service_key = match finalize_deploy_compose(&compose_file, &data.app_code, image).await {
+        Ok(service_key) => service_key,
+        Err(error) => {
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
     // Detect which compose variant is available (docker compose or docker-compose)
     let compose_variant = match detect_compose_variant().await {
         Some(variant) => {
@@ -7156,7 +7247,7 @@ async fn handle_deploy_app(
         let pull_result = pull_cmd.arg("-f").arg(&compose_file);
         let pull_result = pull_result
             .arg("pull")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -7199,7 +7290,7 @@ async fn handle_deploy_app(
             .arg("-f")
             .arg(&compose_file)
             .arg("stop")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -7213,7 +7304,7 @@ async fn handle_deploy_app(
             .arg(&compose_file)
             .arg("rm")
             .arg("-f")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -7236,7 +7327,7 @@ async fn handle_deploy_app(
         .arg(&compose_file)
         .arg("up")
         .arg("-d")
-        .args(compose_target_service(&data.app_code))
+        .args(compose_target_service(&service_key))
         .current_dir(&compose_dir);
 
     // Add environment variables if provided
@@ -11423,10 +11514,13 @@ services:
 /// written and never read `image`, so `docker compose pull/up` ran the
 /// compose's own image while the command reported `status: "deployed"`.
 ///
-/// Precedence when materializing the compose a deploy runs:
+/// Precedence and ordering in the deploy pipeline:
 /// - payload `compose_content` wins over the compose file already on disk;
-/// - `image` wins over the `image:` of the `app_code` service in whichever
-///   compose is used, and touches that service only;
+/// - the requested `image` is applied at finalize time — after every
+///   `config_files`/env write — to the compose as it exists at deploy time,
+///   wins over the `image:` of the service `app_code` resolves to (unique
+///   `my.stacker.service` label match, then exact service key), and touches
+///   that service only;
 /// - a blank `image` is ignored.
 #[cfg(all(test, feature = "docker"))]
 mod deploy_image_override_tests {
@@ -11461,6 +11555,16 @@ volumes:
         materialize_deploy_compose(data, &compose_dir, &compose_file, &mut Vec::new()).await
     }
 
+    /// The deploy's finalize step — handler order: after every config/env
+    /// write, right before `compose pull/up`.
+    async fn finalize(
+        compose_dir: &std::path::Path,
+        data: &DeployAppCommand,
+    ) -> Result<String, CommandError> {
+        let compose_file = format!("{}/docker-compose.yml", compose_dir.to_string_lossy());
+        finalize_deploy_compose(&compose_file, &data.app_code, data.image.as_deref()).await
+    }
+
     fn materialized_yaml(dir: &std::path::Path) -> serde_yaml::Value {
         let written = std::fs::read_to_string(dir.join("docker-compose.yml"))
             .expect("compose should be written");
@@ -11491,6 +11595,9 @@ volumes:
         materialize(dir.path(), &data)
             .await
             .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("compose should finalize");
 
         let doc = materialized_yaml(dir.path());
         assert_eq!(
@@ -11536,7 +11643,7 @@ volumes:
             "image": "n8nio/n8n:2.47.7",
         }));
 
-        materialize(dir.path(), &data)
+        finalize(dir.path(), &data)
             .await
             .expect("on-disk compose should be rewritten");
 
@@ -11559,7 +11666,10 @@ volumes:
             "image": "n8nio/n8n:2.47.7",
         }));
 
-        let error = materialize(dir.path(), &data).await.expect_err(
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        let error = finalize(dir.path(), &data).await.expect_err(
             "an unappliable override must fail instead of deploying the compose's image",
         );
         assert_eq!(error.code, "image_override_failed");
@@ -11577,6 +11687,9 @@ volumes:
         materialize(dir.path(), &data)
             .await
             .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize must not require an override");
 
         let written = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
         assert_eq!(
@@ -11598,11 +11711,181 @@ volumes:
         materialize(dir.path(), &data)
             .await
             .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("a blank image must not fail finalize");
 
         let written = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
         assert_eq!(
             written, N8N_COMPOSE,
             "a blank image must not rewrite the compose"
+        );
+    }
+
+    /// The logical app code is not always the Compose service key: the CLI
+    /// generator names a service `proxy-manager` but labels it
+    /// `my.stacker.service=nginx_proxy_manager` (PR #140 review). The override
+    /// must resolve the unique Stacker-label match — exact-key fallback —
+    /// instead of rejecting the valid service with `image_override_failed`.
+    #[test]
+    fn image_override_resolves_service_by_stacker_label() {
+        let compose = r#"services:
+  proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    labels:
+      my.stacker.service: nginx_proxy_manager
+  app:
+    image: example/app:1
+"#;
+
+        let rewritten = override_service_image_in_compose(
+            compose,
+            "nginx_proxy_manager",
+            "jc21/nginx-proxy-manager:5.2",
+        )
+        .expect("the Stacker-labelled service must be resolvable");
+
+        let doc: serde_yaml::Value = serde_yaml::from_str(&rewritten).unwrap();
+        let services = doc.get("services").unwrap();
+        assert_eq!(
+            services
+                .get("proxy-manager")
+                .unwrap()
+                .get("image")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "jc21/nginx-proxy-manager:5.2"
+        );
+        assert_eq!(
+            services
+                .get("app")
+                .unwrap()
+                .get("image")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "example/app:1"
+        );
+    }
+
+    /// The exact service key is the fallback for stacks without the label, and
+    /// unknown app codes resolve to nothing (PR #140 review).
+    #[test]
+    fn service_key_resolution_falls_back_to_the_exact_key() {
+        assert_eq!(
+            resolve_compose_service_key(N8N_COMPOSE, "n8n"),
+            Some("n8n".to_string())
+        );
+        assert_eq!(resolve_compose_service_key(N8N_COMPOSE, "gateway"), None);
+        assert_eq!(resolve_compose_service_key(N8N_COMPOSE, "  "), None);
+    }
+
+    /// A unique Stacker-label match is authoritative — the label is the
+    /// logical identity the generator writes, the key is incidental — and
+    /// ambiguous labels fall back to the exact key (PR #140 review).
+    #[test]
+    fn service_key_resolution_prefers_a_unique_stacker_label() {
+        let dual = r#"services:
+  proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    labels:
+      my.stacker.service: nginx_proxy_manager
+  nginx_proxy_manager:
+    image: example/other:1
+"#;
+        assert_eq!(
+            resolve_compose_service_key(dual, "nginx_proxy_manager"),
+            Some("proxy-manager".to_string())
+        );
+
+        let ambiguous = r#"services:
+  one:
+    image: example/one:1
+    labels:
+      my.stacker.service: web
+  two:
+    image: example/two:1
+    labels:
+      my.stacker.service: web
+  web:
+    image: example/web:1
+"#;
+        assert_eq!(
+            resolve_compose_service_key(ambiguous, "web"),
+            Some("web".to_string())
+        );
+    }
+
+    /// The finalize write is atomic (PR #140 review): the live compose is
+    /// backed up, written through a sibling temp file, and renamed over the
+    /// original — no truncated live file and no stray temp on disk.
+    #[tokio::test]
+    async fn finalize_replaces_the_compose_atomically_with_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize should succeed");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(service_image(&doc, "n8n"), "n8nio/n8n:2.47.7");
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("docker-compose.yml.stacker-bak-")),
+            "the pre-override compose must be backed up: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(".tmp.")),
+            "no temp files may be left behind: {names:?}"
+        );
+    }
+
+    /// `config_files` entries are written after the compose is materialized,
+    /// and one targeting `docker-compose.yml` replaces the whole file. The
+    /// requested image must be applied to the compose as it exists when the
+    /// deploy is finalized — after every config/env write — or the override is
+    /// lost (and a drift check can reject the earlier rewrite) (PR #140
+    /// review).
+    #[tokio::test]
+    async fn image_override_survives_a_config_file_replacing_the_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+
+        // A config_files entry targeting docker-compose.yml lands after
+        // materialization and replaces the whole file.
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize must apply the override to the replaced compose");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(
+            service_image(&doc, "n8n"),
+            "n8nio/n8n:2.47.7",
+            "the requested image must survive a config file replacing the compose"
         );
     }
 }

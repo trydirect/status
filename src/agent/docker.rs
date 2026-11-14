@@ -47,7 +47,11 @@ pub struct ContainerInfo {
     pub ports: Vec<PortInfo>,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub image: String,
-    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    /// Internal only: needed for identity resolution and app matching, but
+    /// Docker labels can carry credentials and deployment paths, and this
+    /// struct is serialized into the unauthenticated API-mode response
+    /// (PR #140 review). Never serialize them.
+    #[serde(skip_serializing)]
     pub labels: HashMap<String, String>,
 }
 
@@ -155,7 +159,7 @@ fn name_matches(container_name: &str, app_code: &str) -> bool {
 /// because it carries the app code the control plane resolves by and survives
 /// compose service renames (the generated main service is named `app`, but its
 /// `my.stacker.service` label is the project code).
-const STACKER_SERVICE_LABEL: &str = "my.stacker.service";
+pub(crate) const STACKER_SERVICE_LABEL: &str = "my.stacker.service";
 const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 
 /// Marks who owns a container: `project` for the user's own, `platform` for one
@@ -316,21 +320,25 @@ pub fn app_code_for_container(labels: &HashMap<String, String>, container_name: 
 /// The container `requested` resolves to within a candidate listing, as
 /// `(container name, matched service label)` when a label identified it.
 ///
-/// Priority: a service-label match is authoritative (`my.stacker.service`
-/// first, Compose's service name second — [`label_matches_app`]), then an
-/// exact container-name match, then the anchored fuzzy name patterns. A
-/// single first-hit pass over the listing lets a fuzzy pattern shadow what
-/// the caller named exactly: `project-app-1-1` matches the `app-DIGIT`
-/// pattern for `project-app-1`, so re-resolving an already-resolved name
-/// could land on the wrong container (PR #140 review).
+/// Priority: `my.stacker.service` is authoritative across the whole listing,
+/// then Compose's `com.docker.compose.service`, then an exact container-name
+/// match, then the anchored fuzzy name patterns. Scanning per candidate in
+/// listing order lets a weaker match shadow the documented priority: a
+/// Compose-label hit on an earlier container beat a Stacker-label hit on a
+/// later one, and a fuzzy hit (`project-app-1-1` matches the `app-DIGIT`
+/// pattern for `project-app-1`) could select the wrong container when an
+/// already-resolved name was looked up again (PR #140 review).
 fn resolve_in_listing<'a>(
     candidates: &'a [(String, Option<&'a HashMap<String, String>>)],
     requested: &str,
 ) -> Option<(&'a str, Option<&'static str>)> {
-    for (candidate_name, labels) in candidates {
-        if let Some(matched_label) = labels.and_then(|labels| label_matches_app(labels, requested))
-        {
-            return Some((candidate_name.as_str(), Some(matched_label)));
+    for matched_label in [STACKER_SERVICE_LABEL, COMPOSE_SERVICE_LABEL] {
+        for (candidate_name, labels) in candidates {
+            if let Some(hit) = labels.and_then(|labels| label_matches_app(labels, requested)) {
+                if hit == matched_label {
+                    return Some((candidate_name.as_str(), Some(hit)));
+                }
+            }
         }
     }
     for (candidate_name, _) in candidates {
@@ -1284,6 +1292,48 @@ mod tests {
 
         let bare = vec![("komodo".to_string(), None)];
         assert_eq!(resolve_in_listing(&bare, "komodo"), Some(("komodo", None)));
+    }
+
+    /// Label priority spans the whole listing, not just each candidate: a
+    /// `my.stacker.service` match on a later container beats a Compose-label
+    /// match on an earlier one (PR #140 review).
+    #[test]
+    fn resolve_in_listing_stacker_label_beats_earlier_compose_label() {
+        let compose = labels(&[("com.docker.compose.service", "web")]);
+        let stacker = labels(&[("my.stacker.service", "web")]);
+        let candidates = vec![
+            ("project-a-web-1".to_string(), Some(&compose)),
+            ("project-b-web-1".to_string(), Some(&stacker)),
+        ];
+        assert_eq!(
+            resolve_in_listing(&candidates, "web"),
+            Some(("project-b-web-1", Some(STACKER_SERVICE_LABEL)))
+        );
+    }
+
+    /// Docker labels can carry deployment paths and credentials, and the
+    /// struct is serialized into the local API root response, which in
+    /// API-only mode does not require a session (PR #140 review). Labels stay
+    /// available internally for identity resolution but must not serialize.
+    #[test]
+    fn container_info_serialization_omits_labels() {
+        let info = ContainerInfo {
+            name: "project-n8n-1".to_string(),
+            status: "running".to_string(),
+            logs: String::new(),
+            ports: vec![],
+            image: "n8nio/n8n:2.45.4".to_string(),
+            labels: labels(&[("my.stacker.service", "n8n"), ("auth.token", "secret")]),
+        };
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(
+            json.get("labels").is_none(),
+            "labels must not be serialized: {json}"
+        );
+        assert!(!json.to_string().contains("secret"));
+        assert_eq!(json["name"], "project-n8n-1");
+        assert_eq!(json["image"], "n8nio/n8n:2.45.4");
     }
 
     #[test]
