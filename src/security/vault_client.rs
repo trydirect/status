@@ -49,7 +49,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use reqwest::{Client, Identity, StatusCode};
+use reqwest::{Certificate, Client, ClientBuilder, Identity, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -374,13 +374,8 @@ struct ReqwestVaultTransport;
 
 impl ReqwestVaultTransport {
     fn build_client() -> Result<Client> {
-        let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
-
-        let identity = load_mtls_identity()
-            .map_err(|error| anyhow::anyhow!("Vault mTLS client identity unusable: {error}"))?;
-        if let Some(identity) = identity {
-            builder = builder.identity(identity);
-        }
+        let builder =
+            apply_vault_tls(Client::builder().timeout(std::time::Duration::from_secs(10)))?;
 
         builder.build().context("creating HTTP client")
     }
@@ -483,6 +478,94 @@ fn load_mtls_identity() -> Result<Option<Identity>, String> {
     }
 }
 
+/// Where `setup_mtls.yml` delivers the CA that signs Vault's own certificate.
+///
+/// Used when no CA is configured explicitly, so a server provisioned before
+/// this code existed is fixed without touching its environment.
+const DEFAULT_VAULT_CA_PATH: &str = "/etc/vault/certs/ca.crt";
+
+/// Load the certificate authority that signs Vault's certificate.
+///
+/// Vault is served from an internal CA, so the public root store cannot
+/// verify it: with the client identity loaded but no root added, every read
+/// failed in the TLS handshake and surfaced as a context-free
+/// `vault_unavailable` (stacker BUGS.md #38). The client certificate alone was
+/// not enough - the same request succeeds with `--cacert` and fails without
+/// it, with the identity present either way.
+///
+/// Sources, in order: `VAULT_CACERT` (inline PEM), `VAULT_CACERT_PATH`, then
+/// [`DEFAULT_VAULT_CA_PATH`] when that file exists. An empty vector means
+/// nothing is configured and the default file is absent, which is correct for
+/// a Vault behind a publicly trusted certificate. A CA that IS configured but
+/// unreadable or unparsable fails loudly, for the same reason
+/// `load_mtls_identity` fails: silent degradation is what hid the bug.
+fn load_vault_root_certificates() -> Result<Vec<Certificate>, String> {
+    let pem = match std::env::var("VAULT_CACERT") {
+        Ok(pem) => Some(pem),
+        Err(_) => match std::env::var("VAULT_CACERT_PATH") {
+            Ok(path) => Some(std::fs::read_to_string(&path).map_err(|error| {
+                format!("VAULT_CACERT_PATH '{}' is unreadable: {}", path, error)
+            })?),
+            Err(_) => match std::fs::read_to_string(DEFAULT_VAULT_CA_PATH) {
+                Ok(pem) => Some(pem),
+                Err(_) => None,
+            },
+        },
+    };
+
+    let pem = match pem {
+        Some(pem) => pem,
+        None => return Ok(Vec::new()),
+    };
+
+    // A CA file may hold a chain. `Certificate::from_pem` takes one
+    // certificate, so split on the end marker and add each.
+    const END: &str = "-----END CERTIFICATE-----";
+    let mut certificates = Vec::new();
+    for (index, chunk) in pem.split_inclusive(END).enumerate() {
+        if !chunk.contains("-----BEGIN CERTIFICATE-----") {
+            continue;
+        }
+        let certificate = Certificate::from_pem(chunk.trim().as_bytes()).map_err(|error| {
+            format!(
+                "Vault CA certificate #{} could not be parsed: {}",
+                index + 1,
+                error
+            )
+        })?;
+        certificates.push(certificate);
+    }
+
+    if certificates.is_empty() {
+        return Err("Vault CA source holds no PEM certificate".to_string());
+    }
+    debug!(
+        "loaded {} root certificate(s) for Vault connections",
+        certificates.len()
+    );
+    Ok(certificates)
+}
+
+/// Apply the mTLS identity and the Vault CA to a client builder.
+///
+/// Both client construction sites need the same two steps; keeping them in one
+/// place is what stops the next one from being added with only half of them.
+fn apply_vault_tls(mut builder: ClientBuilder) -> Result<ClientBuilder> {
+    let identity = load_mtls_identity()
+        .map_err(|error| anyhow::anyhow!("Vault mTLS client identity unusable: {error}"))?;
+    if let Some(identity) = identity {
+        builder = builder.identity(identity);
+    }
+
+    let roots = load_vault_root_certificates()
+        .map_err(|error| anyhow::anyhow!("Vault CA certificate unusable: {error}"))?;
+    for certificate in roots {
+        builder = builder.add_root_certificate(certificate);
+    }
+
+    Ok(builder)
+}
+
 // =============================================================================
 // Vault Client Implementation
 // =============================================================================
@@ -569,14 +652,9 @@ impl VaultClient {
                 // - 10 second timeout prevents resource exhaustion from hanging connections
                 // - TLS certificate validation enabled by default (reqwest behavior)
                 // - mTLS client identity loaded from VAULT_CLIENT_CERT / VAULT_CLIENT_KEY
-                let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
-
-                let identity = load_mtls_identity().map_err(|error| {
-                    anyhow::anyhow!("Vault mTLS client identity unusable: {error}")
-                })?;
-                if let Some(identity) = identity {
-                    builder = builder.identity(identity);
-                }
+                // - internal CA added from VAULT_CACERT[_PATH] or the path the role writes
+                let builder =
+                    apply_vault_tls(Client::builder().timeout(std::time::Duration::from_secs(10)))?;
 
                 let http_client = builder.build().context("creating HTTP client")?;
 
@@ -1491,6 +1569,119 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A throwaway self-signed certificate. Only its shape matters: these
+    /// tests check that a configured CA is parsed and that a broken one is
+    /// reported, never that it validates anything.
+    const FIXTURE_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDMjCCAhqgAwIBAgIUOMl33lE2lEtAlMPNToppTF8AfXwwDQYJKoZIhvcNAQEL\nBQAwOTELMAkGA1UEBhMCTUQxEDAOBgNVBAoMB0ZpeHR1cmUxGDAWBgNVBAMMD0Zp\neHR1cmUgVGVzdCBDQTAeFw0yNjExMTUxMjExNDFaFw00NjExMTAxMjExNDFaMDkx\nCzAJBgNVBAYTAk1EMRAwDgYDVQQKDAdGaXh0dXJlMRgwFgYDVQQDDA9GaXh0dXJl\nIFRlc3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCRxqTMspKQ\nTZHqR//rg8aI6n+75x2f3GP70Mye9n1K7rJzXmnx776m4xQenZq9gsRX7zZXir32\nDErkMeJHHlvcgKS55aPJFwC4qmmt2X6ukK6GOc9kefaOSkwjWLKhsw4XyP8mWvAZ\niiTKiTUqWJgjh5OkU32l7apUOz5SDD1dTj7V4S/9LhpyEhN6QTDki1scdVeeramR\n/+4rQxeT/yJlnZ4RRLp8+6Jbnd230BCO9casPTgh1qzg/jnOzkSUzfDYSXA1rnOn\nV+hrPM9Yei6gyKN38WU+WvS7Wkh2Ee5+e0yNghYL/SGQIvhqjEAlsCSwmVBp22k1\nUbsxED0dH/1nAgMBAAGjMjAwMB0GA1UdDgQWBBTOrIsswd4obqK2Yr7twgg3S0VK\nTzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQASwOj3E+o0b8yG\nBJkBu/o9GeBX1/rrrdVthcpkFcqMNmcwPhG+GzVw3mj+Y6ASIr6mIZz9ZdpAMtXp\n+n8vw3cK5mR7Cuc4i1lt5rX7s8oVUD3Ge83xM9W+HA1DHES22UXQPkpX+VfgURHh\ngRAJ+9ZrNeofjKH75ZN4DEyWYLCc5boE6JyZtMjy5UF5knREeIR1b8Lscs2JfXcn\nNu7vXdBSsKYy/k9vT7Jui9fT5qdIS9BjddHtb6CHsbTy3ykWoXulZI1L3VyndvQM\nXANBqF7y1RvSkWFyK0oSfOJ4yQwu2OxaGvPYcc5PLZKZnonqce1egBW5nd1gjnbV\nTbwVJlKp\n-----END CERTIFICATE-----";
+
+    fn clear_vault_ca_env() {
+        std::env::remove_var("VAULT_CACERT");
+        std::env::remove_var("VAULT_CACERT_PATH");
+    }
+
+    #[test]
+    fn an_inline_vault_ca_is_loaded() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT", FIXTURE_CA_PEM);
+
+        let roots = load_vault_root_certificates().expect("inline CA must parse");
+        assert_eq!(roots.len(), 1);
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn a_ca_bundle_contributes_every_certificate() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        let bundle = format!("{}\n{}\n", FIXTURE_CA_PEM, FIXTURE_CA_PEM);
+        std::env::set_var("VAULT_CACERT", bundle);
+
+        let roots = load_vault_root_certificates().expect("bundle must parse");
+        assert_eq!(
+            roots.len(),
+            2,
+            "a chain must not be truncated to its first certificate"
+        );
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn a_ca_path_is_read_from_disk() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        let path = std::env::temp_dir().join("vault_ca_fixture_from_path.crt");
+        std::fs::write(&path, FIXTURE_CA_PEM).expect("write fixture");
+        std::env::set_var("VAULT_CACERT_PATH", &path);
+
+        let roots = load_vault_root_certificates().expect("CA from path must parse");
+        assert_eq!(roots.len(), 1);
+
+        clear_vault_ca_env();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_configured_but_unreadable_ca_path_fails_loudly() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT_PATH", "/nonexistent/vault-ca.crt");
+
+        let error = load_vault_root_certificates().expect_err("a missing CA file must fail");
+        assert!(error.contains("VAULT_CACERT_PATH"), "{error}");
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn a_source_that_holds_no_certificate_fails() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT", "this is not a certificate");
+
+        let error = load_vault_root_certificates().expect_err("a CA without PEM must fail");
+        assert!(error.contains("no PEM certificate"), "{error}");
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn nothing_configured_is_not_an_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+
+        // On a server the role has provisioned, the default path exists and is
+        // used; everywhere else the absence of a CA is correct and silent.
+        if std::path::Path::new(DEFAULT_VAULT_CA_PATH).exists() {
+            let roots = load_vault_root_certificates().expect("the delivered CA must parse");
+            assert!(
+                !roots.is_empty(),
+                "the default CA path exists but produced no root"
+            );
+        } else {
+            let roots = load_vault_root_certificates().expect("no CA configured is not an error");
+            assert!(roots.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_client_builder_applies_the_ca() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT", FIXTURE_CA_PEM);
+
+        // Both client sites go through apply_vault_tls; if it refused the CA
+        // the build would fail here rather than at the first Vault read.
+        let builder = apply_vault_tls(Client::builder()).expect("TLS setup must succeed");
+        builder
+            .build()
+            .expect("client must build with the CA added");
+
+        clear_vault_ca_env();
+    }
 
     #[derive(Debug)]
     struct StubTransport {
