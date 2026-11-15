@@ -506,10 +506,7 @@ fn load_vault_root_certificates() -> Result<Vec<Certificate>, String> {
             Ok(path) => Some(std::fs::read_to_string(&path).map_err(|error| {
                 format!("VAULT_CACERT_PATH '{}' is unreadable: {}", path, error)
             })?),
-            Err(_) => match std::fs::read_to_string(DEFAULT_VAULT_CA_PATH) {
-                Ok(pem) => Some(pem),
-                Err(_) => None,
-            },
+            Err(_) => std::fs::read_to_string(DEFAULT_VAULT_CA_PATH).ok(),
         },
     };
 
