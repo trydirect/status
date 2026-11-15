@@ -547,6 +547,18 @@ fn load_vault_root_certificates() -> Result<Vec<Certificate>, String> {
 ///
 /// Both client construction sites need the same two steps; keeping them in one
 /// place is what stops the next one from being added with only half of them.
+/// Whether the public root store should stay trusted for Vault connections.
+///
+/// Once a private CA is configured it is the only issuer that can legitimately
+/// have signed the store's certificate, so keeping the ~150 public roots as
+/// well only widens the attack surface: a certificate mis-issued by any
+/// public CA for the store's hostname would be accepted. With no private CA
+/// configured the public store is all there is, and removing it would refuse
+/// every connection.
+fn trust_public_roots(private_root_count: usize) -> bool {
+    private_root_count == 0
+}
+
 fn apply_vault_tls(mut builder: ClientBuilder) -> Result<ClientBuilder> {
     let identity = load_mtls_identity()
         .map_err(|error| anyhow::anyhow!("Vault mTLS client identity unusable: {error}"))?;
@@ -556,8 +568,13 @@ fn apply_vault_tls(mut builder: ClientBuilder) -> Result<ClientBuilder> {
 
     let roots = load_vault_root_certificates()
         .map_err(|error| anyhow::anyhow!("Vault CA certificate unusable: {error}"))?;
+    let private_root_count = roots.len();
     for certificate in roots {
         builder = builder.add_root_certificate(certificate);
+    }
+    if !trust_public_roots(private_root_count) {
+        builder = builder.tls_built_in_root_certs(false);
+        debug!("Vault connections trust the configured CA only");
     }
 
     Ok(builder)
@@ -1575,6 +1592,32 @@ mod tests {
     fn clear_vault_ca_env() {
         std::env::remove_var("VAULT_CACERT");
         std::env::remove_var("VAULT_CACERT_PATH");
+    }
+
+    #[test]
+    fn the_public_root_store_is_dropped_once_a_private_ca_is_configured() {
+        assert!(!trust_public_roots(1));
+        assert!(!trust_public_roots(3));
+    }
+
+    #[test]
+    fn the_public_root_store_is_kept_when_no_private_ca_is_configured() {
+        // A store behind a publicly trusted certificate must keep working.
+        assert!(trust_public_roots(0));
+    }
+
+    #[test]
+    fn a_client_still_builds_with_only_the_private_ca_trusted() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT", FIXTURE_CA_PEM);
+
+        let builder = apply_vault_tls(Client::builder()).expect("TLS setup must succeed");
+        builder
+            .build()
+            .expect("client must build with the public roots disabled");
+
+        clear_vault_ca_env();
     }
 
     #[test]
