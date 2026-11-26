@@ -49,7 +49,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use reqwest::{Client, Identity, StatusCode};
+use reqwest::{Certificate, Client, ClientBuilder, Identity, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -167,8 +167,8 @@ pub enum NpmCredentialError {
     MissingSecret { path: String },
     #[error("Vault secret at {path} is invalid: {reason}")]
     InvalidPayload { path: String, reason: String },
-    #[error("Vault is unavailable")]
-    VaultUnavailable,
+    #[error("Vault is unavailable: {reason}")]
+    VaultUnavailable { reason: String },
     #[error("Vault authentication was revoked")]
     AuthRevoked,
     #[error("This agent is not the proxy owner")]
@@ -192,7 +192,7 @@ impl NpmCredentialError {
         match self {
             Self::MissingSecret { .. } => "npm_credentials_missing",
             Self::InvalidPayload { .. } => "npm_credentials_invalid",
-            Self::VaultUnavailable => "vault_unavailable",
+            Self::VaultUnavailable { .. } => "vault_unavailable",
             Self::AuthRevoked => "vault_auth_revoked",
             Self::NotProxyOwner => "not_proxy_owner",
             Self::MissingVaultConfiguration => "vault_not_configured",
@@ -212,8 +212,11 @@ impl NpmCredentialError {
             Self::InvalidPayload { path, .. } => {
                 format!("NPM credentials in Vault are invalid at {}", path)
             }
-            Self::VaultUnavailable => {
-                "Vault is unavailable while resolving NPM credentials".to_string()
+            Self::VaultUnavailable { reason } => {
+                format!(
+                    "Vault is unavailable while resolving NPM credentials: {}",
+                    reason
+                )
             }
             Self::AuthRevoked => {
                 "Vault token is no longer authorized to read NPM credentials".to_string()
@@ -371,11 +374,8 @@ struct ReqwestVaultTransport;
 
 impl ReqwestVaultTransport {
     fn build_client() -> Result<Client> {
-        let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
-
-        if let Some(identity) = load_mtls_identity() {
-            builder = builder.identity(identity);
-        }
+        let builder =
+            apply_vault_tls(Client::builder().timeout(std::time::Duration::from_secs(10)))?;
 
         builder.build().context("creating HTTP client")
     }
@@ -416,35 +416,168 @@ impl VaultTransport for ReqwestVaultTransport {
     }
 }
 
+/// Vault endpoint for error messages: scheme + authority only, never the
+/// path (which carries the secret path and server id).
+fn sanitized_endpoint(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split('/').next().unwrap_or(rest);
+            format!("{}://{}", scheme, authority)
+        }
+        None => url.split('/').next().unwrap_or(url).to_string(),
+    }
+}
+
 /// Load mTLS client certificate identity from environment variables.
 ///
 /// Supports two modes:
 /// 1. Inline PEM via `VAULT_CLIENT_CERT` and `VAULT_CLIENT_KEY` env vars
 /// 2. File paths via `VAULT_CLIENT_CERT_PATH` and `VAULT_CLIENT_KEY_PATH` env vars
 ///
-/// Returns `None` if neither set (mTLS is optional — degradation path).
-fn load_mtls_identity() -> Option<Identity> {
-    let cert_pem = std::env::var("VAULT_CLIENT_CERT").ok().or_else(|| {
-        let path = std::env::var("VAULT_CLIENT_CERT_PATH").ok()?;
-        std::fs::read_to_string(path).ok()
-    })?;
+/// `Ok(None)` when nothing is configured (mTLS is optional — degradation
+/// path). When a certificate IS configured but cannot be read or parsed the
+/// call fails instead: a configured-but-unusable client cert is a
+/// misconfiguration, and degrading it to a plain TLS connection silently
+/// broke every Vault read (stacker BUGS.md #38 — remote proxy commands then
+/// died with a context-free vault_unavailable).
+fn load_mtls_identity() -> Result<Option<Identity>, String> {
+    let cert_pem = match std::env::var("VAULT_CLIENT_CERT") {
+        Ok(pem) => Some(pem),
+        Err(_) => match std::env::var("VAULT_CLIENT_CERT_PATH") {
+            Ok(path) => Some(std::fs::read_to_string(&path).map_err(|error| {
+                format!("VAULT_CLIENT_CERT_PATH '{}' is unreadable: {}", path, error)
+            })?),
+            Err(_) => None,
+        },
+    };
 
-    let key_pem = std::env::var("VAULT_CLIENT_KEY").ok().or_else(|| {
-        let path = std::env::var("VAULT_CLIENT_KEY_PATH").ok()?;
-        std::fs::read_to_string(path).ok()
-    })?;
+    let key_pem = match std::env::var("VAULT_CLIENT_KEY") {
+        Ok(pem) => Some(pem),
+        Err(_) => match std::env::var("VAULT_CLIENT_KEY_PATH") {
+            Ok(path) => Some(std::fs::read_to_string(&path).map_err(|error| {
+                format!("VAULT_CLIENT_KEY_PATH '{}' is unreadable: {}", path, error)
+            })?),
+            Err(_) => None,
+        },
+    };
 
-    let identity_pem = format!("{}\n{}", cert_pem, key_pem);
-    match Identity::from_pem(identity_pem.as_bytes()) {
-        Ok(identity) => {
+    match (cert_pem, key_pem) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(
+            "only one of the Vault mTLS certificate and key is configured (check \
+             VAULT_CLIENT_CERT[_PATH] / VAULT_CLIENT_KEY[_PATH])"
+                .to_string(),
+        ),
+        (Some(cert_pem), Some(key_pem)) => {
+            let identity_pem = format!("{}\n{}", cert_pem, key_pem);
+            let identity = Identity::from_pem(identity_pem.as_bytes())
+                .map_err(|error| format!("Vault mTLS identity could not be built: {}", error))?;
             debug!("mTLS client identity loaded for Vault connections");
-            Some(identity)
-        }
-        Err(e) => {
-            warn!("Failed to load mTLS client identity: {}", e);
-            None
+            Ok(Some(identity))
         }
     }
+}
+
+/// Where `setup_mtls.yml` delivers the CA that signs Vault's own certificate.
+///
+/// Used when no CA is configured explicitly, so a server provisioned before
+/// this code existed is fixed without touching its environment.
+const DEFAULT_VAULT_CA_PATH: &str = "/etc/vault/certs/ca.crt";
+
+/// Load the certificate authority that signs Vault's certificate.
+///
+/// Vault is served from an internal CA, so the public root store cannot
+/// verify it: with the client identity loaded but no root added, every read
+/// failed in the TLS handshake and surfaced as a context-free
+/// `vault_unavailable` (stacker BUGS.md #38). The client certificate alone was
+/// not enough - the same request succeeds with `--cacert` and fails without
+/// it, with the identity present either way.
+///
+/// Sources, in order: `VAULT_CACERT` (inline PEM), `VAULT_CACERT_PATH`, then
+/// [`DEFAULT_VAULT_CA_PATH`] when that file exists. An empty vector means
+/// nothing is configured and the default file is absent, which is correct for
+/// a Vault behind a publicly trusted certificate. A CA that IS configured but
+/// unreadable or unparsable fails loudly, for the same reason
+/// `load_mtls_identity` fails: silent degradation is what hid the bug.
+fn load_vault_root_certificates() -> Result<Vec<Certificate>, String> {
+    let pem = match std::env::var("VAULT_CACERT") {
+        Ok(pem) => Some(pem),
+        Err(_) => match std::env::var("VAULT_CACERT_PATH") {
+            Ok(path) => Some(std::fs::read_to_string(&path).map_err(|error| {
+                format!("VAULT_CACERT_PATH '{}' is unreadable: {}", path, error)
+            })?),
+            Err(_) => std::fs::read_to_string(DEFAULT_VAULT_CA_PATH).ok(),
+        },
+    };
+
+    let pem = match pem {
+        Some(pem) => pem,
+        None => return Ok(Vec::new()),
+    };
+
+    // A CA file may hold a chain. `Certificate::from_pem` takes one
+    // certificate, so split on the end marker and add each.
+    const END: &str = "-----END CERTIFICATE-----";
+    let mut certificates = Vec::new();
+    for (index, chunk) in pem.split_inclusive(END).enumerate() {
+        if !chunk.contains("-----BEGIN CERTIFICATE-----") {
+            continue;
+        }
+        let certificate = Certificate::from_pem(chunk.trim().as_bytes()).map_err(|error| {
+            format!(
+                "Vault CA certificate #{} could not be parsed: {}",
+                index + 1,
+                error
+            )
+        })?;
+        certificates.push(certificate);
+    }
+
+    if certificates.is_empty() {
+        return Err("Vault CA source holds no PEM certificate".to_string());
+    }
+    debug!(
+        "loaded {} root certificate(s) for Vault connections",
+        certificates.len()
+    );
+    Ok(certificates)
+}
+
+/// Apply the mTLS identity and the Vault CA to a client builder.
+///
+/// Both client construction sites need the same two steps; keeping them in one
+/// place is what stops the next one from being added with only half of them.
+/// Whether the public root store should stay trusted for Vault connections.
+///
+/// Once a private CA is configured it is the only issuer that can legitimately
+/// have signed the store's certificate, so keeping the ~150 public roots as
+/// well only widens the attack surface: a certificate mis-issued by any
+/// public CA for the store's hostname would be accepted. With no private CA
+/// configured the public store is all there is, and removing it would refuse
+/// every connection.
+fn trust_public_roots(private_root_count: usize) -> bool {
+    private_root_count == 0
+}
+
+fn apply_vault_tls(mut builder: ClientBuilder) -> Result<ClientBuilder> {
+    let identity = load_mtls_identity()
+        .map_err(|error| anyhow::anyhow!("Vault mTLS client identity unusable: {error}"))?;
+    if let Some(identity) = identity {
+        builder = builder.identity(identity);
+    }
+
+    let roots = load_vault_root_certificates()
+        .map_err(|error| anyhow::anyhow!("Vault CA certificate unusable: {error}"))?;
+    let private_root_count = roots.len();
+    for certificate in roots {
+        builder = builder.add_root_certificate(certificate);
+    }
+    if !trust_public_roots(private_root_count) {
+        builder = builder.tls_built_in_root_certs(false);
+        debug!("Vault connections trust the configured CA only");
+    }
+
+    Ok(builder)
 }
 
 // =============================================================================
@@ -533,11 +666,9 @@ impl VaultClient {
                 // - 10 second timeout prevents resource exhaustion from hanging connections
                 // - TLS certificate validation enabled by default (reqwest behavior)
                 // - mTLS client identity loaded from VAULT_CLIENT_CERT / VAULT_CLIENT_KEY
-                let mut builder = Client::builder().timeout(std::time::Duration::from_secs(10));
-
-                if let Some(identity) = load_mtls_identity() {
-                    builder = builder.identity(identity);
-                }
+                // - internal CA added from VAULT_CACERT[_PATH] or the path the role writes
+                let builder =
+                    apply_vault_tls(Client::builder().timeout(std::time::Duration::from_secs(10)))?;
 
                 let http_client = builder.build().context("creating HTTP client")?;
 
@@ -742,7 +873,13 @@ impl VaultClient {
                 .await
                 .map_err(|error| {
                     warn!(path = %path, error = %error, "Vault NPM credential lookup failed");
-                    NpmCredentialError::VaultUnavailable
+                    NpmCredentialError::VaultUnavailable {
+                        reason: format!(
+                            "request to {} failed: {}",
+                            sanitized_endpoint(&self.base_url),
+                            error
+                        ),
+                    }
                 })?;
 
             match response.status {
@@ -761,7 +898,13 @@ impl VaultClient {
                 }
                 status if !status.is_success() => {
                     warn!(path = %path, status = %status, "Vault returned an unexpected status");
-                    return Err(NpmCredentialError::VaultUnavailable);
+                    return Err(NpmCredentialError::VaultUnavailable {
+                        reason: format!(
+                            "{} returned HTTP {}",
+                            sanitized_endpoint(&self.base_url),
+                            status
+                        ),
+                    });
                 }
                 _ => {}
             }
@@ -1441,6 +1584,145 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// A throwaway self-signed certificate. Only its shape matters: these
+    /// tests check that a configured CA is parsed and that a broken one is
+    /// reported, never that it validates anything.
+    const FIXTURE_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDMjCCAhqgAwIBAgIUOMl33lE2lEtAlMPNToppTF8AfXwwDQYJKoZIhvcNAQEL\nBQAwOTELMAkGA1UEBhMCTUQxEDAOBgNVBAoMB0ZpeHR1cmUxGDAWBgNVBAMMD0Zp\neHR1cmUgVGVzdCBDQTAeFw0yNjExMTUxMjExNDFaFw00NjExMTAxMjExNDFaMDkx\nCzAJBgNVBAYTAk1EMRAwDgYDVQQKDAdGaXh0dXJlMRgwFgYDVQQDDA9GaXh0dXJl\nIFRlc3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCRxqTMspKQ\nTZHqR//rg8aI6n+75x2f3GP70Mye9n1K7rJzXmnx776m4xQenZq9gsRX7zZXir32\nDErkMeJHHlvcgKS55aPJFwC4qmmt2X6ukK6GOc9kefaOSkwjWLKhsw4XyP8mWvAZ\niiTKiTUqWJgjh5OkU32l7apUOz5SDD1dTj7V4S/9LhpyEhN6QTDki1scdVeeramR\n/+4rQxeT/yJlnZ4RRLp8+6Jbnd230BCO9casPTgh1qzg/jnOzkSUzfDYSXA1rnOn\nV+hrPM9Yei6gyKN38WU+WvS7Wkh2Ee5+e0yNghYL/SGQIvhqjEAlsCSwmVBp22k1\nUbsxED0dH/1nAgMBAAGjMjAwMB0GA1UdDgQWBBTOrIsswd4obqK2Yr7twgg3S0VK\nTzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQASwOj3E+o0b8yG\nBJkBu/o9GeBX1/rrrdVthcpkFcqMNmcwPhG+GzVw3mj+Y6ASIr6mIZz9ZdpAMtXp\n+n8vw3cK5mR7Cuc4i1lt5rX7s8oVUD3Ge83xM9W+HA1DHES22UXQPkpX+VfgURHh\ngRAJ+9ZrNeofjKH75ZN4DEyWYLCc5boE6JyZtMjy5UF5knREeIR1b8Lscs2JfXcn\nNu7vXdBSsKYy/k9vT7Jui9fT5qdIS9BjddHtb6CHsbTy3ykWoXulZI1L3VyndvQM\nXANBqF7y1RvSkWFyK0oSfOJ4yQwu2OxaGvPYcc5PLZKZnonqce1egBW5nd1gjnbV\nTbwVJlKp\n-----END CERTIFICATE-----";
+
+    fn clear_vault_ca_env() {
+        std::env::remove_var("VAULT_CACERT");
+        std::env::remove_var("VAULT_CACERT_PATH");
+    }
+
+    #[test]
+    fn the_public_root_store_is_dropped_once_a_private_ca_is_configured() {
+        assert!(!trust_public_roots(1));
+        assert!(!trust_public_roots(3));
+    }
+
+    #[test]
+    fn the_public_root_store_is_kept_when_no_private_ca_is_configured() {
+        // A store behind a publicly trusted certificate must keep working.
+        assert!(trust_public_roots(0));
+    }
+
+    #[test]
+    fn a_client_still_builds_with_only_the_private_ca_trusted() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT", FIXTURE_CA_PEM);
+
+        let builder = apply_vault_tls(Client::builder()).expect("TLS setup must succeed");
+        builder
+            .build()
+            .expect("client must build with the public roots disabled");
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn an_inline_vault_ca_is_loaded() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT", FIXTURE_CA_PEM);
+
+        let roots = load_vault_root_certificates().expect("inline CA must parse");
+        assert_eq!(roots.len(), 1);
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn a_ca_bundle_contributes_every_certificate() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        let bundle = format!("{}\n{}\n", FIXTURE_CA_PEM, FIXTURE_CA_PEM);
+        std::env::set_var("VAULT_CACERT", bundle);
+
+        let roots = load_vault_root_certificates().expect("bundle must parse");
+        assert_eq!(
+            roots.len(),
+            2,
+            "a chain must not be truncated to its first certificate"
+        );
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn a_ca_path_is_read_from_disk() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        let path = std::env::temp_dir().join("vault_ca_fixture_from_path.crt");
+        std::fs::write(&path, FIXTURE_CA_PEM).expect("write fixture");
+        std::env::set_var("VAULT_CACERT_PATH", &path);
+
+        let roots = load_vault_root_certificates().expect("CA from path must parse");
+        assert_eq!(roots.len(), 1);
+
+        clear_vault_ca_env();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_configured_but_unreadable_ca_path_fails_loudly() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT_PATH", "/nonexistent/vault-ca.crt");
+
+        let error = load_vault_root_certificates().expect_err("a missing CA file must fail");
+        assert!(error.contains("VAULT_CACERT_PATH"), "{error}");
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn a_source_that_holds_no_certificate_fails() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT", "this is not a certificate");
+
+        let error = load_vault_root_certificates().expect_err("a CA without PEM must fail");
+        assert!(error.contains("no PEM certificate"), "{error}");
+
+        clear_vault_ca_env();
+    }
+
+    #[test]
+    fn nothing_configured_is_not_an_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+
+        // On a server the role has provisioned, the default path exists and is
+        // used; everywhere else the absence of a CA is correct and silent.
+        if std::path::Path::new(DEFAULT_VAULT_CA_PATH).exists() {
+            let roots = load_vault_root_certificates().expect("the delivered CA must parse");
+            assert!(
+                !roots.is_empty(),
+                "the default CA path exists but produced no root"
+            );
+        } else {
+            let roots = load_vault_root_certificates().expect("no CA configured is not an error");
+            assert!(roots.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_client_builder_applies_the_ca() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_vault_ca_env();
+        std::env::set_var("VAULT_CACERT", FIXTURE_CA_PEM);
+
+        // Both client sites go through apply_vault_tls; if it refused the CA
+        // the build would fail here rather than at the first Vault read.
+        let builder = apply_vault_tls(Client::builder()).expect("TLS setup must succeed");
+        builder
+            .build()
+            .expect("client must build with the CA added");
+
+        clear_vault_ca_env();
+    }
+
     #[derive(Debug)]
     struct StubTransport {
         responses: Mutex<VecDeque<VaultHttpResponse>>,
@@ -1752,5 +2034,54 @@ mod tests {
             .expect_err("auth mode validation");
 
         assert!(matches!(error, NpmCredentialError::UnknownAuthMode { .. }));
+    }
+
+    // stacker BUGS.md #38: the failure must carry the endpoint and cause — a
+    // context-free "Vault is unavailable" left every remote proxy command
+    // undiagnosable.
+    #[test]
+    fn vault_unavailable_operator_message_carries_reason() {
+        let error = NpmCredentialError::VaultUnavailable {
+            reason: "https://vault.try.direct:8443 — connection refused".to_string(),
+        };
+        assert_eq!(error.code(), "vault_unavailable");
+        let message = error.operator_message();
+        assert!(
+            message.contains("https://vault.try.direct:8443"),
+            "{message}"
+        );
+        assert!(message.contains("connection refused"), "{message}");
+    }
+
+    #[test]
+    fn sanitized_endpoint_drops_path_and_query() {
+        assert_eq!(
+            sanitized_endpoint(
+                "https://vault.try.direct:8443/v1/secret/base/status_panel/hosts/9/npm_credentials"
+            ),
+            "https://vault.try.direct:8443"
+        );
+        assert_eq!(sanitized_endpoint("http://vault:8200"), "http://vault:8200");
+    }
+
+    // stacker BUGS.md #38: a configured-but-unusable client certificate is a
+    // misconfiguration — it must fail loudly instead of silently degrading to
+    // a TLS connection Vault refuses.
+    #[test]
+    fn load_mtls_identity_fails_loudly_when_configured_certificate_is_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("VAULT_CLIENT_CERT");
+        std::env::remove_var("VAULT_CLIENT_KEY");
+        std::env::set_var("VAULT_CLIENT_CERT_PATH", "/nonexistent/mtls-client.crt");
+        std::env::set_var("VAULT_CLIENT_KEY_PATH", "/nonexistent/mtls-client.key");
+
+        let error = load_mtls_identity().expect_err("missing cert files must fail");
+        assert!(error.contains("VAULT_CLIENT_CERT_PATH"), "{error}");
+
+        std::env::remove_var("VAULT_CLIENT_CERT_PATH");
+        std::env::remove_var("VAULT_CLIENT_KEY_PATH");
+        assert!(load_mtls_identity()
+            .expect("unconfigured mTLS degrades gracefully")
+            .is_none());
     }
 }

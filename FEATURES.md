@@ -1,0 +1,165 @@
+# FEATURES
+
+## Feature: native `backup` agent command (WS-1, bridge to the backup storage)
+
+**Status:** to implement. **Owner:** status-panel agent. **Plan:** `config/PLAN-backups.md`.
+**Contract (source of truth):** `config/shared-fixtures/api-contracts/backups-storage.json`
+(`DumpPlan`, `RestorePlan`, `UploadBody`, `Auth`, `UploadTarget`, `DownloadTarget`, `BackupCommand`).
+
+### Goal
+
+Give the Status Panel agent a first-class `backup` command that Stacker queues through
+the existing command queue. The agent executes a dump/restore and streams the archive to
+a **pluggable** backup-storage backend over its native HTTP client (reqwest). No shell
+command strings, no embedded credentials.
+
+This is the bridge that connects Stacker's backup orchestration (already merged:
+`backup-core` builds typed plans, Stacker enqueues a `backup` command) to the
+backup-storage upload API that was verified end-to-end.
+
+### How it fits today
+
+Stacker builds a plan and queues one command of `type: "backup"`:
+
+```json
+{
+  "action": "dump",              // or "restore"
+  "run_id": 123,                 // backup_run.id; correlate your report back to it
+  "plan": {
+    "argv": ["docker","exec","shop-postgres-1","pg_dump","-Fc","shop"],
+    "upload": {
+      "url": "https://api.example/upload",
+      "body": {
+        "type": "multipart",
+        "file_field": "file",
+        "fields": [{"name":"device_id","value":"$AGENT_ID"}]
+      },
+      "auth": {
+        "type": "client_credentials",
+        "token_url": "https://login.example/oauth/v2/token",
+        "client_id_env": "BACKUP_CLIENT_ID",
+        "client_secret_env": "BACKUP_CLIENT_SECRET",
+        "scope": "openid"
+      },
+      "headers": [["X-Backup-Filename","$BACKUP_FILENAME"]]
+    }
+  }
+}
+```
+
+The plan is pure data. The agent interprets it generically so the backend stays
+pluggable (a REST backup service today, a restic / S3 target tomorrow).
+
+---
+
+## What to build
+
+### 1. Command plumbing (follow the existing pattern)
+
+- Add `Backup(BackupCommand)` to `StackerCommand` in `src/commands/stacker.rs`.
+- Parse it in `parse_stacker_command` for `type: "backup" | "stacker.backup"` (mirror
+  how `"exec"` is parsed at `src/commands/stacker.rs:2205`). Deserialize params into:
+  ```rust
+  struct BackupCommand { action: Dump|Restore, run_id: Option<i32>, plan: Plan }
+  ```
+  where `Plan` is an untagged/`action`-selected `DumpPlan | RestorePlan`.
+- Dispatch in `execute_stacker_command` (near `StackerCommand::Exec(data) => handle_exec`,
+  `src/commands/stacker.rs:3792`) to `handle_backup(agent_cmd, data)`.
+- Reuse `base_result` (`src/commands/stacker.rs:3438`) for the `CommandResult` envelope and
+  the existing report path in `src/agent/daemon.rs:execute_and_report`.
+
+### 2. Execute the process (`argv`)
+
+- Run `plan.argv` as a **child process** with `tokio::process::Command` (see
+  `src/commands/executor.rs` for the existing child/stream handling and
+  `src/commands/timeout.rs` for the timeout strategy).
+- **Dump:** stream the child's `stdout` to the upload target. **Restore:** stream the
+  download body into the child's `stdin` (use `-i`/interactive argv already in the plan).
+- Do **not** run argv through a shell. The plan already carries `["docker","exec",...]` /
+  `["docker","run",...]` as discrete args.
+- Honour the command timeout; on timeout kill the child and report `status: "timeout"`.
+
+### 3. Storage protocol (interpret `UploadTarget` / `DownloadTarget` generically)
+
+Build the HTTP request from the plan's data, not from hardcoded values:
+
+- **Body (`UploadBody`)**
+  - `raw`: the archive stream is the request body.
+  - `multipart { file_field, fields }`: `multipart/form-data` with the archive in
+    `file_field` and literal `fields`. Field values and header values may reference env
+    vars (`$AGENT_ID`, `$BACKUP_FILENAME`, …) — resolve them from your environment at run
+    time. `$AGENT_ID` is **your own `agent_id`** (from registration,
+    `src/agent/registration.rs:60`) — this is the `device_id` the storage uses to scope
+    the archive. Do **not** use `deployment_hash` for this.
+- **Auth (`Auth`)**
+  - `none`.
+  - `bearer { token_env }`: `Authorization: Bearer <value of $token_env>`.
+  - `client_credentials { token_url, client_id_env, client_secret_env, scope? }`:
+    `POST token_url` with `grant_type=client_credentials` (+ optional `scope`) using the
+    client id/secret from env → `access_token` → `Authorization: Bearer <access_token>`.
+    Cache the token per run; refresh on 401. (This is how the backup-storage service
+    account authenticates.)
+  - `basic { username_env, password_env }`: HTTP Basic from env.
+- **Headers:** send `plan.headers` (resolve `$ENV` in values). Reject any header name/value
+  containing CR/LF (defence against header injection).
+
+### 4. Report the result
+
+Return a `CommandResult` (see `src/transport/mod.rs:21`) via the existing report path:
+
+- `status`: `"success"` | `"failed"` | `"timeout"`.
+- `result` (JSON), for a dump: `{ "run_id", "size_bytes", "checksum", "remote_file_id" }`.
+  - `size_bytes`: bytes streamed.
+  - `checksum`: SHA-256 of the archive (you already have `sha2`; `src/agent/backup.rs`
+    `BackupSigner` shows the HMAC/hash style if useful).
+  - `remote_file_id`: the file id the storage returns from the upload (e.g. the archive
+    basename / `file_id` in the upload response — see the storage contract).
+- `error`: a redacted message on failure (never include tokens/credentials).
+
+Stacker keys the `backup_run` row off `run_id` and the reported `remote_file_id` for later
+restore/retention.
+
+### 5. Restore
+
+For `action: "restore"`: GET `plan.download.url` (same `Auth` + `headers`) and stream the
+body into the restore process's `stdin`. Report success/bytes restored.
+
+---
+
+## Non-negotiables
+
+- **No secrets in logs or the command result.** Credentials are referenced by env-var
+  *name* in the plan; resolve them into request headers/tokens only. Redact errors.
+- **No shell strings.** Execute `argv` directly (`tokio::process`), never `sh -c` on the
+  host. (The plan may contain `sh -c '…'` as a single arg *inside* the target container —
+  that is fine, it runs via `docker exec`.)
+- **Generic:** do not special-case a particular storage vendor in the agent. Everything
+  vendor-specific is already described by the plan (`UploadBody` / `Auth`).
+- **Timeouts + cancellation** behave like other long-running commands (`executor.rs`).
+
+## Environment the agent is expected to have
+
+| Var | Meaning |
+|---|---|
+| `AGENT_ID` (or your registered `agent_id`) | `device_id` sent to storage |
+| `BACKUP_CLIENT_ID` / `BACKUP_CLIENT_SECRET` | service-account creds for `client_credentials` |
+| `BACKUP_TOKEN` | bearer token when `auth: bearer` |
+
+Provisioning of these (Vault → agent env) is handled on the Stacker side; the agent just
+reads them from its environment.
+
+## Testing
+
+- Unit: parse a `backup` command; multipart body construction from `UploadBody`; auth
+  header construction for each `Auth` variant; `$ENV` resolution; CR/LF rejection.
+- Integration (mock the storage with `wiremock`, as the repo already uses): end-to-end
+  dump streams to a mocked `POST /upload` and reports `size_bytes`/`checksum`/
+  `remote_file_id`; `client_credentials` token exchange is exercised; restore streams a
+  mocked download into the process.
+- Add fixtures under the existing test layout; run `cargo test` / the repo's CI gate.
+
+## Out of scope
+
+- Scheduling (Stacker owns it).
+- Retention/pruning of stored archives (Stacker + storage own it).
+- Point-in-time restore (the storage keeps current state only).

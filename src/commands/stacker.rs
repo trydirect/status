@@ -95,6 +95,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -102,6 +103,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -134,6 +136,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "user": { "email": "dev@try.direct" } })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -141,6 +144,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -187,6 +191,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "subject": "Deployment ready", "body_text": "done" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: Some(PipeAdapterReference::new("smtp").with_config(json!({
@@ -197,6 +202,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({})),
             trigger_type: "manual".into(),
         };
@@ -305,6 +311,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "/source/data".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -312,6 +319,7 @@ mod trigger_pipe_handler_tests {
             target_container: Some("target-app".into()),
             target_endpoint: "/webhook/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -323,7 +331,7 @@ mod trigger_pipe_handler_tests {
         assert_eq!(result.status, "failed");
         assert_eq!(
             result.error.as_deref(),
-            Some("trigger_pipe requires input_data or source_container")
+            Some("trigger_pipe requires input_data, source_url, or source_container")
         );
     }
 
@@ -338,6 +346,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -345,6 +354,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/ws-target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -376,6 +386,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -383,6 +394,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/grpc-target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -414,6 +426,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -421,6 +434,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -452,6 +466,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "key": "value" })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -459,6 +474,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -494,6 +510,7 @@ mod trigger_pipe_handler_tests {
             pipe_instance_id: "pipe-runtime-1".into(),
             source_adapter: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -505,6 +522,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "manual".into(),
         };
@@ -528,6 +546,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "user": { "email": "runtime@try.direct" } })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -535,6 +554,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -574,6 +594,7 @@ mod trigger_pipe_handler_tests {
             pipe_instance_id: "pipe-runtime-2".into(),
             source_adapter: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -585,6 +606,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -632,6 +654,7 @@ mod trigger_pipe_handler_tests {
             pipe_instance_id: "pipe-runtime-3".into(),
             source_adapter: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -643,6 +666,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -657,6 +681,7 @@ mod trigger_pipe_handler_tests {
             source_adapter: None,
             input_data: Some(json!({ "user": { "email": "runtime@try.direct" } })),
             source_container: None,
+            source_url: None,
             source_endpoint: "/".into(),
             source_method: "GET".into(),
             target_adapter: None,
@@ -664,6 +689,7 @@ mod trigger_pipe_handler_tests {
             target_container: None,
             target_endpoint: "/".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "manual".into(),
         };
@@ -681,6 +707,64 @@ mod trigger_pipe_handler_tests {
                 .and_then(|body| body.get("state")),
             Some(&json!("failed"))
         );
+    }
+
+    #[tokio::test]
+    async fn send_trigger_pipe_container_request_via_http_delivers_payload() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/webhook/pipe")
+            .match_body(Matcher::Exact(r#"{"email":"dev@try.direct"}"#.into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"accepted":true}"#)
+            .create_async()
+            .await;
+
+        let url = format!("{}/webhook/pipe", server.url());
+        let (status, body) = super::send_trigger_pipe_container_request_via_http(
+            &url,
+            "POST",
+            &json!({ "email": "dev@try.direct" }),
+            &None,
+        )
+        .await
+        .expect("container_http request should succeed");
+
+        mock.assert_async().await;
+        assert_eq!(status, 200);
+        assert_eq!(body, json!({ "accepted": true }));
+    }
+
+    #[tokio::test]
+    async fn send_trigger_pipe_container_request_via_http_sends_custom_headers() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/conversations")
+            .match_header("X-Custom", "test-value")
+            .match_header("Content-Type", "application/json")
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":1}"#)
+            .create_async()
+            .await;
+
+        let url = format!("{}/api/v1/conversations", server.url());
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Custom".to_string(), "test-value".to_string());
+
+        let (status, body) = super::send_trigger_pipe_container_request_via_http(
+            &url,
+            "POST",
+            &json!({ "message": "hello" }),
+            &Some(headers),
+        )
+        .await
+        .expect("container_http request with headers should succeed");
+
+        mock.assert_async().await;
+        assert_eq!(status, 201);
+        assert_eq!(body, json!({ "id": 1 }));
     }
 }
 
@@ -762,6 +846,184 @@ pub fn inject_runtime_into_compose(compose_content: &str, runtime: &ContainerRun
     }
 
     serde_yaml::to_string(&doc).unwrap_or_else(|_| compose_content.to_string())
+}
+
+/// Override the `image` of the service `app_code` addresses in a
+/// docker-compose YAML string. Only that service's `image:` is rewritten —
+/// every other service and field survives. Returns `None` when the YAML
+/// cannot be parsed or no service resolves, in which case the caller's
+/// content must be left alone.
+#[cfg(feature = "docker")]
+pub fn override_service_image_in_compose(
+    compose_content: &str,
+    app_code: &str,
+    image: &str,
+) -> Option<String> {
+    let service_key = resolve_compose_service_key(compose_content, app_code)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(compose_content).ok()?;
+    let service_def = doc
+        .get_mut("services")?
+        .get_mut(service_key.as_str())?
+        .as_mapping_mut()?;
+    service_def.insert(
+        serde_yaml::Value::String("image".into()),
+        serde_yaml::Value::String(image.trim().into()),
+    );
+    serde_yaml::to_string(&doc).ok()
+}
+
+/// The compose service key `app_code` addresses.
+///
+/// The logical app code is not always the service key: the CLI generator names
+/// a service `proxy-manager` but labels it
+/// `my.stacker.service=nginx_proxy_manager` (`stacker/stacker/src/cli/generator/compose.rs`).
+/// Resolution: a unique `my.stacker.service` label match wins, then an exact
+/// service-key match (the fallback for stacks without the label), then `None` —
+/// callers fall back to the app code itself, because label resolution is an
+/// addition, never a restriction (PR #140 review).
+#[cfg(feature = "docker")]
+pub fn resolve_compose_service_key(compose_content: &str, app_code: &str) -> Option<String> {
+    let app_code = app_code.trim();
+    if app_code.is_empty() {
+        return None;
+    }
+    let doc: serde_yaml::Value = serde_yaml::from_str(compose_content).ok()?;
+    let services = doc.get("services")?;
+
+    let mut labeled_keys = Vec::new();
+    if let Some(mapping) = services.as_mapping() {
+        for (key, def) in mapping {
+            if service_def_label(def, docker::STACKER_SERVICE_LABEL).map(str::trim)
+                == Some(app_code)
+            {
+                if let Some(key) = key.as_str() {
+                    labeled_keys.push(key.to_string());
+                }
+            }
+        }
+    }
+    if labeled_keys.len() == 1 {
+        return labeled_keys.pop();
+    }
+    if services.get(app_code).is_some() {
+        return Some(app_code.to_string());
+    }
+    None
+}
+
+/// A service definition's label value from its `labels:` block, which Compose
+/// accepts as either a mapping or a list of `key=value` strings.
+#[cfg(feature = "docker")]
+fn service_def_label<'a>(def: &'a serde_yaml::Value, label: &str) -> Option<&'a str> {
+    let labels = def.get("labels")?;
+    if let Some(value) = labels.get(label).and_then(|value| value.as_str()) {
+        return Some(value);
+    }
+    for entry in labels.as_sequence()? {
+        let entry = entry.as_str()?;
+        if let Some((key, value)) = entry.split_once('=') {
+            if key.trim() == label {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Replace a file atomically: back up the current content if it changes, write
+/// a sibling temp file, sync it, and rename it over the original — an
+/// interrupted write can never leave the live file truncated (PR #140 review).
+/// Mirrors the pattern of `write_config_to_disk_with_force`.
+#[cfg(feature = "docker")]
+async fn replace_file_atomically(path: &str, content: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let path = std::path::Path::new(path);
+    backup_existing_file_if_changed(path, content)?;
+    let temp_path = sibling_temp_path(path)?;
+    let write_result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .context(format!(
+                "Failed to create temp file: {}",
+                temp_path.display()
+            ))?;
+        file.write_all(content)
+            .context("Failed to write compose temp file")?;
+        file.sync_all()
+            .context("Failed to sync compose temp file")?;
+        std::fs::rename(&temp_path, path).context(format!(
+            "Failed to atomically move compose into place: {}",
+            path.display()
+        ))?;
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
+}
+
+/// Finalize the compose a deploy will run, and return the service key it
+/// resolves to.
+///
+/// The requested image is applied here — after every `config_files` and env
+/// write — to the compose as it exists at deploy time: a `config_files` entry
+/// targeting the compose file replaces the whole file after it is
+/// materialized, and a drift check would reject an earlier rewrite
+/// (PR #140 review). The returned service key resolves `app_code` the same
+/// way (unique `my.stacker.service` label match, then exact key) and is what
+/// `compose pull/up` must address.
+#[cfg(feature = "docker")]
+async fn finalize_deploy_compose(
+    compose_file: &str,
+    app_code: &str,
+    image: Option<&str>,
+) -> Result<String, CommandError> {
+    let existing = tokio::fs::read_to_string(compose_file).await.map_err(|e| {
+        make_error(
+            "image_override_failed",
+            format!("Failed to read compose file {}: {}", compose_file, e),
+            None,
+        )
+    })?;
+    let service_key = resolve_compose_service_key(&existing, app_code)
+        .unwrap_or_else(|| app_code.trim().to_string());
+
+    if let Some(image) = image.map(str::trim).filter(|value| !value.is_empty()) {
+        let updated = override_service_image_in_compose(&existing, app_code, image).ok_or_else(
+            || {
+                make_error(
+                    "image_override_failed",
+                    format!(
+                        "Requested image '{}' could not be applied to service '{}' in {} (unknown service or unparsable compose)",
+                        image, app_code, compose_file
+                    ),
+                    None,
+                )
+            },
+        )?;
+        if updated != existing {
+            replace_file_atomically(compose_file, updated.as_bytes())
+                .await
+                .map_err(|e| {
+                    make_error(
+                        "image_override_failed",
+                        format!("Failed to write compose file with image override: {}", e),
+                        None,
+                    )
+                })?;
+        }
+    }
+
+    Ok(service_key)
 }
 
 #[derive(Debug, Clone)]
@@ -884,6 +1146,8 @@ pub struct ActivatePipeCommand {
     source_adapter: Option<PipeAdapterReference>,
     #[serde(default)]
     source_container: Option<String>,
+    #[serde(default)]
+    source_url: Option<String>,
     #[serde(default = "default_pipe_source_endpoint")]
     source_endpoint: String,
     #[serde(default = "default_pipe_source_method")]
@@ -906,6 +1170,8 @@ pub struct ActivatePipeCommand {
     target_endpoint: String,
     #[serde(default = "default_pipe_target_method")]
     target_method: String,
+    #[serde(default)]
+    target_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     field_mapping: Option<Value>,
     #[serde(default = "default_activate_pipe_trigger_type")]
@@ -932,6 +1198,8 @@ pub struct TriggerPipeCommand {
     source_adapter: Option<PipeAdapterReference>,
     #[serde(default)]
     source_container: Option<String>,
+    #[serde(default)]
+    source_url: Option<String>,
     #[serde(default = "default_pipe_source_endpoint")]
     source_endpoint: String,
     #[serde(default = "default_pipe_source_method")]
@@ -946,6 +1214,8 @@ pub struct TriggerPipeCommand {
     target_endpoint: String,
     #[serde(default = "default_pipe_target_method")]
     target_method: String,
+    #[serde(default)]
+    target_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     field_mapping: Option<Value>,
     #[serde(default = "default_pipe_trigger_type")]
@@ -1040,6 +1310,7 @@ struct PipeLifecycleSnapshot {
 struct PipeRegistration {
     source_adapter: Option<PipeAdapterReference>,
     source_container: Option<String>,
+    source_url: Option<String>,
     source_endpoint: String,
     source_method: String,
     source_broker_url: Option<String>,
@@ -1051,6 +1322,7 @@ struct PipeRegistration {
     target_container: Option<String>,
     target_endpoint: String,
     target_method: String,
+    target_headers: Option<std::collections::HashMap<String, String>>,
     field_mapping: Option<Value>,
     trigger_type: String,
     lifecycle: PipeLifecycleSnapshot,
@@ -1446,6 +1718,7 @@ impl PipeRuntime {
             source_adapter: None,
             input_data: Some(payload),
             source_container: None,
+            source_url: None,
             source_endpoint: default_pipe_source_endpoint(),
             source_method: default_pipe_source_method(),
             target_adapter: None,
@@ -1453,6 +1726,7 @@ impl PipeRuntime {
             target_container: None,
             target_endpoint: default_pipe_target_endpoint(),
             target_method: default_pipe_target_method(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: trigger_type.to_string(),
         };
@@ -1480,6 +1754,7 @@ impl From<ActivatePipeCommand> for PipeRegistration {
         Self {
             source_adapter: value.source_adapter,
             source_container: value.source_container,
+            source_url: value.source_url,
             source_endpoint: value.source_endpoint,
             source_method: value.source_method,
             source_broker_url: value.source_broker_url,
@@ -1491,6 +1766,7 @@ impl From<ActivatePipeCommand> for PipeRegistration {
             target_container: value.target_container,
             target_endpoint: value.target_endpoint,
             target_method: value.target_method,
+            target_headers: value.target_headers,
             field_mapping: value.field_mapping,
             trigger_type: value.trigger_type,
             lifecycle: PipeLifecycleSnapshot::active(String::new()),
@@ -1543,6 +1819,17 @@ pub struct DeployAppCommand {
     #[serde(default)]
     compose_content: Option<String>,
     /// Optional: specific image to use (overrides compose file)
+    ///
+    /// Rewrites `image:` of the service `app_code` resolves to — a unique
+    /// `my.stacker.service` label match, then the exact service key — in the
+    /// compose the deploy runs. Applied at finalize time, after every
+    /// `config_files`/env write and right before `docker compose pull/up`, so
+    /// it wins over the compose's own `image:` regardless of what supplied the
+    /// file (a `config_files` entry may replace the compose after it is
+    /// materialized). Only that service is touched; blank values are ignored.
+    /// When it cannot be applied (unknown service or unparsable compose) the
+    /// deploy fails with `image_override_failed` instead of silently running
+    /// the compose's image.
     #[serde(default)]
     image: Option<String>,
     /// Optional: environment variables to set
@@ -2046,8 +2333,29 @@ fn resolve_container_name(app_code: &str, container: &Option<String>) -> String 
     trimmed(app_code)
 }
 
+/// The container to actually operate on.
+///
+/// [`resolve_container_name`] only picks between the requested `container` and
+/// the `app_code`; neither is necessarily a container that exists. An app whose
+/// code is `floci` commonly runs as `project-app-1`, so every command that
+/// addressed Docker by that raw string failed to find anything — logs came back
+/// empty, restarts hit nothing.
+///
+/// [`docker::resolve_container_name`] closes that gap by matching the
+/// `my.stacker.service` label first and a set of anchored name patterns
+/// (`app-1`, `project-app-1`, `app_1`) second.
+///
+/// **Falls back to the raw name.** Stacks deployed before the labels existed
+/// have none, and their container names may match neither pattern; for those
+/// this returns exactly what the caller asked for, which is the behaviour that
+/// was there before. Label resolution is an addition, never a restriction.
+///
+/// Command handlers resolve exactly once here and then call the
+/// `docker::*_resolved` helpers, which skip the lookup: re-resolving an
+/// already-resolved name is a redundant Docker API call and can select a
+/// different container (PR #140 review).
 #[cfg(feature = "docker")]
-async fn resolve_probe_container_name(app_code: &str, container: &Option<String>) -> String {
+async fn resolve_target_container_name(app_code: &str, container: &Option<String>) -> String {
     let requested_name = resolve_container_name(app_code, container);
     docker::resolve_container_name(&requested_name)
         .await
@@ -3296,7 +3604,12 @@ async fn resolve_npm_config(
             error = %error,
             "Failed to initialize Vault client for configure_proxy"
         );
-        NpmCredentialError::VaultUnavailable
+        NpmCredentialError::VaultUnavailable {
+            reason: format!(
+                "the agent's Vault client could not be initialized: {:#}",
+                error
+            ),
+        }
     })? {
         let server_id = resolve_server_id()?;
         let credentials = vault_client.fetch_npm_credentials(&server_id).await?;
@@ -3680,6 +3993,10 @@ fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistr
         .source_broker_url
         .as_deref()
         .map(redact_url_credentials);
+    registration.source_url = registration
+        .source_url
+        .as_deref()
+        .map(redact_url_credentials);
     registration.target_adapter = registration
         .target_adapter
         .take()
@@ -3688,12 +4005,24 @@ fn redact_persisted_registration(registration: &PipeRegistration) -> PipeRegistr
         .target_url
         .as_deref()
         .map(redact_url_credentials);
+    if let Some(ref mut headers) = registration.target_headers {
+        for value in headers.values_mut() {
+            if is_sensitive_header_value(value) {
+                *value = "[REDACTED]".into();
+            }
+        }
+    }
     registration
 }
 
 fn redact_pipe_adapter_reference(mut adapter: PipeAdapterReference) -> PipeAdapterReference {
     adapter.config = adapter.config.take().map(redact_json_secrets);
     adapter
+}
+
+fn is_sensitive_header_value(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower.starts_with("bearer ") || lower.starts_with("basic ") || value.len() > 20
 }
 
 fn redact_json_secrets(value: Value) -> Value {
@@ -3786,6 +4115,14 @@ fn merge_trigger_with_registration(
         {
             merged.source_container = registration.source_container.clone();
         }
+        if merged
+            .source_url
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            merged.source_url = registration.source_url.clone();
+        }
         if merged.source_endpoint == default_pipe_source_endpoint() {
             merged.source_endpoint = registration.source_endpoint.clone();
         }
@@ -3816,6 +4153,9 @@ fn merge_trigger_with_registration(
         }
         if merged.target_method == default_pipe_target_method() {
             merged.target_method = registration.target_method.clone();
+        }
+        if merged.target_headers.is_none() {
+            merged.target_headers = registration.target_headers.clone();
         }
         if merged.field_mapping.is_none() {
             merged.field_mapping = registration.field_mapping.clone();
@@ -3849,6 +4189,7 @@ fn build_http_status_probe_command(url: &str, timeout_secs: u32) -> String {
 }
 
 #[cfg(feature = "docker")]
+#[allow(dead_code)]
 fn build_trigger_pipe_container_command(endpoint: &str, method: &str, payload: &Value) -> String {
     let json_payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
     let escaped_payload = shell_escape_single_quotes(&json_payload);
@@ -3876,6 +4217,7 @@ async fn send_trigger_pipe_request(
     url: &str,
     method: &str,
     payload: &Value,
+    headers: &Option<std::collections::HashMap<String, String>>,
 ) -> Result<(u16, Value)> {
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .with_context(|| format!("invalid target_method '{}'", method))?;
@@ -3884,9 +4226,14 @@ async fn send_trigger_pipe_request(
         .build()
         .context("building trigger_pipe http client")?;
 
-    let response = client
-        .request(method, url)
-        .json(payload)
+    let mut request = client.request(method, url).json(payload);
+    if let Some(ref hdrs) = headers {
+        for (key, value) in hdrs {
+            request = request.header(key.as_str(), value.as_str());
+        }
+    }
+
+    let response = request
         .send()
         .await
         .with_context(|| format!("sending trigger_pipe request to {}", url))?;
@@ -3980,6 +4327,7 @@ async fn fetch_trigger_pipe_source_request(
 }
 
 #[cfg(feature = "docker")]
+#[allow(dead_code)]
 async fn send_trigger_pipe_container_request(
     container: &str,
     endpoint: &str,
@@ -4018,6 +4366,7 @@ async fn send_trigger_pipe_container_request(
 }
 
 #[cfg(not(feature = "docker"))]
+#[allow(dead_code)]
 async fn send_trigger_pipe_container_request(
     _container: &str,
     _endpoint: &str,
@@ -4025,6 +4374,46 @@ async fn send_trigger_pipe_container_request(
     _payload: &Value,
 ) -> Result<(u16, Value)> {
     bail!("target_container requires docker feature")
+}
+
+#[cfg(feature = "docker")]
+async fn send_trigger_pipe_container_request_via_http(
+    url: &str,
+    method: &str,
+    payload: &Value,
+    headers: &Option<std::collections::HashMap<String, String>>,
+) -> Result<(u16, Value)> {
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("invalid target_method '{}'", method))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building container_http client")?;
+
+    let mut request = client.request(method, url).json(payload);
+    if let Some(ref hdrs) = headers {
+        for (key, value) in hdrs {
+            request = request.header(key.as_str(), value.as_str());
+        }
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("sending container_http request to {}", url))?;
+
+    let status = response.status().as_u16();
+    let body_text = response
+        .text()
+        .await
+        .context("reading container_http response body")?;
+    let body = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body_text).unwrap_or(Value::String(body_text))
+    };
+
+    Ok((status, body))
 }
 
 async fn run_poll_source_worker(
@@ -4559,55 +4948,149 @@ async fn handle_trigger_pipe(
     let source_data = match resolved.input_data.clone() {
         Some(value) => value,
         None => match resolved
-            .source_container
+            .source_url
             .as_deref()
             .filter(|value| !value.is_empty())
         {
-            Some(container) => match fetch_trigger_pipe_source_request(
-                container,
-                &resolved.source_endpoint,
-                &resolved.source_method,
-            )
-            .await
+            Some(url) => {
+                match fetch_external_pipe_source_request(url, &resolved.source_method).await {
+                    Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+                        response_body
+                    }
+                    Ok((status_code, response_body)) => {
+                        let error = format!("source fetch failed with status {}", status_code);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": response_body,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                    Err(err) => {
+                        let error = format!("failed to fetch trigger_pipe source: {}", err);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": Value::Null,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                }
+            }
+            None => match resolved
+                .source_container
+                .as_deref()
+                .filter(|value| !value.is_empty())
             {
-                Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
-                    response_body
-                }
-                Ok((status_code, response_body)) => {
-                    let error = format!("source fetch failed with status {}", status_code);
+                Some(container) => match fetch_trigger_pipe_source_request(
+                    container,
+                    &resolved.source_endpoint,
+                    &resolved.source_method,
+                )
+                .await
+                {
+                    Ok((status_code, response_body)) if (200..300).contains(&status_code) => {
+                        response_body
+                    }
+                    Ok((status_code, response_body)) => {
+                        let error = format!("source fetch failed with status {}", status_code);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": response_body,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                    Err(err) => {
+                        let error = format!("failed to fetch trigger_pipe source: {}", err);
+                        pipe_runtime
+                            .mark_failed(
+                                &data.deployment_hash,
+                                &data.pipe_instance_id,
+                                now_timestamp(),
+                                error.clone(),
+                            )
+                            .await;
+                        result.status = "failed".into();
+                        result.result = Some(json!({
+                            "type": "trigger_pipe",
+                            "deployment_hash": data.deployment_hash,
+                            "pipe_instance_id": data.pipe_instance_id,
+                            "success": false,
+                            "source_data": Value::Null,
+                            "mapped_data": Value::Null,
+                            "target_response": Value::Null,
+                            "error": error,
+                            "triggered_at": now_timestamp(),
+                            "trigger_type": resolved.trigger_type,
+                            "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
+                        }));
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                },
+                None => {
+                    let error = "trigger_pipe requires input_data, source_url, or source_container";
                     pipe_runtime
                         .mark_failed(
                             &data.deployment_hash,
                             &data.pipe_instance_id,
                             now_timestamp(),
-                            error.clone(),
-                        )
-                        .await;
-                    result.status = "failed".into();
-                    result.result = Some(json!({
-                        "type": "trigger_pipe",
-                        "deployment_hash": data.deployment_hash,
-                        "pipe_instance_id": data.pipe_instance_id,
-                        "success": false,
-                        "source_data": response_body,
-                        "mapped_data": Value::Null,
-                        "target_response": Value::Null,
-                        "error": error,
-                        "triggered_at": now_timestamp(),
-                        "trigger_type": resolved.trigger_type,
-                        "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
-                    }));
-                    result.error = Some(error);
-                    return Ok(result);
-                }
-                Err(err) => {
-                    let error = format!("failed to fetch trigger_pipe source: {}", err);
-                    pipe_runtime
-                        .mark_failed(
-                            &data.deployment_hash,
-                            &data.pipe_instance_id,
-                            now_timestamp(),
-                            error.clone(),
+                            error.to_string(),
                         )
                         .await;
                     result.status = "failed".into();
@@ -4624,37 +5107,10 @@ async fn handle_trigger_pipe(
                         "trigger_type": resolved.trigger_type,
                         "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
                     }));
-                    result.error = Some(error);
+                    result.error = Some(error.into());
                     return Ok(result);
                 }
             },
-            None => {
-                let error = "trigger_pipe requires input_data or source_container";
-                pipe_runtime
-                    .mark_failed(
-                        &data.deployment_hash,
-                        &data.pipe_instance_id,
-                        now_timestamp(),
-                        error.to_string(),
-                    )
-                    .await;
-                result.status = "failed".into();
-                result.result = Some(json!({
-                    "type": "trigger_pipe",
-                    "deployment_hash": data.deployment_hash,
-                    "pipe_instance_id": data.pipe_instance_id,
-                    "success": false,
-                    "source_data": Value::Null,
-                    "mapped_data": Value::Null,
-                    "target_response": Value::Null,
-                    "error": error,
-                    "triggered_at": now_timestamp(),
-                    "trigger_type": resolved.trigger_type,
-                    "lifecycle": pipe_runtime.snapshot(&data.deployment_hash, &data.pipe_instance_id).await,
-                }));
-                result.error = Some(error.into());
-                return Ok(result);
-            }
         },
     };
 
@@ -4791,19 +5247,34 @@ async fn handle_trigger_pipe(
                     .map_err(|e| anyhow::anyhow!(e))
                 }
             } else {
-                send_trigger_pipe_request(&target_value, &resolved.target_method, &mapped_data)
-                    .await
+                send_trigger_pipe_request(
+                    &target_value,
+                    &resolved.target_method,
+                    &mapped_data,
+                    &resolved.target_headers,
+                )
+                .await
             }
         }
+        #[cfg(feature = "docker")]
         "container" => {
-            send_trigger_pipe_container_request(
-                &target_value,
+            let port = crate::agent::docker::get_container_port(&target_value)
+                .await
+                .unwrap_or(80);
+            let container_url = build_pipe_target_url(
+                &format!("http://{}:{}", target_value, port),
                 &resolved.target_endpoint,
+            );
+            send_trigger_pipe_container_request_via_http(
+                &container_url,
                 &resolved.target_method,
                 &mapped_data,
+                &resolved.target_headers,
             )
             .await
         }
+        #[cfg(not(feature = "docker"))]
+        "container" => Err(anyhow::anyhow!("container target requires docker feature")),
         _ => unreachable!(),
     };
 
@@ -4928,24 +5399,40 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         }
     };
 
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     // Return health for every container when app_code is "all" or empty.
     if data.app_code == "all" || data.app_code.is_empty() && !data.include_system {
+        // The user's containers and the platform's, split by scope but sent in
+        // one reply. They used to be two mutually exclusive branches, so a
+        // caller got either everything flat or the system subset alone, and the
+        // dashboard had to guess which was which by matching names.
         let mut all_list = Vec::new();
+        let mut system_list = Vec::new();
         for entry in &containers {
             let container_state = map_container_state(&entry.status).to_string();
+            let scope = docker::scope_for_container(&entry.labels, &entry.name, &entry.image);
             let mut item = json!({
-                "app_code": entry.name.trim_start_matches('/'),
+                // From the `my.stacker.service` label, never the container
+                // name — see docker::app_code_for_container.
+                "app_code": docker::app_code_for_container(&entry.labels, &entry.name),
                 "container_name": entry.name.trim_start_matches('/'),
                 "container_state": container_state,
                 "status": derive_health_status(&container_state, false),
+                "scope": scope.as_str(),
+                "image": entry.image.clone(),
             });
             if data.include_metrics {
                 item["metrics"] = build_metrics(entry);
             }
-            all_list.push(item);
+            match scope {
+                docker::ContainerScope::Platform => system_list.push(item),
+                docker::ContainerScope::Project => all_list.push(item),
+            }
         }
+        // Overall health covers the user's containers only. A degraded platform
+        // component is the platform's problem to show, not a reason to tell the
+        // user their stack is unhealthy.
         let overall = if all_list
             .iter()
             .all(|c| c.get("status").and_then(|v| v.as_str()) == Some("ok"))
@@ -4960,6 +5447,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
             "status": overall,
             "last_heartbeat_at": now_timestamp(),
             "containers": all_list,
+            "system_containers": system_list,
         });
         result.result = Some(body);
         return Ok(result);
@@ -4967,18 +5455,15 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     // Handle system containers request (status_panel, compose-agent, etc.)
     if data.include_system && (data.app_code.is_empty() || data.app_code == "system") {
-        let system_patterns = [
-            "status",
-            "status_panel",
-            "status-panel",
-            "compose-agent",
-            "compose_agent",
-        ];
+        // Classified, not name-matched. The list here used to include the bare
+        // substring "status", which also catches a user's `status-page`,
+        // `statuspage` or `orderstatus` and quietly moved their app out of
+        // their own Applications list.
         let system_containers: Vec<_> = containers
             .iter()
             .filter(|c| {
-                let name = c.name.trim_start_matches('/').to_lowercase();
-                system_patterns.iter().any(|p| name.contains(p))
+                docker::scope_for_container(&c.labels, &c.name, &c.image)
+                    == docker::ContainerScope::Platform
             })
             .collect();
 
@@ -4986,7 +5471,9 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         for entry in &system_containers {
             let container_state = map_container_state(&entry.status).to_string();
             let mut item = json!({
-                "app_code": entry.name.trim_start_matches('/'),
+                // From the `my.stacker.service` label, never the container
+                // name — see docker::app_code_for_container.
+                "app_code": docker::app_code_for_container(&entry.labels, &entry.name),
                 "container_name": entry.name.trim_start_matches('/'),
                 "container_state": container_state,
                 "status": derive_health_status(&container_state, false),
@@ -5051,8 +5538,8 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 #[cfg(feature = "docker")]
 async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "logs");
-    let target_name = resolve_container_name(&data.app_code, &data.container);
-    let window = match docker::get_container_logs_window(
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
+    let window = match docker::get_container_logs_window_resolved(
         &target_name,
         data.cursor.clone(),
         Some(data.limit),
@@ -5116,9 +5603,9 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
 async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "restart");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::restart(&target_name).await {
+    if let Err(e) = docker::restart_resolved(&target_name).await {
         errors.push(make_error(
             "restart_failed",
             format!("Restart failed for `{}`", target_name),
@@ -5126,13 +5613,13 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
         ));
 
         if data.force {
-            if let Err(stop_err) = docker::stop(&target_name).await {
+            if let Err(stop_err) = docker::stop_resolved(&target_name).await {
                 errors.push(make_error(
                     "force_stop_failed",
                     format!("Force stop failed for `{}`", target_name),
                     Some(stop_err.to_string()),
                 ));
-            } else if let Err(retry_err) = docker::restart(&target_name).await {
+            } else if let Err(retry_err) = docker::restart_resolved(&target_name).await {
                 errors.push(make_error(
                     "force_restart_failed",
                     format!("Forced restart failed for `{}`", target_name),
@@ -5205,9 +5692,9 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
 async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "stop");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::stop_with_timeout(&target_name, data.timeout).await {
+    if let Err(e) = docker::stop_with_timeout_resolved(&target_name, data.timeout).await {
         errors.push(make_error(
             "stop_failed",
             format!("Stop failed for `{}`", target_name),
@@ -5270,9 +5757,9 @@ async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<Com
 async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "start");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::start(&target_name).await {
+    if let Err(e) = docker::start_resolved(&target_name).await {
         errors.push(make_error(
             "start_failed",
             format!("Start failed for `{}`", target_name),
@@ -5432,7 +5919,8 @@ async fn handle_error_summary(
     for container in target_containers {
         // Get logs for this container
         let logs_result =
-            docker::get_container_logs_window(&container.name, None, Some(LOGS_MAX_LIMIT)).await;
+            docker::get_container_logs_window_resolved(&container.name, None, Some(LOGS_MAX_LIMIT))
+                .await;
 
         let mut error_count = 0u64;
         let mut warning_count = 0u64;
@@ -5834,7 +6322,7 @@ async fn handle_apply_config(
             .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
 
         if let Some(c) = container {
-            match docker::restart(&c.name).await {
+            match docker::restart_resolved(&c.name).await {
                 Ok(()) => {
                     body["container_restarted"] = json!(true);
                     body["restarted_at"] = json!(now_timestamp());
@@ -5866,152 +6354,330 @@ async fn handle_apply_config(
     Ok(result)
 }
 
-/// Parse compose content and ensure all referenced env_file paths exist
-/// Creates empty files if they don't exist to prevent docker compose failures
+/// Resolve `.` and `..` segments without touching the filesystem.
+/// A `..` only consumes a preceding real component — it never eats a
+/// previously kept `..`, so escapes stay visible to containment checks even
+/// for relative bases. Absolute paths past the root keep their `..`
+/// (over-refusal, never an escape).
+#[cfg(feature = "docker")]
+fn normalize_path_lexically(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let last_is_real = normalized
+                    .components()
+                    .next_back()
+                    .map(|last| matches!(last, Component::Normal(_)))
+                    .unwrap_or(false);
+                if last_is_real {
+                    normalized.pop();
+                } else {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Resolve a config/env destination against the compose project directory.
+///
+/// Absolute destinations are kept as-is; relative ones resolve against
+/// `base_dir` — never the agent process's CWD — which is how Docker Compose
+/// resolves relative `env_file:` entries (stacker/BUGS.md). Without a
+/// `base_dir` the destination is used as given.
+#[cfg(feature = "docker")]
+fn resolve_config_destination(
+    base_dir: Option<&std::path::Path>,
+    destination_path: &str,
+) -> std::path::PathBuf {
+    let path = std::path::Path::new(destination_path);
+    let joined = match (base_dir, path.is_absolute()) {
+        (Some(base_dir), false) => base_dir.join(path),
+        _ => path.to_path_buf(),
+    };
+    normalize_path_lexically(&joined)
+}
+
+/// Lexical containment: `candidate` resolves inside `dir`. Both sides are
+/// normalized without touching the filesystem so `..` segments cannot slip
+/// past the check. An empty/`.` base has no prefix to compare against, so a
+/// candidate counts as contained only when it stays relative and non-escaping.
+#[cfg(feature = "docker")]
+fn path_within_dir(dir: &std::path::Path, candidate: &std::path::Path) -> bool {
+    use std::path::Component;
+
+    let normalized_dir = normalize_path_lexically(dir);
+    let normalized_candidate = normalize_path_lexically(candidate);
+    if normalized_dir.as_os_str().is_empty() {
+        return normalized_candidate.is_relative()
+            && !normalized_candidate
+                .components()
+                .any(|component| matches!(component, Component::ParentDir));
+    }
+    normalized_candidate.starts_with(normalized_dir)
+}
+
+/// A compose `env_file:` entry together with the service block it appears
+/// under (best-effort attribution, used to name the offender in errors).
+#[cfg(feature = "docker")]
+struct EnvFileEntry {
+    service: Option<String>,
+    path: String,
+}
+
+/// Collect every `env_file:` entry in a compose body — inline scalars and
+/// block-sequence items — with the enclosing mapping key as service hint.
+#[cfg(feature = "docker")]
+fn collect_env_file_entries(compose_content: &str) -> Vec<EnvFileEntry> {
+    let lines: Vec<&str> = compose_content.lines().collect();
+    let mut entries = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let Some(after_colon) = line.trim().strip_prefix("env_file:") else {
+            index += 1;
+            continue;
+        };
+
+        let key_indent = line.len() - line.trim_start().len();
+        let service = enclosing_block_key(&lines, index, key_indent);
+
+        let inline = after_colon.trim();
+        if !inline.is_empty() && !inline.starts_with('#') && !inline.starts_with('-') {
+            if let Some(path) = env_file_scalar_path(inline) {
+                push_unique(&mut entries, EnvFileEntry { service, path });
+            }
+            index += 1;
+            continue;
+        }
+
+        // Block sequence: the items following the `env_file:` key.
+        index += 1;
+        while index < lines.len() {
+            let item = lines[index].trim();
+            if item.is_empty() || item.starts_with('#') {
+                index += 1;
+                continue;
+            }
+            let Some(item_value) = item.strip_prefix('-') else {
+                break;
+            };
+            if let Some(path) = env_file_scalar_path(item_value.trim()) {
+                push_unique(
+                    &mut entries,
+                    EnvFileEntry {
+                        service: service.clone(),
+                        path,
+                    },
+                );
+            }
+            index += 1;
+        }
+    }
+
+    entries
+}
+
+/// Keep the first entry per path: duplicates (e.g. the same file referenced
+/// twice) must not be created — or refused — twice. Mirrors the dedup the
+/// previous collection did.
+#[cfg(feature = "docker")]
+fn push_unique(entries: &mut Vec<EnvFileEntry>, entry: EnvFileEntry) {
+    if !entries.iter().any(|existing| existing.path == entry.path) {
+        entries.push(entry);
+    }
+}
+
+/// The file path an `env_file:` scalar names, with trailing YAML comments
+/// stripped. Returns None for comment-only values and unquoted YAML
+/// references (`&anchor` / `*alias`), which cannot be literal file paths.
+#[cfg(feature = "docker")]
+fn env_file_scalar_path(value: &str) -> Option<String> {
+    let value = value.trim();
+    let unquoted = if let Some(rest) = value.strip_prefix('"') {
+        rest.split_once('"').map(|(path, _)| path)?
+    } else if let Some(rest) = value.strip_prefix('\'') {
+        rest.split_once('\'').map(|(path, _)| path)?
+    } else if value.starts_with('*') || value.starts_with('&') {
+        return None;
+    } else {
+        match value.split_once(" #") {
+            Some((path, _)) => path,
+            None => value,
+        }
+    };
+
+    let path = unquoted.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// Best-effort service attribution: the nearest mapping key above `index`
+/// that is indented less than the `env_file:` key itself.
+#[cfg(feature = "docker")]
+fn enclosing_block_key(lines: &[&str], index: usize, key_indent: usize) -> Option<String> {
+    for line in lines[..index].iter().rev() {
+        let indent = line.len() - line.trim_start().len();
+        if indent >= key_indent {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+            continue;
+        }
+        let Some(key) = trimmed.strip_suffix(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            continue;
+        }
+        return Some(key.to_string());
+    }
+    None
+}
+
+/// Parse compose content and ensure all referenced env_file paths exist.
+/// Creates empty files if they don't exist to prevent docker compose failures —
+/// but never outside the compose project directory: an `env_file` resolving
+/// outside the project is a misconfiguration that must surface as an error,
+/// not be papered over with an empty file (stacker/BUGS.md).
+/// The containment check is lexical: a pre-existing dangling symlink inside
+/// the project can still redirect the create — accepted, since the written
+/// content is fixed and create-only.
 #[cfg(feature = "docker")]
 async fn ensure_env_files_exist(
     compose_content: &str,
     compose_dir: &str,
     errors: &mut Vec<CommandError>,
 ) {
-    use regex::Regex;
     use std::path::Path;
 
-    // Match env_file entries in compose - handles both single file and list format
-    // Examples:
-    //   env_file: .env
-    //   env_file: "/path/to/.env"
-    //   env_file:
-    //     - .env
-    //     - "/path/to/other.env"
-    let env_file_pattern = Regex::new(r#"env_file:\s*\n?\s*-?\s*["']?([^"'\n]+)["']?"#)
-        .unwrap_or_else(|_| {
-            // Fallback simple pattern
-            Regex::new(r#"env_file:\s*["']?([^"'\n]+)["']?"#).unwrap()
-        });
+    let compose_dir = Path::new(compose_dir);
 
-    // Also match list items under env_file:
-    let list_item_pattern = Regex::new(r#"^\s*-\s*["']?([^"'\n]+)["']?\s*$"#).unwrap();
+    for entry in collect_env_file_entries(compose_content) {
+        let resolved = resolve_config_destination(Some(compose_dir), &entry.path);
 
-    let mut env_files: Vec<String> = Vec::new();
-
-    // Find all env_file references
-    for cap in env_file_pattern.captures_iter(compose_content) {
-        if let Some(file_match) = cap.get(1) {
-            let file_path = file_match.as_str().trim();
-            if !file_path.is_empty() && !file_path.starts_with('-') {
-                env_files.push(file_path.to_string());
-            }
+        if resolved.exists() {
+            continue;
         }
-    }
 
-    // Also scan for list items following env_file:
-    let mut in_env_file_section = false;
-    for line in compose_content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("env_file:") {
-            in_env_file_section = true;
-            // Check for inline value
-            let after_colon = trimmed.strip_prefix("env_file:").unwrap_or("").trim();
-            if !after_colon.is_empty() && !after_colon.starts_with('-') {
-                let clean = after_colon.trim_matches(|c| c == '"' || c == '\'');
-                if !clean.is_empty() {
-                    env_files.push(clean.to_string());
-                }
-            }
-        } else if in_env_file_section {
-            if let Some(cap) = list_item_pattern.captures(trimmed) {
-                if let Some(file_match) = cap.get(1) {
-                    env_files.push(file_match.as_str().trim().to_string());
-                }
-            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                // End of env_file section
-                in_env_file_section = false;
-            }
-        }
-    }
-
-    // Deduplicate
-    env_files.sort();
-    env_files.dedup();
-
-    // Ensure each env file exists
-    for env_file in env_files {
-        let full_path = if env_file.starts_with('/') {
-            env_file.clone()
-        } else {
-            format!("{}/{}", compose_dir, env_file)
-        };
-
-        let path = Path::new(&full_path);
-
-        if !path.exists() {
+        if !path_within_dir(compose_dir, &resolved) {
+            let service = entry
+                .service
+                .as_deref()
+                .map(|service| format!(" (service {})", service))
+                .unwrap_or_default();
             tracing::warn!(
-                env_file = %full_path,
-                "Compose references env_file that doesn't exist, creating empty file"
+                env_file = %entry.path,
+                resolved = %resolved.display(),
+                service = %entry.service.as_deref().unwrap_or("<unknown>"),
+                "Compose references env_file that resolves outside the project directory, refusing to create it"
             );
+            errors.push(make_error(
+                "env_file_outside_project",
+                format!(
+                    "env_file {}{} resolves outside the compose project directory ({}); refusing to create it",
+                    entry.path,
+                    service,
+                    resolved.display()
+                ),
+                None,
+            ));
+            continue;
+        }
 
-            // Create parent directories if needed
-            if let Some(parent) = path.parent() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    errors.push(make_error(
-                        "env_file_dir_warning",
-                        format!(
-                            "Failed to create directory for env file {}: {}",
-                            full_path, e
-                        ),
-                        None,
-                    ));
-                    continue;
-                }
-            }
+        tracing::warn!(
+            env_file = %resolved.display(),
+            "Compose references env_file that doesn't exist, creating empty file"
+        );
 
-            // Create empty env file
-            if let Err(e) = tokio::fs::write(&full_path, "# Auto-created empty env file\n").await {
+        // Create parent directories if needed
+        if let Some(parent) = resolved.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 errors.push(make_error(
-                    "env_file_create_warning",
-                    format!("Failed to create empty env file {}: {}", full_path, e),
+                    "env_file_dir_warning",
+                    format!(
+                        "Failed to create directory for env file {}: {}",
+                        resolved.display(),
+                        e
+                    ),
                     None,
                 ));
-            } else {
-                tracing::info!(
-                    env_file = %full_path,
-                    "Created empty env file to prevent compose failure"
-                );
+                continue;
             }
+        }
+
+        // Create empty env file
+        if let Err(e) = tokio::fs::write(&resolved, "# Auto-created empty env file\n").await {
+            errors.push(make_error(
+                "env_file_create_warning",
+                format!(
+                    "Failed to create empty env file {}: {}",
+                    resolved.display(),
+                    e
+                ),
+                None,
+            ));
+        } else {
+            tracing::info!(
+                env_file = %resolved.display(),
+                "Created empty env file to prevent compose failure"
+            );
         }
     }
 }
 
-/// Write config file to disk with proper permissions
+/// Write config file to disk with proper permissions.
+/// Relative destinations resolve against the process CWD here; deploy flows
+/// must call `write_config_to_disk_with_force` with the compose dir instead.
 #[cfg(feature = "docker")]
 pub async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig) -> Result<()> {
-    write_config_to_disk_with_force(config, false).await
+    write_config_to_disk_with_force(config, false, None).await
 }
 
+/// Write config file to disk, resolving a *relative* `destination_path`
+/// against `base_dir` (the compose project directory) instead of the agent
+/// process's CWD, and logging the path the file actually lands on
+/// (stacker/BUGS.md).
 #[cfg(feature = "docker")]
 async fn write_config_to_disk_with_force(
     config: &crate::security::vault_client::AppConfig,
     force_overwrite: bool,
+    base_dir: Option<&std::path::Path>,
 ) -> Result<()> {
     use std::fs;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
 
-    let path = Path::new(&config.destination_path);
+    let resolved_path = resolve_config_destination(base_dir, &config.destination_path);
+    let path = resolved_path.as_path();
     let effective_force = force_overwrite || config.force_overwrite;
 
     // Check if the destination path exists as a directory (Docker sometimes creates these)
     // If so, remove it first so we can write the file
     if path.exists() && path.is_dir() {
         tracing::warn!(
-            path = %config.destination_path,
+            path = %path.display(),
             "Destination path exists as directory, removing it to write file"
         );
         fs::remove_dir_all(path).context(format!(
             "Failed to remove directory at file destination: {}",
-            config.destination_path
+            path.display()
         ))?;
     }
 
@@ -6048,7 +6714,7 @@ async fn write_config_to_disk_with_force(
 
         fs::rename(&temp_path, path).context(format!(
             "Failed to atomically move config into place: {}",
-            config.destination_path
+            path.display()
         ))?;
 
         if let Some(parent) = path.parent() {
@@ -6066,7 +6732,8 @@ async fn write_config_to_disk_with_force(
     write_result?;
 
     tracing::info!(
-        path = %config.destination_path,
+        path = %path.display(),
+        destination = %config.destination_path,
         content_type = %config.content_type,
         size = config.content.len(),
         "Config file written to disk"
@@ -6323,27 +6990,23 @@ fn prune_sibling_backups(path: &std::path::Path, keep: usize) -> Result<()> {
     Ok(())
 }
 
-/// Handle deploy_app command - uses docker compose to deploy a new app/service
+/// Materialize the compose file a deploy will run.
+///
+/// The command payload's `compose_content` wins over the compose already at
+/// `compose_file`; the command's Kata runtime override (when requested and
+/// available) is applied to whichever compose is used before it is written.
+/// The requested `image` is deliberately NOT applied here — see
+/// [`finalize_deploy_compose`]: a `config_files` entry can replace the compose
+/// after this step, so the override is finalized later, right before pull/up.
+/// Non-fatal notes are pushed to `errors`; failures that must stop the deploy
+/// are returned as `Err`.
 #[cfg(feature = "docker")]
-async fn handle_deploy_app(
-    agent_cmd: &AgentCommand,
+async fn materialize_deploy_compose(
     data: &DeployAppCommand,
-) -> Result<CommandResult> {
-    use crate::security::vault_client::VaultClient;
-    use tokio::process::Command;
-
-    let mut result = base_result(
-        agent_cmd,
-        &data.deployment_hash,
-        &data.app_code,
-        "deploy_app",
-    );
-    let mut errors: Vec<CommandError> = Vec::new();
-
-    // Determine the compose working directory
-    let (compose_dir, compose_file) =
-        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
-
+    compose_dir: &str,
+    compose_file: &str,
+    errors: &mut Vec<CommandError>,
+) -> Result<(), CommandError> {
     // If compose_content is provided, write it to disk (for new deployments)
     if let Some(compose_content) = &data.compose_content {
         tracing::info!(
@@ -6382,63 +7045,54 @@ async fn handle_deploy_app(
         };
 
         // Create the directory if it doesn't exist
-        if let Err(e) = tokio::fs::create_dir_all(&compose_dir).await {
-            let error = make_error(
+        if let Err(e) = tokio::fs::create_dir_all(compose_dir).await {
+            return Err(make_error(
                 "dir_create_failed",
                 format!("Failed to create directory {}: {}", compose_dir, e),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
 
         // Write the compose file
         if let Err(e) = backup_existing_file_if_changed(
-            std::path::Path::new(&compose_file),
+            std::path::Path::new(compose_file),
             final_compose.as_bytes(),
         ) {
-            let error = make_error(
+            return Err(make_error(
                 "compose_backup_failed",
                 format!(
                     "Failed to back up docker-compose.yml before overwrite: {}",
                     e
                 ),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
-        if let Err(e) = tokio::fs::write(&compose_file, &final_compose).await {
-            let error = make_error(
+        if let Err(e) = tokio::fs::write(compose_file, &final_compose).await {
+            return Err(make_error(
                 "compose_write_failed",
                 format!("Failed to write docker-compose.yml: {}", e),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
 
         tracing::info!(
             compose_file = %compose_file,
             "docker-compose.yml written successfully"
         );
-    } else if let Some(runtime) = &data.runtime {
+        return Ok(());
+    }
+
+    if let Some(runtime) = &data.runtime {
         // Compose content not in payload — modify existing file on disk if runtime is requested
         if *runtime == ContainerRuntime::Kata {
-            match tokio::fs::try_exists(&compose_file).await {
+            match tokio::fs::try_exists(compose_file).await {
                 Ok(true) => {
                     let kata_available = detect_kata_runtime().await;
                     if kata_available {
-                        if let Ok(existing) = tokio::fs::read_to_string(&compose_file).await {
+                        if let Ok(existing) = tokio::fs::read_to_string(compose_file).await {
                             let injected = inject_runtime_into_compose(&existing, runtime);
                             if let Err(e) = backup_existing_file_if_changed(
-                                std::path::Path::new(&compose_file),
+                                std::path::Path::new(compose_file),
                                 injected.as_bytes(),
                             ) {
                                 errors.push(make_error(
@@ -6449,8 +7103,7 @@ async fn handle_deploy_app(
                                     ),
                                     None,
                                 ));
-                            } else if let Err(e) = tokio::fs::write(&compose_file, &injected).await
-                            {
+                            } else if let Err(e) = tokio::fs::write(compose_file, &injected).await {
                                 errors.push(make_error(
                                     "runtime_inject_warning",
                                     format!(
@@ -6492,6 +7145,45 @@ async fn handle_deploy_app(
         }
     }
 
+    Ok(())
+}
+
+/// Handle deploy_app command - uses docker compose to deploy a new app/service
+#[cfg(feature = "docker")]
+async fn handle_deploy_app(
+    agent_cmd: &AgentCommand,
+    data: &DeployAppCommand,
+) -> Result<CommandResult> {
+    use crate::security::vault_client::VaultClient;
+    use tokio::process::Command;
+
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "deploy_app",
+    );
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    // Determine the compose working directory
+    let (compose_dir, compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
+    // Relative config destinations resolve against this directory — the same
+    // base Compose uses for relative `env_file:` entries — not the agent CWD.
+    let compose_dir_path = std::path::Path::new(&compose_dir);
+
+    // Materialize the compose the deploy will run — the payload's
+    // compose_content wins over the compose already on disk — applying the
+    // command's overrides before anything is pulled or deployed.
+    if let Err(error) =
+        materialize_deploy_compose(data, &compose_dir, &compose_file, &mut errors).await
+    {
+        result.status = "failed".into();
+        result.error = Some(error.message.clone());
+        result.errors = Some(vec![error]);
+        return Ok(result);
+    }
+
     let has_env_config_file = data
         .config_files
         .as_ref()
@@ -6501,19 +7193,27 @@ async fn handle_deploy_app(
     // Write config files if provided (e.g., telegraf.conf, nginx.conf, etc.)
     if let Some(config_files) = &data.config_files {
         for config in config_files {
+            let resolved_path =
+                resolve_config_destination(Some(compose_dir_path), &config.destination_path);
             tracing::info!(
                 app_code = %data.app_code,
                 destination = %config.destination_path,
+                resolved = %resolved_path.display(),
                 "Writing config file from command payload"
             );
-            if let Err(e) =
-                write_config_to_disk_with_force(config, data.force_config_overwrite).await
+            if let Err(e) = write_config_to_disk_with_force(
+                config,
+                data.force_config_overwrite,
+                Some(compose_dir_path),
+            )
+            .await
             {
                 let error = make_error(
                     "config_write_warning",
                     format!(
                         "Failed to write config file {}: {}",
-                        config.destination_path, e
+                        resolved_path.display(),
+                        e
                     ),
                     None,
                 );
@@ -6580,13 +7280,19 @@ async fn handle_deploy_app(
 
     // Write .env from Vault if fetched
     if let Some(env_config) = env_from_vault {
+        let resolved_env_path =
+            resolve_config_destination(Some(compose_dir_path), &env_config.destination_path);
         tracing::info!(
             app_code = %data.app_code,
-            env_file = %env_config.destination_path,
+            env_file = %resolved_env_path.display(),
             "Writing .env file from Vault"
         );
-        if let Err(e) =
-            write_config_to_disk_with_force(&env_config, data.force_config_overwrite).await
+        if let Err(e) = write_config_to_disk_with_force(
+            &env_config,
+            data.force_config_overwrite,
+            Some(compose_dir_path),
+        )
+        .await
         {
             let error = make_error(
                 "env_file_warning",
@@ -6602,7 +7308,7 @@ async fn handle_deploy_app(
             errors.push(error);
         } else {
             tracing::info!(
-                env_file = %env_config.destination_path,
+                env_file = %resolved_env_path.display(),
                 ".env file from Vault written successfully"
             );
         }
@@ -6671,6 +7377,26 @@ async fn handle_deploy_app(
         return Ok(result);
     }
 
+    // Finalize the compose before deploying: apply the requested image to the
+    // final file — after every config/env write, so a `config_files` entry
+    // targeting the compose cannot replace the override and drift checks see
+    // the original file — and resolve the service key the deploy addresses
+    // (PR #140 review).
+    let image = data
+        .image
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let service_key = match finalize_deploy_compose(&compose_file, &data.app_code, image).await {
+        Ok(service_key) => service_key,
+        Err(error) => {
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
     // Detect which compose variant is available (docker compose or docker-compose)
     let compose_variant = match detect_compose_variant().await {
         Some(variant) => {
@@ -6722,7 +7448,7 @@ async fn handle_deploy_app(
         let pull_result = pull_cmd.arg("-f").arg(&compose_file);
         let pull_result = pull_result
             .arg("pull")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -6765,7 +7491,7 @@ async fn handle_deploy_app(
             .arg("-f")
             .arg(&compose_file)
             .arg("stop")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -6779,7 +7505,7 @@ async fn handle_deploy_app(
             .arg(&compose_file)
             .arg("rm")
             .arg("-f")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -6802,7 +7528,7 @@ async fn handle_deploy_app(
         .arg(&compose_file)
         .arg("up")
         .arg("-d")
-        .args(compose_target_service(&data.app_code))
+        .args(compose_target_service(&service_key))
         .current_dir(&compose_dir);
 
     // Add environment variables if provided
@@ -7418,6 +8144,13 @@ async fn handle_deploy_with_configs(
     );
     let mut errors: Vec<CommandError> = Vec::new();
 
+    // Relative config destinations resolve against the compose project
+    // directory — the same base `handle_deploy_app` uses below — never the
+    // agent's CWD.
+    let (compose_dir, _compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
+    let compose_dir_path = std::path::Path::new(&compose_dir);
+
     // Step 1: Fetch and apply configs if requested
     if data.apply_configs {
         tracing::info!(
@@ -7445,7 +8178,13 @@ async fn handle_deploy_with_configs(
                 .await
             {
                 Ok(compose_config) => {
-                    if let Err(e) = write_config_to_disk(&compose_config).await {
+                    if let Err(e) = write_config_to_disk_with_force(
+                        &compose_config,
+                        false,
+                        Some(compose_dir_path),
+                    )
+                    .await
+                    {
                         errors.push(make_error(
                             "compose_write_warning",
                             "Failed to write docker-compose.yml",
@@ -7469,7 +8208,10 @@ async fn handle_deploy_with_configs(
                 .await
             {
                 Ok(app_config) => {
-                    if let Err(e) = write_config_to_disk(&app_config).await {
+                    if let Err(e) =
+                        write_config_to_disk_with_force(&app_config, false, Some(compose_dir_path))
+                            .await
+                    {
                         errors.push(make_error(
                             "config_write_warning",
                             format!("Failed to write config for {}", data.app_code),
@@ -7983,12 +8725,12 @@ async fn handle_configure_proxy(
 #[cfg(feature = "docker")]
 async fn handle_exec(agent_cmd: &AgentCommand, data: &ExecCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "exec");
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     // Execute the command inside the container with timeout
     match tokio::time::timeout(
         std::time::Duration::from_secs(data.timeout as u64),
-        docker::exec_in_container_with_output(&target_name, &data.command),
+        docker::exec_in_container_with_output_resolved(&target_name, &data.command),
     )
     .await
     {
@@ -8085,6 +8827,27 @@ async fn handle_server_resources(
     Ok(result)
 }
 
+/// One `list_containers` entry built from a plain (non-health) container
+/// listing. Every listing mode carries the identity fields — the logical app
+/// code and who owns the container — because container discovery and the
+/// dashboard split key on them, and disabling resource metrics must not make
+/// them disappear (PR #140 review).
+#[cfg(feature = "docker")]
+fn container_list_entry(
+    name: &str,
+    status: &str,
+    image: &str,
+    labels: &HashMap<String, String>,
+) -> Value {
+    json!({
+        "name": name,
+        "app_code": docker::app_code_for_container(labels, name),
+        "scope": docker::scope_for_container(labels, name, image).as_str(),
+        "status": status,
+        "image": image,
+    })
+}
+
 /// Handle list_containers command - list all containers with optional health/logs
 #[cfg(feature = "docker")]
 async fn handle_list_containers(
@@ -8114,6 +8877,14 @@ async fn handle_list_containers(
                     });
                     json!({
                         "name": c.name,
+                        // The logical app code, from `my.stacker.service` —
+                        // container discovery keys on this. See
+                        // docker::app_code_for_container.
+                        "app_code": docker::app_code_for_container(&c.labels, &c.name),
+                        // Who owns this container. The dashboard splits its
+                        // Containers and System Containers sections on this
+                        // instead of matching names.
+                        "scope": docker::scope_for_container(&c.labels, &c.name, &c.image).as_str(),
                         "status": c.status,
                         "image": c.image,
                         "ports": c.ports,
@@ -8147,13 +8918,10 @@ async fn handle_list_containers(
                 .map(|c| {
                     container_meta.push(ContainerMatchMeta {
                         name: c.name.clone(),
-                        image: String::new(),
-                        labels: HashMap::new(),
+                        image: c.image.clone(),
+                        labels: c.labels.clone(),
                     });
-                    json!({
-                        "name": c.name,
-                        "status": c.status,
-                    })
+                    container_list_entry(&c.name, &c.status, &c.image, &c.labels)
                 })
                 .collect::<Vec<_>>(),
             Err(e) => {
@@ -8174,7 +8942,7 @@ async fn handle_list_containers(
     if data.include_logs {
         for container in containers.iter_mut() {
             if let Some(name) = container.get("name").and_then(|n| n.as_str()) {
-                match docker::get_container_logs(name, &data.log_lines.to_string()).await {
+                match docker::get_container_logs_resolved(name, &data.log_lines.to_string()).await {
                     Ok(logs) => {
                         container
                             .as_object_mut()
@@ -8348,67 +9116,72 @@ fn derive_health_status(container_state: &str, has_errors: bool) -> &'static str
     }
 }
 
+/// Hard timeout for a single `docker` CLI subprocess so an unresponsive daemon
+/// can't hang a probe. Covers spawn + execution.
 #[cfg(feature = "docker")]
-async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
+const DOCKER_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run a `docker` CLI subprocess with [`DOCKER_CLI_TIMEOUT`]. Returns `None` on
+/// spawn error or timeout (callers treat that as "no data").
+#[cfg(feature = "docker")]
+async fn docker_cli_output(args: &[&str]) -> Option<std::process::Output> {
     use tokio::process::Command;
+    match tokio::time::timeout(
+        DOCKER_CLI_TIMEOUT,
+        Command::new("docker").args(args).output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => Some(output),
+        _ => None,
+    }
+}
 
-    let output = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .Config.ExposedPorts}}",
-            container_name,
-        ])
-        .output()
-        .await
-        .context("docker inspect for ports")?;
-
-    let mut ports = Vec::new();
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let trimmed_output = stdout.trim();
+#[cfg(feature = "docker")]
+fn parse_ports_json(stdout: &[u8], ports: &mut Vec<u16>) {
+    let stdout = String::from_utf8_lossy(stdout);
+    if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(stdout.trim()) {
         // Parse JSON like {"80/tcp":{},"8080/tcp":{}}
-        if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(trimmed_output) {
-            for port_str in map.keys() {
-                if let Some(port_num) = port_str.split('/').next() {
-                    if let Ok(port) = port_num.parse::<u16>() {
-                        if !ports.contains(&port) {
-                            ports.push(port);
-                        }
+        for port_str in map.keys() {
+            if let Some(port_num) = port_str.split('/').next() {
+                if let Ok(port) = port_num.parse::<u16>() {
+                    if !ports.contains(&port) {
+                        ports.push(port);
                     }
                 }
             }
         }
     }
+}
+
+#[cfg(feature = "docker")]
+async fn get_container_ports(container_name: &str) -> Result<Vec<u16>> {
+    let mut ports = Vec::new();
+
+    if let Some(output) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .Config.ExposedPorts}}",
+        container_name,
+    ])
+    .await
+    {
+        if output.status.success() {
+            parse_ports_json(&output.stdout, &mut ports);
+        }
+    }
 
     // Also check network settings port bindings
-    let output2 = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Ports}}",
-            container_name,
-        ])
-        .output()
-        .await;
-
-    if let Ok(output2) = output2 {
+    if let Some(output2) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .NetworkSettings.Ports}}",
+        container_name,
+    ])
+    .await
+    {
         if output2.status.success() {
-            let stdout = String::from_utf8_lossy(&output2.stdout);
-            let trimmed_output = stdout.trim();
-            if let Ok(map) = serde_json::from_str::<serde_json::Map<String, Value>>(trimmed_output)
-            {
-                for port_str in map.keys() {
-                    if let Some(port_num) = port_str.split('/').next() {
-                        if let Ok(port) = port_num.parse::<u16>() {
-                            if !ports.contains(&port) {
-                                ports.push(port);
-                            }
-                        }
-                    }
-                }
-            }
+            parse_ports_json(&output2.stdout, &mut ports);
         }
     }
 
@@ -8507,15 +9280,20 @@ async fn execute_http_body_probe(
     path: &str,
     timeout_secs: u32,
 ) -> HttpProbeExecution {
+    // Exec-first: `docker exec … curl http://localhost:<port>` reaches the app
+    // from inside its own network namespace — no shared network, and it avoids
+    // the per-IP connect timeouts of the agent HTTP path when the agent is not
+    // on the project's network. Fall back to the agent HTTP client (reqwest to
+    // the container DNS name / IP) only when the container has no HTTP client
+    // or no shell.
     let mut execution =
-        execute_http_body_probe_from_agent(app_code, container_name, port, path, timeout_secs)
-            .await;
+        execute_http_body_probe_from_container_exec(container_name, port, path, timeout_secs).await;
     if execution.response.is_none() {
-        let container_execution =
-            execute_http_body_probe_from_container_exec(container_name, port, path, timeout_secs)
+        let agent_execution =
+            execute_http_body_probe_from_agent(app_code, container_name, port, path, timeout_secs)
                 .await;
-        execution.attempts.extend(container_execution.attempts);
-        execution.response = container_execution.response;
+        execution.attempts.extend(agent_execution.attempts);
+        execution.response = agent_execution.response;
     }
     execution
 }
@@ -8528,15 +9306,21 @@ async fn execute_http_status_probe(
     path: &str,
     timeout_secs: u32,
 ) -> HttpProbeExecution {
+    // Exec-first (see `execute_http_body_probe` for rationale).
     let mut execution =
-        execute_http_status_probe_from_agent(app_code, container_name, port, path, timeout_secs)
+        execute_http_status_probe_from_container_exec(container_name, port, path, timeout_secs)
             .await;
     if execution.response.is_none() {
-        let container_execution =
-            execute_http_status_probe_from_container_exec(container_name, port, path, timeout_secs)
-                .await;
-        execution.attempts.extend(container_execution.attempts);
-        execution.response = container_execution.response;
+        let agent_execution = execute_http_status_probe_from_agent(
+            app_code,
+            container_name,
+            port,
+            path,
+            timeout_secs,
+        )
+        .await;
+        execution.attempts.extend(agent_execution.attempts);
+        execution.response = agent_execution.response;
     }
     execution
 }
@@ -8712,7 +9496,7 @@ async fn execute_http_body_probe_from_container_exec(
     let command = build_http_body_probe_command(&url, timeout_secs);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs((timeout_secs + 2) as u64),
-        docker::exec_in_container_with_output(container_name, &command),
+        docker::exec_in_container_with_output_resolved(container_name, &command),
     )
     .await;
     let probe_result = match result {
@@ -8799,7 +9583,7 @@ async fn execute_http_status_probe_from_container_exec(
     let command = build_http_status_probe_command(&url, timeout_secs);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs((timeout_secs + 2) as u64),
-        docker::exec_in_container_with_output(container_name, &command),
+        docker::exec_in_container_with_output_resolved(container_name, &command),
     )
     .await;
     let probe_result = match result {
@@ -8867,6 +9651,9 @@ async fn execute_http_status_probe_from_container_exec(
 fn probe_http_client(timeout_secs: u32) -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs as u64))
+        // Fail fast on unreachable container IPs (agent not on the project
+        // network) instead of blocking for the full request timeout per URL.
+        .connect_timeout(std::time::Duration::from_secs(1))
         .build()
         .ok()
 }
@@ -8909,16 +9696,14 @@ fn push_probe_base_url(urls: &mut Vec<ProbeBaseUrl>, host: &str, port: u16, app_
 
 #[cfg(feature = "docker")]
 async fn get_container_ip_addresses(container_name: &str) -> Vec<String> {
-    let output = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Networks}}",
-            container_name,
-        ])
-        .output()
-        .await;
-    let Ok(output) = output else {
+    let Some(output) = docker_cli_output(&[
+        "inspect",
+        "--format",
+        "{{json .NetworkSettings.Networks}}",
+        container_name,
+    ])
+    .await
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -9312,7 +10097,7 @@ async fn handle_probe_endpoints(
         "probe_endpoints",
     );
     let requested_container = resolve_container_name(&data.app_code, &data.container);
-    let target_name = resolve_probe_container_name(&data.app_code, &data.container).await;
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     let mut protocols_detected: Vec<String> = Vec::new();
     let mut endpoints: Vec<Value> = Vec::new();
@@ -9892,6 +10677,7 @@ mod tests {
             pipe_instance_id: "pipe-restore-1".into(),
             source_adapter: None,
             source_container: Some("source-app".into()),
+            source_url: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -9903,6 +10689,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "email": "$.user.email" })),
             trigger_type: "webhook".into(),
         });
@@ -9956,6 +10743,7 @@ mod tests {
             pipe_instance_id: "pipe-deactivate-1".into(),
             source_adapter: None,
             source_container: Some("source-app".into()),
+            source_url: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -9967,6 +10755,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "webhook".into(),
         });
@@ -10016,6 +10805,7 @@ mod tests {
             pipe_instance_id: "pipe-poll-1".into(),
             source_adapter: None,
             source_container: None,
+            source_url: None,
             source_endpoint: "http://127.0.0.1:1/source".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -10027,6 +10817,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "poll".into(),
         });
@@ -10134,6 +10925,7 @@ mod tests {
                 "password": "pop3-secret"
             }))),
             source_container: None,
+            source_url: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
             source_broker_url: Some("amqp://guest:guest@localhost:5672/%2f".into()),
@@ -10149,6 +10941,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/runtime/pipe".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: "rabbitmq".into(),
         });
@@ -10192,6 +10985,7 @@ mod tests {
                 "mailbox": "INBOX"
             }))),
             source_container: None,
+            source_url: None,
             source_endpoint: "/source".into(),
             source_method: "GET".into(),
             source_broker_url: None,
@@ -10205,6 +10999,7 @@ mod tests {
             target_container: None,
             target_endpoint: "/target".into(),
             target_method: "POST".into(),
+            target_headers: None,
             field_mapping: Some(json!({ "subject": "$.subject" })),
             trigger_type: "manual".into(),
         });
@@ -10215,6 +11010,7 @@ mod tests {
             source_adapter: None,
             input_data: Some(json!({ "subject": "hello" })),
             source_container: None,
+            source_url: None,
             source_endpoint: default_pipe_source_endpoint(),
             source_method: default_pipe_source_method(),
             target_adapter: None,
@@ -10222,6 +11018,7 @@ mod tests {
             target_container: None,
             target_endpoint: default_pipe_target_endpoint(),
             target_method: default_pipe_target_method(),
+            target_headers: None,
             field_mapping: None,
             trigger_type: default_pipe_trigger_type(),
         };
@@ -10926,11 +11723,487 @@ services:
         assert_eq!(compose_dir, deploy_dir.to_string_lossy());
         assert_eq!(resolved_file, compose_file.to_string_lossy());
     }
+
+    // Regression tests for config/env destination resolution (BUGS.md):
+    // relative destination_path values must resolve against the compose
+    // project directory, never the agent process's CWD.
+
+    #[test]
+    fn resolve_config_destination_joins_relative_path_to_base_dir() {
+        let base = std::path::Path::new("/home/trydirect/project");
+
+        let resolved = resolve_config_destination(Some(base), "blog/docker/production/.env");
+
+        assert_eq!(
+            resolved,
+            base.join("blog/docker/production/.env"),
+            "a relative destination must land under the compose dir"
+        );
+    }
+
+    #[test]
+    fn resolve_config_destination_keeps_absolute_path_untouched() {
+        let base = std::path::Path::new("/home/trydirect/project");
+
+        let resolved = resolve_config_destination(Some(base), "/etc/nginx/conf.d/app.conf");
+
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from("/etc/nginx/conf.d/app.conf"),
+            "an absolute destination must keep working as-is"
+        );
+    }
+
+    #[test]
+    fn resolve_config_destination_normalizes_parent_segments() {
+        let base = std::path::Path::new("/home/trydirect/project");
+
+        let inside = resolve_config_destination(Some(base), "sub/../.env");
+        assert_eq!(inside, base.join(".env"));
+
+        let escaping = resolve_config_destination(Some(base), "../../leak.env");
+        assert_eq!(
+            escaping,
+            std::path::PathBuf::from("/home/leak.env"),
+            ".. segments must be resolved so containment checks can see the escape"
+        );
+    }
+
+    #[test]
+    fn resolve_config_destination_without_base_dir_keeps_relative_path() {
+        let resolved = resolve_config_destination(None, "sub/.env");
+        assert_eq!(resolved, std::path::PathBuf::from("sub/.env"));
+    }
+
+    #[test]
+    fn resolve_config_destination_keeps_escape_visible_for_relative_bases() {
+        // Regression: `..` must not eat previously kept `..` segments, or an
+        // escape looks contained and lands inside the project instead of
+        // being refused.
+        assert_eq!(
+            resolve_config_destination(None, "../../x.env"),
+            std::path::PathBuf::from("../../x.env")
+        );
+        assert_eq!(
+            resolve_config_destination(Some(std::path::Path::new(".")), "../../x.env"),
+            std::path::PathBuf::from("../../x.env")
+        );
+        assert_eq!(
+            resolve_config_destination(Some(std::path::Path::new("project")), "../../x.env"),
+            std::path::PathBuf::from("../x.env")
+        );
+    }
+
+    #[test]
+    fn path_within_dir_detects_escapes() {
+        let base = std::path::Path::new("/home/trydirect/project");
+
+        assert!(path_within_dir(base, &base.join("sub/.env")));
+        assert!(path_within_dir(base, &base.join("sub/../.env")));
+        assert!(!path_within_dir(
+            base,
+            std::path::Path::new("/home/trydirect/leak.env")
+        ));
+        assert!(!path_within_dir(
+            base,
+            std::path::Path::new("/home/trydirect/project-evil/.env")
+        ));
+
+        // An empty/`.` base has no prefix: only relative, non-escaping
+        // candidates count as contained.
+        let dot = std::path::Path::new(".");
+        assert!(path_within_dir(dot, std::path::Path::new("sub/.env")));
+        assert!(path_within_dir(dot, std::path::Path::new("sub/../.env")));
+        assert!(!path_within_dir(dot, std::path::Path::new("../../x.env")));
+        assert!(!path_within_dir(dot, std::path::Path::new("/etc/x.env")));
+    }
+}
+
+/// Regression tests for `deploy_app`'s `image` field (stacker/BUGS.md §35):
+/// the documented contract is "Optional: specific image to use (overrides
+/// compose file)", but the deploy used to materialize the compose exactly as
+/// written and never read `image`, so `docker compose pull/up` ran the
+/// compose's own image while the command reported `status: "deployed"`.
+///
+/// Precedence and ordering in the deploy pipeline:
+/// - payload `compose_content` wins over the compose file already on disk;
+/// - the requested `image` is applied at finalize time — after every
+///   `config_files`/env write — to the compose as it exists at deploy time,
+///   wins over the `image:` of the service `app_code` resolves to (unique
+///   `my.stacker.service` label match, then exact service key), and touches
+///   that service only;
+/// - a blank `image` is ignored.
+#[cfg(all(test, feature = "docker"))]
+mod deploy_image_override_tests {
+    use super::*;
+
+    /// The compose shape observed live in stacker/BUGS.md §35: the n8n service
+    /// carries the stale image, with a second service and volumes that must
+    /// survive the override untouched.
+    const N8N_COMPOSE: &str = r#"services:
+  n8n:
+    image: n8nio/n8n:2.45.4
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+  db:
+    image: postgres:16
+volumes:
+  n8n_data: {}
+"#;
+
+    fn deploy_command(params: Value) -> DeployAppCommand {
+        serde_json::from_value(params).expect("deploy_app payload should deserialize")
+    }
+
+    async fn materialize(
+        compose_dir: &std::path::Path,
+        data: &DeployAppCommand,
+    ) -> Result<(), CommandError> {
+        let compose_dir = compose_dir.to_string_lossy().to_string();
+        let compose_file = format!("{}/docker-compose.yml", compose_dir);
+        materialize_deploy_compose(data, &compose_dir, &compose_file, &mut Vec::new()).await
+    }
+
+    /// The deploy's finalize step — handler order: after every config/env
+    /// write, right before `compose pull/up`.
+    async fn finalize(
+        compose_dir: &std::path::Path,
+        data: &DeployAppCommand,
+    ) -> Result<String, CommandError> {
+        let compose_file = format!("{}/docker-compose.yml", compose_dir.to_string_lossy());
+        finalize_deploy_compose(&compose_file, &data.app_code, data.image.as_deref()).await
+    }
+
+    fn materialized_yaml(dir: &std::path::Path) -> serde_yaml::Value {
+        let written = std::fs::read_to_string(dir.join("docker-compose.yml"))
+            .expect("compose should be written");
+        serde_yaml::from_str(&written).expect("materialized compose should parse")
+    }
+
+    fn service_image(doc: &serde_yaml::Value, service: &str) -> String {
+        doc.get("services")
+            .and_then(|services| services.get(service))
+            .and_then(|service| service.get("image"))
+            .and_then(|image| image.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn image_override_rewrites_target_service_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+            "pull": true,
+            "force_recreate": true,
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("compose should finalize");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(
+            service_image(&doc, "n8n"),
+            "n8nio/n8n:2.47.7",
+            "the requested image must win over the compose's image for the target service"
+        );
+        assert_eq!(
+            service_image(&doc, "db"),
+            "postgres:16",
+            "other services must keep their own image"
+        );
+
+        let n8n = doc.get("services").unwrap().get("n8n").unwrap();
+        assert_eq!(
+            n8n.get("ports").unwrap().get(0).unwrap().as_str().unwrap(),
+            "5678:5678",
+            "ports must survive the override"
+        );
+        assert_eq!(
+            n8n.get("volumes")
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "n8n_data:/home/node/.n8n",
+            "volumes must survive the override"
+        );
+        assert!(
+            doc.get("volumes").unwrap().get("n8n_data").is_some(),
+            "top-level volumes must survive the override"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_override_rewrites_compose_on_disk_without_payload_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        finalize(dir.path(), &data)
+            .await
+            .expect("on-disk compose should be rewritten");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(service_image(&doc, "n8n"), "n8nio/n8n:2.47.7");
+        assert_eq!(
+            service_image(&doc, "db"),
+            "postgres:16",
+            "other services must keep their own image"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_override_fails_when_target_service_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "gateway",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        let error = finalize(dir.path(), &data).await.expect_err(
+            "an unappliable override must fail instead of deploying the compose's image",
+        );
+        assert_eq!(error.code, "image_override_failed");
+    }
+
+    #[tokio::test]
+    async fn without_image_the_compose_content_is_written_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize must not require an override");
+
+        let written = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        assert_eq!(
+            written, N8N_COMPOSE,
+            "no override must not rewrite the compose"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_image_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "   ",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("a blank image must not fail finalize");
+
+        let written = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        assert_eq!(
+            written, N8N_COMPOSE,
+            "a blank image must not rewrite the compose"
+        );
+    }
+
+    /// The logical app code is not always the Compose service key: the CLI
+    /// generator names a service `proxy-manager` but labels it
+    /// `my.stacker.service=nginx_proxy_manager` (PR #140 review). The override
+    /// must resolve the unique Stacker-label match — exact-key fallback —
+    /// instead of rejecting the valid service with `image_override_failed`.
+    #[test]
+    fn image_override_resolves_service_by_stacker_label() {
+        let compose = r#"services:
+  proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    labels:
+      my.stacker.service: nginx_proxy_manager
+  app:
+    image: example/app:1
+"#;
+
+        let rewritten = override_service_image_in_compose(
+            compose,
+            "nginx_proxy_manager",
+            "jc21/nginx-proxy-manager:5.2",
+        )
+        .expect("the Stacker-labelled service must be resolvable");
+
+        let doc: serde_yaml::Value = serde_yaml::from_str(&rewritten).unwrap();
+        let services = doc.get("services").unwrap();
+        assert_eq!(
+            services
+                .get("proxy-manager")
+                .unwrap()
+                .get("image")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "jc21/nginx-proxy-manager:5.2"
+        );
+        assert_eq!(
+            services
+                .get("app")
+                .unwrap()
+                .get("image")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "example/app:1"
+        );
+    }
+
+    /// The exact service key is the fallback for stacks without the label, and
+    /// unknown app codes resolve to nothing (PR #140 review).
+    #[test]
+    fn service_key_resolution_falls_back_to_the_exact_key() {
+        assert_eq!(
+            resolve_compose_service_key(N8N_COMPOSE, "n8n"),
+            Some("n8n".to_string())
+        );
+        assert_eq!(resolve_compose_service_key(N8N_COMPOSE, "gateway"), None);
+        assert_eq!(resolve_compose_service_key(N8N_COMPOSE, "  "), None);
+    }
+
+    /// A unique Stacker-label match is authoritative — the label is the
+    /// logical identity the generator writes, the key is incidental — and
+    /// ambiguous labels fall back to the exact key (PR #140 review).
+    #[test]
+    fn service_key_resolution_prefers_a_unique_stacker_label() {
+        let dual = r#"services:
+  proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    labels:
+      my.stacker.service: nginx_proxy_manager
+  nginx_proxy_manager:
+    image: example/other:1
+"#;
+        assert_eq!(
+            resolve_compose_service_key(dual, "nginx_proxy_manager"),
+            Some("proxy-manager".to_string())
+        );
+
+        let ambiguous = r#"services:
+  one:
+    image: example/one:1
+    labels:
+      my.stacker.service: web
+  two:
+    image: example/two:1
+    labels:
+      my.stacker.service: web
+  web:
+    image: example/web:1
+"#;
+        assert_eq!(
+            resolve_compose_service_key(ambiguous, "web"),
+            Some("web".to_string())
+        );
+    }
+
+    /// The finalize write is atomic (PR #140 review): the live compose is
+    /// backed up, written through a sibling temp file, and renamed over the
+    /// original — no truncated live file and no stray temp on disk.
+    #[tokio::test]
+    async fn finalize_replaces_the_compose_atomically_with_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize should succeed");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(service_image(&doc, "n8n"), "n8nio/n8n:2.47.7");
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("docker-compose.yml.stacker-bak-")),
+            "the pre-override compose must be backed up: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(".tmp.")),
+            "no temp files may be left behind: {names:?}"
+        );
+    }
+
+    /// `config_files` entries are written after the compose is materialized,
+    /// and one targeting `docker-compose.yml` replaces the whole file. The
+    /// requested image must be applied to the compose as it exists when the
+    /// deploy is finalized — after every config/env write — or the override is
+    /// lost (and a drift check can reject the earlier rewrite) (PR #140
+    /// review).
+    #[tokio::test]
+    async fn image_override_survives_a_config_file_replacing_the_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+
+        // A config_files entry targeting docker-compose.yml lands after
+        // materialization and replaces the whole file.
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize must apply the override to the replaced compose");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(
+            service_image(&doc, "n8n"),
+            "n8nio/n8n:2.47.7",
+            "the requested image must survive a config file replacing the compose"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "docker"))]
 mod write_config_tests {
-    use super::write_config_to_disk;
+    use super::{write_config_to_disk, write_config_to_disk_with_force};
     use crate::security::vault_client::{AppConfig, AppConfigDriftCheck};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -11123,6 +12396,211 @@ mod write_config_tests {
         let backups = sibling_backups(&file_path);
         assert_eq!(backups.len(), super::MANAGED_FILE_BACKUP_KEEP);
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "VALUE=7\n");
+    }
+
+    // Regression tests (BUGS.md): a relative destination_path must land under
+    // the resolved compose dir, never the agent's CWD; absolute destinations
+    // keep working as-is.
+
+    #[tokio::test]
+    async fn test_relative_destination_lands_under_base_dir_not_cwd() {
+        let dir = tempdir().unwrap();
+        let unique = uuid::Uuid::new_v4().to_string();
+        let relative = format!("{}/docker/production/.env", unique);
+        let config = app_config(relative.clone(), "KEY=value\n".to_string());
+
+        write_config_to_disk_with_force(&config, false, Some(dir.path()))
+            .await
+            .expect("write should succeed");
+
+        let landed = dir.path().join(&relative);
+        assert_eq!(
+            fs::read_to_string(&landed).unwrap(),
+            "KEY=value\n",
+            "a relative destination_path must land under the resolved compose dir"
+        );
+        assert!(
+            !std::env::current_dir().unwrap().join(&relative).exists(),
+            "a relative destination_path must not land in the agent's CWD"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_absolute_destination_untouched_by_base_dir() {
+        let base = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let file_path = target.path().join("app.conf");
+        let config = app_config(file_path.to_string_lossy().to_string(), "x=1\n".to_string());
+
+        write_config_to_disk_with_force(&config, false, Some(base.path()))
+            .await
+            .expect("write should succeed");
+
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "x=1\n",
+            "an absolute destination_path must keep working as-is"
+        );
+        assert!(
+            fs::read_dir(base.path()).unwrap().next().is_none(),
+            "the base dir must not be touched for absolute destinations"
+        );
+    }
+}
+
+/// Regression tests for `ensure_env_files_exist` (BUGS.md): env files are
+/// created under the compose project directory only — never outside it.
+#[cfg(all(test, feature = "docker"))]
+mod ensure_env_file_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn compose_with_env_file(env_file: &str) -> String {
+        format!(
+            "services:\n  web:\n    image: nginx\n    env_file: {}\n",
+            env_file
+        )
+    }
+
+    #[tokio::test]
+    async fn creates_missing_env_file_inside_project_dir() {
+        let dir = tempdir().unwrap();
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file(".env"),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert!(dir.path().join(".env").exists());
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[tokio::test]
+    async fn creates_block_sequence_env_files_inside_project_dir() {
+        let dir = tempdir().unwrap();
+        let compose = "services:\n  web:\n    image: nginx\n    env_file:\n      - .env\n      - extra.env # trailing comment\n";
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(compose, dir.path().to_str().unwrap(), &mut errors).await;
+
+        assert!(dir.path().join(".env").exists());
+        assert!(dir.path().join("extra.env").exists());
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[tokio::test]
+    async fn refuses_to_create_env_file_outside_project_dir() {
+        let dir = tempdir().unwrap();
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file("../../escape.env"),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert!(
+            !dir.path().join("../../escape.env").exists(),
+            "no file may be created outside the project directory"
+        );
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "env_file_outside_project");
+        assert!(
+            errors[0].message.contains("web"),
+            "the error must name the offending service: {}",
+            errors[0].message
+        );
+        assert!(
+            errors[0].message.contains("../escape.env") || errors[0].message.contains(".."),
+            "the error must name the offending entry: {}",
+            errors[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_to_create_absolute_env_file_outside_project_dir() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let absolute = outside.path().join("orphan.env");
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file(absolute.to_str().unwrap()),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert!(
+            !absolute.exists(),
+            "no file may be created outside the project directory"
+        );
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "env_file_outside_project");
+    }
+
+    #[tokio::test]
+    async fn refuses_duplicate_env_file_entries_once() {
+        let dir = tempdir().unwrap();
+        let compose = "services:\n  web:\n    image: nginx\n    env_file: ../../dup.env\n  db:\n    image: postgres\n    env_file: ../../dup.env\n";
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(compose, dir.path().to_str().unwrap(), &mut errors).await;
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "duplicate env_file entries must be refused once: {:?}",
+            errors
+        );
+    }
+
+    #[tokio::test]
+    async fn leaves_existing_env_file_outside_project_dir_alone() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let absolute = outside.path().join("shared.env");
+        std::fs::write(&absolute, "SHARED=1\n").unwrap();
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file(absolute.to_str().unwrap()),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(&absolute).unwrap(),
+            "SHARED=1\n",
+            "an existing env file outside the project is legitimate and must be left alone"
+        );
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[tokio::test]
+    async fn keeps_env_file_resolving_inside_after_parent_traversal() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file("sub/../.env"),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert!(dir.path().join(".env").exists());
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+        assert!(
+            !dir.path().join("sub").join(".env").exists(),
+            "the file must land at the normalized location only"
+        );
     }
 }
 
@@ -11702,6 +13180,25 @@ mod list_containers_command_tests {
         };
         cmd = cmd.normalize();
         assert_eq!(cmd.log_lines, 100); // Should be clamped to 100
+    }
+
+    /// `list_containers` entries carry the logical identity fields even when
+    /// health metrics are disabled — container discovery and the dashboard
+    /// split key on them (PR #140 review).
+    #[cfg(feature = "docker")]
+    #[test]
+    fn plain_list_entry_carries_app_identity() {
+        let mut labels = HashMap::new();
+        labels.insert("my.stacker.service".to_string(), "n8n".to_string());
+
+        let entry =
+            super::container_list_entry("project-n8n-1", "running", "n8nio/n8n:2.45.4", &labels);
+
+        assert_eq!(entry["app_code"], "n8n");
+        assert_eq!(entry["scope"], "project");
+        assert_eq!(entry["image"], "n8nio/n8n:2.45.4");
+        assert_eq!(entry["name"], "project-n8n-1");
+        assert_eq!(entry["status"], "running");
     }
 
     #[test]
