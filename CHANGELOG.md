@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+### Fixed
+- `deploy_app` now honours its `image` field: the requested image is rewritten into the resolved service's `image:` — a unique `my.stacker.service` label match, then the exact service key — of the compose the deploy runs, applied at finalize time after every `config_files`/env write and right before `docker compose pull/up`, instead of being silently ignored while the command reported `status: "deployed"` (stacker BUGS.md §35). The override touches that service only — other services, ports, and volumes survive — the compose is replaced atomically with a backup retained, and a deploy whose override cannot be applied fails with `image_override_failed` rather than running the compose's own image.
+- Container commands resolve their target once (PR #140 review): `logs`/`restart`/`stop`/`start`/`exec` no longer re-resolve an already-resolved container name — a second lookup could select a different container (`project-app-1-1` matches the fuzzy pattern for `project-app-1`) — and name resolution now prefers the `my.stacker.service` label across the whole listing, then the Compose service label, then the exact container name, then the fuzzy patterns.
+- `list_containers` reports `app_code` and `scope` in every listing mode, not just when health metrics are requested; the plain listing also carries `image` and `labels` (PR #140 review).
+- `ContainerInfo` no longer serializes Docker labels: they are needed internally for identity resolution but can carry credentials and deployment paths, and the struct is exposed by the unauthenticated API-mode response (PR #140 review).
+- A blank `my.stacker.service` label no longer masks a valid Compose service label when deriving a container's app code (PR #140 review).
+- The bundled discovery consumer retains the `app_code` the agent reports for each container, so a container named `project-app-1` matches its registered app `floci` instead of being suggested as unregistered (PR #140 review).
+- Homebrew formula template uses `license any_of: ["MIT", "Apache-2.0"]` as Homebrew's alternatives syntax requires (PR #140 review); a rendering test pins it.
+
+## 0.2.2 — 2026-11-13
+### Added
+- Published to crates.io (`cargo install status-panel`) and Homebrew (`brew install trydirect/tap/status-panel`); GitHub releases now ship per-target tarballs (`status-panel-<version>-<target>.tar.gz`) with the `status` binary, web UI assets, and licenses, and the Homebrew tap formula is updated automatically on release.
+- Pipe delivery supports `target_headers` for authenticated targets and `source_url` for external HTTP sources fetched by the agent (no curl needed inside the container).
+
+### Changed
+- `list_containers` and container resolution report `app_code` from the stacker label and resolve the real container before addressing Docker; platform containers (e.g. telegraf) are counted as the platform's, not the user's; the agent's call to `/api/v1/apps/status` is gone.
+- The agent no longer mints tokens it cannot use.
+- Probing uses curl again, with a probe timeout; label matching for container targets.
+- Rust toolchain pinned to 1.98.1; release builds install cross targets into the pinned toolchain (fixes `can't find crate for core` on musl and macOS x86_64 targets).
+
+## 0.2.1 — 2026-07-13
+### Added
+- Vault mTLS: client-certificate support for the Status Panel agent's Vault connection; `DEFAULT_VAULT_URL` moved to `:8443`.
+- Autonomous agent token recovery via Vault self-issue.
+
+### Changed
+- README reworked with an Integrations section; deployment lock files removed and covered by `.gitignore` patterns.
+
+## 0.2.0 — 2026-06-01
+### Added
+- Pipe adapter crates (`pipe-adapter-sdk`, `pipe-adapter-mail`) vendored in-repo so CI is PR-safe; SMTP pipe delivery works end to end.
+- Real website deployment example; `status` shows ports.
+
+### Changed
+- Better container resolving; command probing moved from curl to reqwest.
+- Vault NPM credentials accept `schema_version` as both numeric `1` and string `"1"`; npm Vault read path fixed.
+
 ## 0.1.9 — 2026-05-15
 ### Added
 - `deploy_app` now creates adjacent `.stacker-bak-*` backups before overwriting managed compose, env, or config bundle files, retaining the five most recent backups per file.

@@ -2,6 +2,9 @@
 name = "pipe-adapter-mail"
 version = "0.1.0"
 edition = "2021"
+description = "IMAP/POP3/SMTP pipe adapter for status-panel, built on pipe-adapter-sdk"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/trydirect/status"
 
 [dependencies]
 async-trait = "0.1"
@@ -12,7 +15,7 @@ async-pop = { version = "1.1.3", default-features = false, features = ["runtime-
 futures-util = "0.3"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
 mailparse = "0.16.1"
-pipe-adapter-sdk = { path = "../pipe-adapter-sdk" }
+pipe-adapter-sdk = { path = "../pipe-adapter-sdk", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
