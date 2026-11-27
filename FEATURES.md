@@ -274,3 +274,138 @@ in `tests/backup_command.rs` (7). Both feature configurations pass
   registered `agent_id`, `src/agent/daemon.rs:87`); if unset, the command
   fails rather than substituting anything. `deployment_hash` is never used.
 - **`$BACKUP_FILENAME`** is generated as `run-<run_id>-<UTC yyyymmddTHHMMSSZ>`.
+
+---
+
+## Feature: native `sandbox` agent command (WS-S, ephemeral containers for untrusted/AI code)
+
+**Status:** to implement. **Owner:** status-panel agent. **Plan:** `config/PLAN-sandboxes.md`.
+**Contract (source of truth):** `config/shared-fixtures/api-contracts/sandboxes.json`
+(`SandboxCommand`, `resource`, `lifecycle`, `isolation`).
+
+### Goal
+
+Give the Status Panel agent a first-class `sandbox` command that Stacker queues
+through the existing command queue. The agent runs short-lived, domain-less,
+volume-less Docker containers for untrusted and AI-generated code:
+`create -> exec/writeFile/readFile -> kill`, with CPU/RAM/PID limits and hard
+isolation. Model is Dokploy's Sandboxes.
+
+The sandbox lives wherever the agent is installed (user servers and TryDirect
+hosts); the target server is chosen at create time (decision S1). The agent is
+the only thing that touches Docker — Stacker just queues commands and tracks
+state.
+
+### How it fits today
+
+Stacker enqueues one command of `type: "sandbox"` per operation. The payload is
+`{action, sandboxId, ...}` where `action` selects the operation and the rest
+carries the params Stacker built:
+
+```json
+{ "action": "create", "sandbox": { "id", "image", "runtime", "networkMode",
+  "cpu", "memMb", "pidsLimit", "inactivityTimeoutSec", "maxLifetimeSec", ... } }
+{ "action": "exec",  "sandboxId", "command", "timeoutSec", "maxOutputBytes" }
+{ "action": "write_file", "sandboxId", "path", "contentBase64", "maxBytes" }
+{ "action": "read_file",  "sandboxId", "path", "maxBytes" }
+{ "action": "list_files", "sandboxId", "path" }
+{ "action": "kill",   "sandboxId" }
+```
+
+Stacker marks the sandbox row (creating/running/killed/expired) and reaps it via
+the lifecycle manager (inactivity + hard-lifetime). The agent owns the container.
+
+---
+
+## What to build
+
+### 1. Command plumbing (follow the existing pattern)
+
+- Add `Sandbox(SandboxCommand)` to `StackerCommand` in `src/commands/stacker.rs`.
+- Parse it in `parse_stacker_command` for `type: "sandbox" | "stacker.sandbox"`
+  (mirror how `"exec"` is parsed at `src/commands/stacker.rs:2205`). Deserialize
+  `{action, sandboxId, ...}` into an action-tagged enum.
+- Dispatch in `execute_stacker_command` to `handle_sandbox(agent_cmd, data)`
+  (near `StackerCommand::Exec`, `src/commands/stacker.rs:3792`).
+- Report via the existing `CommandResult` path (`src/agent/daemon.rs:
+  execute_and_report`, `base_result` at `src/commands/stacker.rs:3438`).
+
+### 2. `create` — run the container
+
+- `docker run -d` the sandbox image with the contract's isolation (see §4).
+- Name the container after `sandboxId` (or keep a `sandboxId -> container` map) so
+  later exec/kill find it.
+- Report the container id + `status: running`.
+
+### 3. `exec` / file ops — run inside the container
+
+- **exec:** `docker exec <container> sh -c <command>` with a per-call timeout
+  (`timeoutSec`), capture `exitCode`, `stdout`, `stderr`. Cap collected output at
+  `maxOutputBytes` (1 MiB). Kill the process on timeout.
+- **write_file:** write `contentBase64` (base64) to `path` inside the container
+  (cap `maxBytes`, 10 MiB). `docker exec ... sh -c 'cat > path'` piping the bytes,
+  or `docker cp`.
+- **read_file:** read `path`, return `{path, contentBase64}` (cap 10 MiB).
+- **list_files:** list `path`, return `[{name, size, isDir}]`.
+- **kill:** `docker rm -f` the container (idempotent — a missing container is a
+  success).
+
+### 4. Isolation (S3) — apply on `docker run`
+
+- `--cap-drop=ALL --security-opt=no-new-privileges:true`.
+- `--user=1000:1000` (non-root).
+- `--pids-limit`, `--memory`, `--memory-swap` from the payload's `pidsLimit`/
+  `memMb`.
+- Network: `--network=<isolated>` by default (a dedicated bridge with **no
+  access to project networks**); `none` allowed. Do not attach project networks.
+- Runtime: `runc` (trusted) or `runsc` / gVisor (default for untrusted) via
+  `--runtime=<runsc>` — register `runsc` once on the host (like kata).
+- Env: the sandbox's env is write-only — never return it in any report.
+
+### 5. Report the result
+
+`CommandResult.result` (JSON):
+- exec: `{ "exitCode", "stdout", "stderr", "sandboxId" }`.
+- write_file: `{ "written": true, "path" }`.
+- read_file: `{ "path", "contentBase64" }`.
+- list_files: `{ "list": [{ "name", "size", "isDir" }] }`.
+- create/kill: `{ "containerId", "status" }` / `{ "killed": true }`.
+Errors: a redacted message (never env/secrets).
+
+---
+
+## Non-negotiables
+
+- **No secrets in logs or results.** The sandbox env is write-only; never echo it.
+- **Hard isolation** on every container (cap-drop all, no-new-privileges,
+  non-root, isolated network, resource limits). Untrusted code must not reach
+  project networks.
+- **Timeouts + output caps**: per-call timeout on exec; 1 MiB exec output, 10 MiB
+  file caps. Never unbounded.
+- **Idempotent kill**: `kill` on an already-gone container succeeds.
+- **Generic**: everything vendor/runtime-specific is in the payload (image,
+  runtime, limits) — no sandbox-vendor special-casing.
+
+## Environment / host prerequisites
+
+| Thing | Meaning |
+|---|---|
+| `runsc` (gVisor) registered in Docker | `--runtime=runsc` works (one-time host setup, like kata) |
+| `AGENT_ID` (your registered `agent_id`) | identifies the device if needed |
+| Docker socket access | the agent already runs `docker` for containers |
+
+## Testing
+
+- Unit: parse a `sandbox` command; `docker run` argv assembly (isolation flags
+  present: cap-drop, no-new-privileges, user 1000:1000, pids/mem limits, network);
+  exec output capping; base64 file round-trip; kill idempotency.
+- Integration (mock Docker or a test container): exec returns exitCode/stdout;
+  write/read file round-trip; a killed sandbox is gone; env is never in a report.
+- Fixtures: `config/shared-fixtures/features/sandboxes.feature` (6 acceptance
+  scenarios) — wire them into `tests/features/` + `tests/steps/` where feasible.
+
+## Out of scope
+
+- Snapshot/pause (decision S2 — Dokploy has none either).
+- Scheduling (Stacker owns the lifecycle manager).
+- Multi-node placement (Stacker picks the server at create).
