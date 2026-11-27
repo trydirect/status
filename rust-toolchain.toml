@@ -1,0 +1,14 @@
+# Pin the toolchain so CI cannot break on a stable release nobody chose.
+#
+# The workflow uses dtolnay/rust-toolchain@stable, and with no pin here it
+# tracked whatever stable happened to be current. On 2026-09-06 the runner
+# updated 1.98.0 -> 1.98.1 mid-run and clippy started rejecting code that had
+# not changed, including tonic-generated output that cannot be edited. That
+# failure was indistinguishable from one caused by the commit under test.
+#
+# Bump deliberately: raise the version, run `cargo clippy -- -D warnings` and
+# `cargo clippy --no-default-features --features minimal -- -D warnings`
+# locally, fix what the new lints find, and commit both together.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

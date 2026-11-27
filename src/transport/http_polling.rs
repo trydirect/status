@@ -174,6 +174,108 @@ async fn send_long_poll_request(
     .await
 }
 
+// --- Log redaction -----------------------------------------------------------
+//
+// Command payloads are secret-bearing: `deploy_app` carries the rendered
+// runtime env in `config_files[].content` and registry credentials in
+// `registry_auth`. Response/report bodies must never reach the logs verbatim.
+
+/// Keys whose values must never be logged verbatim: rendered runtime env,
+/// config content and its previews, registry credentials, exec commands and
+/// anything named like a credential.
+fn is_sensitive_log_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "content"
+            | "env_vars"
+            | "registry_auth"
+            | "token"
+            | "secret"
+            | "password"
+            | "command"
+            | "diff"
+    ) || key.ends_with("_token")
+        || key.ends_with("_secret")
+        || key.ends_with("_password")
+        || key.ends_with("_content")
+        || key.ends_with("_preview")
+}
+
+/// Deep-copy `value` with every sensitive field replaced by `<redacted>`.
+fn redact_sensitive_values(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, nested)| {
+                    let redacted = if is_sensitive_log_key(key) {
+                        Value::String("<redacted>".to_string())
+                    } else {
+                        redact_sensitive_values(nested)
+                    };
+                    (key.clone(), redacted)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_values).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Log-safe summary of a `/wait` response body: identity fields and sizes
+/// only, never the payload itself.
+fn command_body_summary(body_text: &str) -> String {
+    let mut summary = format!("size={}", body_text.len());
+    let Ok(value) = serde_json::from_str::<Value>(body_text) else {
+        summary.push_str(" unparsable=true");
+        return summary;
+    };
+
+    let Some(item) = value.get("item") else {
+        summary.push_str(" item=missing");
+        return summary;
+    };
+    let Some(item) = item.as_object() else {
+        summary.push_str(" item=null");
+        return summary;
+    };
+
+    for field in ["command_id", "type"] {
+        if let Some(field_value) = item.get(field).and_then(Value::as_str) {
+            summary.push(' ');
+            summary.push_str(field);
+            summary.push('=');
+            summary.push_str(field_value);
+        }
+    }
+    if let Some(parameters) = item.get("parameters") {
+        if let Some(app_code) = parameters.get("app_code").and_then(Value::as_str) {
+            summary.push_str(" app_code=");
+            summary.push_str(app_code);
+        }
+        let param_count = parameters.as_object().map(|map| map.len()).unwrap_or(0);
+        summary.push_str(&format!(" param_count={}", param_count));
+    }
+    summary
+}
+
+/// Redacted form of a `/wait` response body, for the opt-in payload dump.
+fn redact_body_for_log(body_text: &str) -> String {
+    match serde_json::from_str::<Value>(body_text) {
+        Ok(value) => redact_sensitive_values(&value).to_string(),
+        Err(_) => format!("<unparsable body size={}>", body_text.len()),
+    }
+}
+
+/// Opt-in payload debugging (`COMMAND_PAYLOAD_DEBUG=1`): dumps the redacted
+/// payload. Off by default — even redacted dumps are opt-in only.
+fn payload_debug_enabled() -> bool {
+    matches!(
+        std::env::var("COMMAND_PAYLOAD_DEBUG").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 async fn handle_poll_response(response: reqwest::Response, url: &str) -> Result<PollResponse> {
     let status_code = response.status().as_u16();
     debug!(
@@ -199,11 +301,19 @@ async fn handle_poll_response(response: reqwest::Response, url: &str) -> Result<
 
 async fn parse_command_from_response(response: reqwest::Response) -> Result<PollResponse> {
     let body_text = response.text().await.context("read response body")?;
+    // Never log the raw body: a deploy_app payload embeds rendered secrets
+    // (config_files[].content) and registry credentials (stacker/BUGS.md).
     debug!(
         status_code = 200,
-        response_body = %body_text,
+        summary = %command_body_summary(&body_text),
         "poll response: HTTP 200 with body"
     );
+    if payload_debug_enabled() {
+        debug!(
+            payload = %redact_body_for_log(&body_text),
+            "poll response payload (redacted, COMMAND_PAYLOAD_DEBUG)"
+        );
+    }
 
     let json_value: Value = serde_json::from_str(&body_text).context("parse command json")?;
 
@@ -221,7 +331,7 @@ fn extract_command_from_json(json_value: Value, body_text: &str) -> Result<PollR
         Some(Value::Object(obj)) if !obj.is_empty() => obj,
         _ => {
             debug!(
-                response_body = %body_text,
+                body_bytes = body_text.len(),
                 "poll response: 200 but 'item' is null/missing - no command available"
             );
             return Ok(PollResponse {
@@ -282,7 +392,7 @@ fn validate_command_id(
         .map(|s| s.to_string())
         .ok_or_else(|| {
             debug!(
-                response_body = %body_text,
+                body_bytes = body_text.len(),
                 "poll response: 200 but item has no 'command_id' field - treating as no command"
             );
             anyhow!("missing command_id field")
@@ -401,7 +511,11 @@ pub async fn report_result(
         );
     }
 
-    debug!(url = %url, body = ?body, "reporting command result to stacker");
+    debug!(
+        url = %url,
+        body = %redact_sensitive_values(&serde_json::Value::Object(body.clone())),
+        "reporting command result to stacker"
+    );
 
     let client = Client::new();
     let resp = signed_post_json(&client, &url, agent_id, agent_token, &body).await?;
@@ -420,27 +534,6 @@ pub async fn report_result(
             "report failed: {} | body: {}",
             status_code,
             error_body
-        ))
-    }
-}
-
-/// Update app status after executing a command.
-pub async fn update_app_status<T: Serialize>(
-    base_url: &str,
-    agent_id: &str,
-    agent_token: &str,
-    payload: &T,
-) -> Result<()> {
-    let url = format!("{}/api/v1/apps/status", base_url);
-    let client = Client::new();
-    let resp = signed_post_json(&client, &url, agent_id, agent_token, payload).await?;
-
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "app status update failed: {}",
-            resp.status()
         ))
     }
 }
@@ -526,7 +619,11 @@ pub async fn report_result_with_retry(
         );
     }
 
-    debug!(url = %url, body = ?body, "reporting result with retry");
+    debug!(
+        url = %url,
+        body = %redact_sensitive_values(&serde_json::Value::Object(body.clone())),
+        "reporting result with retry"
+    );
 
     let client = Client::new();
     let config = RetryConfig::default();
@@ -546,29 +643,6 @@ pub async fn report_result_with_retry(
             "report failed: {} | body: {}",
             status_code,
             error_body
-        ))
-    }
-}
-
-/// Update app status with automatic token refresh on 401/403.
-pub async fn update_app_status_with_retry<T: Serialize>(
-    base_url: &str,
-    agent_id: &str,
-    token_provider: &TokenProvider,
-    payload: &T,
-) -> Result<()> {
-    let url = format!("{}/api/v1/apps/status", base_url);
-    let client = Client::new();
-    let config = RetryConfig::default();
-    let resp =
-        signed_post_with_retry(&client, &url, agent_id, token_provider, payload, &config).await?;
-
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "app status update failed: {}",
-            resp.status()
         ))
     }
 }
@@ -830,47 +904,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_app_status_posts_payload() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        env::set_var(TS_OVERRIDE_ENV, "1700000001");
-        env::set_var(REQUEST_ID_OVERRIDE_ENV, "req-456");
-
-        let mut server = Server::new_async().await;
-        let base_url = server.url();
-        let agent_id = "agent-123";
-        let agent_token = "token-abc";
-        let payload = json!({
-            "deployment_hash": "dep-1",
-            "app_code": "web",
-            "status": "running"
-        });
-
-        let body = serde_json::to_vec(&payload).unwrap();
-        let signature = compute_signature_base64(agent_token, &body);
-        let ts = env::var(TS_OVERRIDE_ENV).unwrap();
-        let req_id = env::var(REQUEST_ID_OVERRIDE_ENV).unwrap();
-        let mock = server
-            .mock("POST", "/api/v1/apps/status")
-            .match_header("X-Agent-Id", Matcher::Exact(agent_id.into()))
-            .match_header(
-                "Authorization",
-                Matcher::Exact(format!("Bearer {}", agent_token)),
-            )
-            .match_header("X-Timestamp", Matcher::Exact(ts))
-            .match_header("X-Request-Id", Matcher::Exact(req_id))
-            .match_header("X-Agent-Signature", Matcher::Exact(signature))
-            .match_body(Matcher::Exact(String::from_utf8(body.clone()).unwrap()))
-            .with_status(200)
-            .create_async()
-            .await;
-
-        update_app_status(&base_url, agent_id, agent_token, &payload)
-            .await
-            .expect("update_app_status should succeed");
-        mock.assert();
-    }
-
-    #[tokio::test]
     async fn wait_for_command_adds_hmac_headers() {
         let _guard = env_lock().lock().expect("env lock poisoned");
         env::set_var(TS_OVERRIDE_ENV, "1700000002");
@@ -1094,5 +1127,130 @@ mod tests {
         let obj = serde_json::Map::new();
         let result = validate_command_id(&obj, "body");
         assert!(result.is_err());
+    }
+
+    // Log redaction (BUGS.md): command payloads carry rendered secrets and
+    // registry credentials — none of them may reach the logs verbatim.
+
+    #[test]
+    fn redact_sensitive_values_masks_secret_bearing_fields() {
+        let payload = json!({
+            "item": {
+                "command_id": "cmd-1",
+                "type": "deploy_app",
+                "parameters": {
+                    "app_code": "blog",
+                    "config_files": [
+                        { "destination_path": "blog/docker/prod/.env", "content": "SECRET_KEY=content-secret" }
+                    ],
+                    "env_vars": { "API_TOKEN": "env-secret" },
+                    "registry_auth": { "username": "bot", "password": "registry-secret" },
+                    "vault_token": "token-secret",
+                    "image": "nginx:latest"
+                }
+            }
+        });
+
+        let redacted = redact_sensitive_values(&payload).to_string();
+
+        assert!(
+            !redacted.contains("content-secret"),
+            "content leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("env-secret"),
+            "env_vars leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("registry-secret"),
+            "registry_auth leaked: {redacted}"
+        );
+        assert!(
+            !redacted.contains("token-secret"),
+            "*_token leaked: {redacted}"
+        );
+        assert!(redacted.contains("<redacted>"));
+        assert!(
+            redacted.contains("cmd-1") && redacted.contains("nginx:latest"),
+            "non-sensitive fields must survive: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_values_masks_config_previews_and_content_fields() {
+        // config_diff carries the first 500 chars of Vault/deployed config
+        // content in `vault_preview`/`deployed_preview` (stacker.rs) — the
+        // same secret class as `config_files[].content`.
+        let payload = json!({
+            "result": {
+                "type": "config_diff",
+                "configs": [{
+                    "app_code": "blog",
+                    "destination_path": "blog/.env",
+                    "diff": {
+                        "vault_lines": 12,
+                        "vault_preview": "SECRET_KEY=preview-secret",
+                        "deployed_preview": "OLD_KEY=deployed-secret"
+                    }
+                }]
+            },
+            "config_content": "apply-config-secret",
+            "compose_content": "compose-content-secret",
+            "command": "mysql -pexec-secret"
+        });
+
+        let redacted = redact_sensitive_values(&payload).to_string();
+
+        for secret in [
+            "preview-secret",
+            "deployed-secret",
+            "apply-config-secret",
+            "compose-content-secret",
+            "exec-secret",
+        ] {
+            assert!(!redacted.contains(secret), "{secret} leaked: {redacted}");
+        }
+        assert!(
+            redacted.contains("blog") && redacted.contains("blog/.env"),
+            "identity must survive: {redacted}"
+        );
+    }
+
+    #[test]
+    fn command_body_summary_reports_identity_fields_without_payload() {
+        let body = json!({
+            "item": {
+                "command_id": "cmd-42",
+                "type": "deploy_app",
+                "parameters": {
+                    "app_code": "blog",
+                    "config_files": [{ "content": "SECRET_KEY=summary-secret" }]
+                }
+            },
+            "meta": { "next_poll_secs": 30 }
+        })
+        .to_string();
+
+        let summary = command_body_summary(&body);
+
+        assert!(summary.contains("command_id=cmd-42"));
+        assert!(summary.contains("type=deploy_app"));
+        assert!(summary.contains("app_code=blog"));
+        assert!(summary.contains("param_count=2"));
+        assert!(summary.contains("size="));
+        assert!(
+            !summary.contains("summary-secret"),
+            "payload leaked: {summary}"
+        );
+    }
+
+    #[test]
+    fn redact_body_for_log_masks_secrets_and_handles_unparsable_bodies() {
+        let body = r#"{"item": {"command_id": "cmd-1", "type": "deploy_app", "parameters": {"registry_auth": {"password": "dump-secret"}}}}"#;
+        let logged = redact_body_for_log(body);
+        assert!(!logged.contains("dump-secret"), "payload leaked: {logged}");
+
+        let unparsable = redact_body_for_log("not json");
+        assert!(unparsable.contains("size=8"), "got: {unparsable}");
     }
 }

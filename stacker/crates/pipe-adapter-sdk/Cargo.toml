@@ -2,6 +2,9 @@
 name = "pipe-adapter-sdk"
 version = "0.1.0"
 edition = "2021"
+description = "Transport-agnostic traits and message types for status-panel pipe adapters"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/trydirect/status"
 
 [dependencies]
 async-trait = "0.1"

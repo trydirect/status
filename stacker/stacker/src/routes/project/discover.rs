@@ -157,37 +157,7 @@ pub async fn discover_containers(
         if cmd.r#type == "list_containers" && cmd.status == "completed" {
             if let Some(result) = &cmd.result {
                 // Parse list_containers result which contains array of all containers
-                if let Some(containers_arr) = result.get("containers").and_then(|c| c.as_array()) {
-                    for c in containers_arr {
-                        let name = c
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if name.is_empty() {
-                            continue;
-                        }
-                        let status = c
-                            .get("status")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let image = c
-                            .get("image")
-                            .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string();
-
-                        if !running_containers.iter().any(|rc| rc.name == name) {
-                            running_containers.push(ContainerInfo {
-                                name: name.clone(),
-                                image,
-                                status,
-                                app_code: None, // Will be matched later
-                            });
-                        }
-                    }
-                }
+                running_containers = parse_listing_containers(result);
             }
             // Found list_containers result, prefer this over health checks
             if !running_containers.is_empty() {
@@ -485,6 +455,53 @@ struct ContainerInfo {
 
 // Helper functions
 
+/// Containers reported by the agent's `list_containers` result.
+///
+/// Each entry carries the logical app code the agent reported (from the
+/// `my.stacker.service` label — see `docker::app_code_for_container` on the
+/// agent side). It must be retained here: a container named `project-app-1`
+/// is only recognisable as app `floci` by that code, and dropping it made
+/// discovery suggest the name-derived `app` instead (PR #140 review).
+fn parse_listing_containers(result: &serde_json::Value) -> Vec<ContainerInfo> {
+    let mut running_containers: Vec<ContainerInfo> = Vec::new();
+    if let Some(containers_arr) = result.get("containers").and_then(|c| c.as_array()) {
+        for c in containers_arr {
+            let name = c
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let status = c
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let image = c
+                .get("image")
+                .and_then(|i| i.as_str())
+                .unwrap_or("")
+                .to_string();
+            let app_code = c
+                .get("app_code")
+                .and_then(|a| a.as_str())
+                .map(|s| s.to_string());
+
+            if !running_containers.iter().any(|rc| rc.name == name) {
+                running_containers.push(ContainerInfo {
+                    name: name.clone(),
+                    image,
+                    status,
+                    app_code,
+                });
+            }
+        }
+    }
+    running_containers
+}
+
 /// Check if a container name matches an app code
 fn container_matches_app(container_name: &str, app_code: &str) -> bool {
     // Exact match
@@ -620,5 +637,29 @@ mod tests {
             "coollabsio/coolify:latest",
             Some("coolify"),
         ));
+    }
+
+    /// The agent's `list_containers` entries carry the logical app code (from
+    /// the `my.stacker.service` label); discovery must retain it so a container
+    /// named `project-app-1` still matches its registered app `floci` instead
+    /// of being suggested as an unregistered `app` (PR #140 review).
+    #[test]
+    fn listing_entries_keep_the_reported_app_code() {
+        let result = serde_json::json!({
+            "containers": [
+                {
+                    "name": "project-app-1",
+                    "status": "running",
+                    "image": "n8nio/n8n:2.45.4",
+                    "app_code": "floci",
+                    "scope": "project",
+                }
+            ]
+        });
+
+        let containers = parse_listing_containers(&result);
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].name, "project-app-1");
+        assert_eq!(containers[0].app_code.as_deref(), Some("floci"));
     }
 }
