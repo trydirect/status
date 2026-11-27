@@ -45,6 +45,14 @@ pub struct ContainerInfo {
     pub status: String,
     pub logs: String,
     pub ports: Vec<PortInfo>,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub image: String,
+    /// Internal only: needed for identity resolution and app matching, but
+    /// Docker labels can carry credentials and deployment paths, and this
+    /// struct is serialized into the unauthenticated API-mode response
+    /// (PR #140 review). Never serialize them.
+    #[serde(skip_serializing)]
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -151,8 +159,119 @@ fn name_matches(container_name: &str, app_code: &str) -> bool {
 /// because it carries the app code the control plane resolves by and survives
 /// compose service renames (the generated main service is named `app`, but its
 /// `my.stacker.service` label is the project code).
-const STACKER_SERVICE_LABEL: &str = "my.stacker.service";
+pub(crate) const STACKER_SERVICE_LABEL: &str = "my.stacker.service";
 const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+
+/// Marks who owns a container: `project` for the user's own, `platform` for one
+/// the platform installs and manages itself.
+const STACKER_SCOPE_LABEL: &str = "my.stacker.scope";
+const COMPOSE_WORKING_DIR_LABEL: &str = "com.docker.compose.project.working_dir";
+
+const SCOPE_PROJECT: &str = "project";
+const SCOPE_PLATFORM: &str = "platform";
+
+/// Directories platform-managed services are deployed into, by the convention
+/// in Stacker's `docs/APP_DEPLOYMENT.md`: project services live under the
+/// project directory, platform ones get their own.
+const PLATFORM_INSTALL_DIRS: &[&str] = &[
+    "/home/trydirect/statuspanel",
+    "/home/trydirect/nginx_proxy_manager",
+];
+
+/// Container names that identify a platform component when no label says so.
+/// Matched exactly after normalisation, never as substrings.
+///
+/// Telegraf is here because it is the platform's monitoring agent: the user
+/// asks for it, but it feeds the health panel rather than serving their
+/// traffic. Exact matching matters especially for it — a user's own
+/// `telegraf-proxy` is theirs, and a substring test would take it.
+const PLATFORM_CONTAINER_NAMES: &[&str] = &[
+    "statuspanel",
+    "statuspanel_agent",
+    "compose_agent",
+    "nginx_proxy_manager",
+    "telegraf",
+];
+
+/// Who owns a container: the user's stack, or the platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerScope {
+    Project,
+    Platform,
+}
+
+impl ContainerScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContainerScope::Project => SCOPE_PROJECT,
+            ContainerScope::Platform => SCOPE_PLATFORM,
+        }
+    }
+}
+
+/// Lowercase, separators collapsed to `_`, so `Status Panel`,
+/// `status-panel` and `status_panel` compare equal.
+fn normalize_identity(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('/')
+        .to_lowercase()
+        .split(['-', '_', ' ', '.'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<&str>>()
+        .join("_")
+}
+
+/// Classify a container as the user's or the platform's.
+///
+/// Signals in descending order of reliability:
+///
+/// 1. `my.stacker.scope` — authoritative both ways. Stacker's compose generator
+///    already sets it on every service it emits;
+/// 2. the Compose working directory, against the deployment-scope convention;
+/// 3. the image name;
+/// 4. an **exact** container-name match after normalisation.
+///
+/// Anything unrecognised is the user's. Guessing "platform" would hide a
+/// container from its owner's Applications list, and a missing app looks like
+/// data loss while a misplaced platform container is merely untidy.
+///
+/// Substrings are deliberately not matched. The health handler used to classify
+/// by `name.contains("status")`, which also catches a user's `status-page`.
+pub fn scope_for_container(
+    labels: &HashMap<String, String>,
+    container_name: &str,
+    image: &str,
+) -> ContainerScope {
+    match labels.get(STACKER_SCOPE_LABEL).map(|s| s.trim()) {
+        Some(SCOPE_PLATFORM) => return ContainerScope::Platform,
+        Some(SCOPE_PROJECT) => return ContainerScope::Project,
+        _ => {}
+    }
+
+    if let Some(dir) = labels.get(COMPOSE_WORKING_DIR_LABEL) {
+        let dir = dir.trim().trim_end_matches('/');
+        if PLATFORM_INSTALL_DIRS.contains(&dir) {
+            return ContainerScope::Platform;
+        }
+    }
+
+    let image_identity = image
+        .split('/')
+        .next_back()
+        .and_then(|name| name.split(':').next())
+        .map(normalize_identity)
+        .unwrap_or_default();
+    if image_identity == "status" || image_identity == "nginx_proxy_manager" {
+        return ContainerScope::Platform;
+    }
+
+    if PLATFORM_CONTAINER_NAMES.contains(&normalize_identity(container_name).as_str()) {
+        return ContainerScope::Platform;
+    }
+
+    ContainerScope::Project
+}
 
 /// If a container's labels identify it as `app_code`, return which label
 /// matched (for logging). Prefers the stacker-owned label over Compose's.
@@ -162,6 +281,75 @@ fn label_matches_app(labels: &HashMap<String, String>, app_code: &str) -> Option
     }
     if labels.get(COMPOSE_SERVICE_LABEL).map(String::as_str) == Some(app_code) {
         return Some(COMPOSE_SERVICE_LABEL);
+    }
+    None
+}
+
+/// The app code a container belongs to, resolved from its labels.
+///
+/// The inverse of [`resolve_container_name`], and it must use the same label
+/// priority: `my.stacker.service` first, Compose's service name second, the
+/// container name only as a last resort for containers Stacker did not create
+/// (`statuspanel`, `statuspanel_agent`, anything hand-started).
+///
+/// Reporting the container name here is wrong and was the cause of a
+/// production defect: Compose names containers `{project}-{service}-{index}`,
+/// so a project deployed into `/home/trydirect/project` reports `project-app-1`
+/// where the control plane expects `floci`. Stacker cannot recover the app
+/// code from that — neither the deploy directory nor the compose service name
+/// carries it — so container discovery suggested `app` and `ui` instead of
+/// `floci` and `floci-ui`.
+///
+/// See `config/shared-fixtures/agent-contract/app-code-resolution.md`.
+pub fn app_code_for_container(labels: &HashMap<String, String>, container_name: &str) -> String {
+    // Filter each candidate before selecting the first usable one: a blank
+    // `my.stacker.service` must fall through to the Compose label, not jump
+    // straight to the container name.
+    [STACKER_SERVICE_LABEL, COMPOSE_SERVICE_LABEL]
+        .iter()
+        .find_map(|label| {
+            labels
+                .get(*label)
+                .map(|code| code.trim())
+                .filter(|code| !code.is_empty())
+        })
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| container_name.trim_start_matches('/').to_string())
+}
+
+/// The container `requested` resolves to within a candidate listing, as
+/// `(container name, matched service label)` when a label identified it.
+///
+/// Priority: `my.stacker.service` is authoritative across the whole listing,
+/// then Compose's `com.docker.compose.service`, then an exact container-name
+/// match, then the anchored fuzzy name patterns. Scanning per candidate in
+/// listing order lets a weaker match shadow the documented priority: a
+/// Compose-label hit on an earlier container beat a Stacker-label hit on a
+/// later one, and a fuzzy hit (`project-app-1-1` matches the `app-DIGIT`
+/// pattern for `project-app-1`) could select the wrong container when an
+/// already-resolved name was looked up again (PR #140 review).
+fn resolve_in_listing<'a>(
+    candidates: &'a [(String, Option<&'a HashMap<String, String>>)],
+    requested: &str,
+) -> Option<(&'a str, Option<&'static str>)> {
+    for matched_label in [STACKER_SERVICE_LABEL, COMPOSE_SERVICE_LABEL] {
+        for (candidate_name, labels) in candidates {
+            if let Some(hit) = labels.and_then(|labels| label_matches_app(labels, requested)) {
+                if hit == matched_label {
+                    return Some((candidate_name.as_str(), Some(hit)));
+                }
+            }
+        }
+    }
+    for (candidate_name, _) in candidates {
+        if candidate_name.trim_start_matches('/') == requested {
+            return Some((candidate_name.as_str(), None));
+        }
+    }
+    for (candidate_name, _) in candidates {
+        if name_matches(candidate_name, requested) {
+            return Some((candidate_name.as_str(), None));
+        }
     }
     None
 }
@@ -178,41 +366,40 @@ pub async fn resolve_container_name(name: &str) -> Result<String> {
         "Attempting to resolve container name"
     );
 
-    let mut available_containers = Vec::new();
-
-    for container in list {
-        if let Some(names) = container.names {
+    let mut candidates: Vec<(String, Option<&HashMap<String, String>>)> = Vec::new();
+    for container in &list {
+        if let Some(names) = &container.names {
             for entry in names {
                 let normalized = entry.trim_start_matches('/');
-                available_containers.push(normalized.to_string());
-
-                if let Some(labels) = container.labels.as_ref() {
-                    if let Some(matched_label) = label_matches_app(labels, name) {
-                        tracing::info!(
-                            app_code = name,
-                            resolved_name = normalized,
-                            matched_label,
-                            "Container name resolved via service label"
-                        );
-                        return Ok(normalized.to_string());
-                    }
-                }
-
-                if name_matches(&entry, name) {
-                    tracing::info!(
-                        app_code = name,
-                        resolved_name = normalized,
-                        "Container name resolved successfully"
-                    );
-                    return Ok(normalized.to_string());
-                }
+                candidates.push((normalized.to_string(), container.labels.as_ref()));
             }
         }
     }
 
+    if let Some((resolved, matched_label)) = resolve_in_listing(&candidates, name) {
+        match matched_label {
+            Some(matched_label) => {
+                tracing::info!(
+                    app_code = name,
+                    resolved_name = resolved,
+                    matched_label,
+                    "Container name resolved via service label"
+                );
+            }
+            None => {
+                tracing::info!(
+                    app_code = name,
+                    resolved_name = resolved,
+                    "Container name resolved successfully"
+                );
+            }
+        }
+        return Ok(resolved.to_string());
+    }
+
     tracing::warn!(
         app_code = name,
-        available_containers = ?available_containers,
+        available_containers = ?candidates.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
         "No matching container found. Attempted patterns: exact match, prefix, suffix, contains",
     );
 
@@ -274,6 +461,8 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
                 status,
                 logs: String::new(),
                 ports: vec![],
+                image: c.image.unwrap_or_default(),
+                labels: c.labels.unwrap_or_default(),
             }
         })
         .collect())
@@ -309,6 +498,8 @@ pub async fn list_containers_with_logs(tail: &str) -> Result<Vec<ContainerInfo>>
             status,
             logs,
             ports: vec![],
+            image: c.image.unwrap_or_default(),
+            labels: c.labels.unwrap_or_default(),
         });
     }
 
@@ -525,13 +716,23 @@ pub async fn get_container_logs_window(
     cursor: Option<String>,
     limit: Option<usize>,
 ) -> Result<LogWindow> {
+    let resolved_name = resolve_container_name(name)
+        .await
+        .unwrap_or_else(|_| name.to_string());
+    get_container_logs_window_resolved(&resolved_name, cursor, limit).await
+}
+
+/// Like [`get_container_logs_window`] but skips the `resolve_container_name`
+/// lookup; see [`restart_resolved`].
+pub async fn get_container_logs_window_resolved(
+    resolved_name: &str,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> Result<LogWindow> {
     use bollard::query_parameters::LogsOptionsBuilder;
     use futures_util::StreamExt;
 
     let docker = docker_client()?;
-    let resolved_name = resolve_container_name(name)
-        .await
-        .unwrap_or_else(|_| name.to_string());
     let mut builder = LogsOptionsBuilder::default();
     builder = builder
         .stdout(true)
@@ -551,7 +752,7 @@ pub async fn get_container_logs_window(
     }
 
     let opts = builder.build();
-    let mut logs = docker.logs(&resolved_name, Some(opts));
+    let mut logs = docker.logs(resolved_name, Some(opts));
     let mut frames: Vec<LogFrame> = Vec::new();
     let mut truncated = false;
     let mut last_cursor: Option<String> = None;
@@ -560,7 +761,7 @@ pub async fn get_container_logs_window(
         let output = match item {
             Ok(v) => v,
             Err(e) => {
-                error!(container = name, error = %e, "error reading log stream");
+                error!(container = resolved_name, error = %e, "error reading log stream");
                 continue;
             }
         };
@@ -615,10 +816,16 @@ fn parse_cursor_to_epoch(cursor: &str) -> Option<i64> {
 }
 
 pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    get_container_logs_resolved(&resolved_name, tail).await
+}
+
+/// Like [`get_container_logs`] but skips the `resolve_container_name` lookup;
+/// see [`restart_resolved`].
+pub async fn get_container_logs_resolved(resolved_name: &str, tail: &str) -> Result<String> {
+    let docker = docker_client()?;
     use bollard::query_parameters::LogsOptionsBuilder;
     use futures_util::StreamExt;
     let opts = LogsOptionsBuilder::default()
@@ -627,7 +834,7 @@ pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
         .follow(false)
         .tail(tail)
         .build();
-    let mut logs = docker.logs(&resolved_name, Some(opts));
+    let mut logs = docker.logs(resolved_name, Some(opts));
     let mut log_text = String::new();
     while let Some(log_line) = logs.next().await {
         match log_line {
@@ -639,61 +846,91 @@ pub async fn get_container_logs(name: &str, tail: &str) -> Result<String> {
 }
 
 pub async fn restart(name: &str) -> Result<()> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    restart_resolved(&resolved_name).await
+}
+
+/// Like [`restart`] but assumes `name` is already a real, resolved container
+/// name or ID and skips the `resolve_container_name` lookup. Use this in
+/// callers that resolved the target once up front: re-resolving an
+/// already-resolved name is a redundant `list_containers` call and can even
+/// select a different container (PR #140 review).
+pub async fn restart_resolved(resolved_name: &str) -> Result<()> {
+    let docker = docker_client()?;
     docker
-        .restart_container(&resolved_name, None::<RestartContainerOptions>)
+        .restart_container(resolved_name, None::<RestartContainerOptions>)
         .await
         .context("restart container")?;
-    debug!("restarted container: {}", name);
+    debug!("restarted container: {}", resolved_name);
     Ok(())
 }
 
 pub async fn stop(name: &str) -> Result<()> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    stop_resolved(&resolved_name).await
+}
+
+/// Like [`stop`] but skips the `resolve_container_name` lookup; see
+/// [`restart_resolved`].
+pub async fn stop_resolved(resolved_name: &str) -> Result<()> {
+    let docker = docker_client()?;
     docker
-        .stop_container(&resolved_name, None::<StopContainerOptions>)
+        .stop_container(resolved_name, None::<StopContainerOptions>)
         .await
         .context("stop container")?;
-    debug!("stopped container: {}", name);
+    debug!("stopped container: {}", resolved_name);
     Ok(())
 }
 
 pub async fn stop_with_timeout(name: &str, timeout_secs: u32) -> Result<()> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    stop_with_timeout_resolved(&resolved_name, timeout_secs).await
+}
+
+/// Like [`stop_with_timeout`] but skips the `resolve_container_name` lookup;
+/// see [`restart_resolved`].
+pub async fn stop_with_timeout_resolved(resolved_name: &str, timeout_secs: u32) -> Result<()> {
+    let docker = docker_client()?;
     let opts = StopContainerOptions {
         t: Some(timeout_secs as i32),
         signal: None,
     };
     docker
-        .stop_container(&resolved_name, Some(opts))
+        .stop_container(resolved_name, Some(opts))
         .await
         .context("stop container with timeout")?;
-    debug!("stopped container: {} (timeout: {}s)", name, timeout_secs);
+    debug!(
+        "stopped container: {} (timeout: {}s)",
+        resolved_name, timeout_secs
+    );
     Ok(())
 }
 
 pub async fn start(name: &str) -> Result<()> {
-    let docker = docker_client()?;
     let resolved_name = resolve_container_name(name)
         .await
         .unwrap_or_else(|_| name.to_string());
+    start_resolved(&resolved_name).await
+}
+
+/// Like [`start`] but skips the `resolve_container_name` lookup; see
+/// [`restart_resolved`].
+pub async fn start_resolved(resolved_name: &str) -> Result<()> {
+    let docker = docker_client()?;
     docker
         .start_container(
-            &resolved_name,
+            resolved_name,
             None::<bollard::query_parameters::StartContainerOptions>,
         )
         .await
         .context("start container")?;
-    debug!("started container: {}", name);
+    debug!("started container: {}", resolved_name);
     Ok(())
 }
 
@@ -942,6 +1179,163 @@ pub async fn exec_in_container_with_output_resolved(
 mod tests {
     use super::*;
 
+    fn labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The production case: Compose named the container `project-app-1`, but
+    /// the app code is `floci` and lives only in the stacker label. Reporting
+    /// the container name made Stacker's discovery suggest `app`.
+    #[test]
+    fn app_code_comes_from_the_stacker_label_not_the_container_name() {
+        let l = labels(&[
+            ("my.stacker.service", "floci"),
+            ("com.docker.compose.service", "app"),
+        ]);
+        assert_eq!(app_code_for_container(&l, "project-app-1"), "floci");
+
+        let l = labels(&[
+            ("my.stacker.service", "floci-ui"),
+            ("com.docker.compose.service", "floci-ui"),
+        ]);
+        assert_eq!(app_code_for_container(&l, "project-floci-ui-1"), "floci-ui");
+    }
+
+    /// Same priority as `label_matches_app`, which resolves the other
+    /// direction: stacker label first, Compose second.
+    #[test]
+    fn app_code_falls_back_to_the_compose_label() {
+        let l = labels(&[("com.docker.compose.service", "web")]);
+        assert_eq!(app_code_for_container(&l, "someproject-web-1"), "web");
+    }
+
+    /// Containers Stacker did not create carry no labels; the name is all
+    /// there is, and that is correct for them.
+    #[test]
+    fn app_code_falls_back_to_the_container_name_when_unlabelled() {
+        assert_eq!(
+            app_code_for_container(&HashMap::new(), "statuspanel_agent"),
+            "statuspanel_agent"
+        );
+        assert_eq!(
+            app_code_for_container(&HashMap::new(), "/statuspanel"),
+            "statuspanel"
+        );
+    }
+
+    /// An empty label must not produce an empty app_code — Stacker rejects
+    /// those with "health.app_code is required".
+    #[test]
+    fn app_code_ignores_blank_labels() {
+        let l = labels(&[("my.stacker.service", "   ")]);
+        assert_eq!(app_code_for_container(&l, "project-app-1"), "project-app-1");
+    }
+
+    /// A blank Stacker label must not mask a valid Compose service label: each
+    /// candidate is filtered before the first usable identity is selected, or
+    /// the documented `my.stacker.service` → Compose → name priority silently
+    /// degrades to the container name.
+    #[test]
+    fn app_code_falls_through_blank_stacker_label_to_compose() {
+        let l = labels(&[
+            ("my.stacker.service", " "),
+            ("com.docker.compose.service", "web"),
+        ]);
+        assert_eq!(app_code_for_container(&l, "someproject-web-1"), "web");
+    }
+
+    /// The exact container the caller named must win over the anchored fuzzy
+    /// patterns: re-resolving an already-resolved name must not land on an
+    /// earlier-listed `project-app-1-1`, which matches the `app-DIGIT` pattern
+    /// for `project-app-1` (PR #140 review).
+    #[test]
+    fn resolve_in_listing_exact_name_beats_fuzzy_replica_patterns() {
+        let l = labels(&[("com.docker.compose.service", "app")]);
+        let candidates = vec![
+            ("project-app-1-1".to_string(), Some(&l)),
+            ("project-app-1".to_string(), Some(&l)),
+        ];
+        assert_eq!(
+            resolve_in_listing(&candidates, "project-app-1"),
+            Some(("project-app-1", None))
+        );
+    }
+
+    /// A service-label match is authoritative and must not be shadowed by a
+    /// fuzzy pattern that an earlier candidate happens to hit.
+    #[test]
+    fn resolve_in_listing_label_beats_earlier_fuzzy_pattern() {
+        let l = labels(&[("my.stacker.service", "app")]);
+        let candidates = vec![
+            ("project-app-2".to_string(), None),
+            ("project-app-1".to_string(), Some(&l)),
+        ];
+        assert_eq!(
+            resolve_in_listing(&candidates, "app"),
+            Some(("project-app-1", Some(STACKER_SERVICE_LABEL)))
+        );
+    }
+
+    /// The historical resolution paths keep working: app code to container via
+    /// the service label, raw container names as-is.
+    #[test]
+    fn resolve_in_listing_keeps_label_and_exact_resolution() {
+        let l = labels(&[("my.stacker.service", "floci")]);
+        let candidates = vec![("project-app-1".to_string(), Some(&l))];
+        assert_eq!(
+            resolve_in_listing(&candidates, "floci"),
+            Some(("project-app-1", Some(STACKER_SERVICE_LABEL)))
+        );
+
+        let bare = vec![("komodo".to_string(), None)];
+        assert_eq!(resolve_in_listing(&bare, "komodo"), Some(("komodo", None)));
+    }
+
+    /// Label priority spans the whole listing, not just each candidate: a
+    /// `my.stacker.service` match on a later container beats a Compose-label
+    /// match on an earlier one (PR #140 review).
+    #[test]
+    fn resolve_in_listing_stacker_label_beats_earlier_compose_label() {
+        let compose = labels(&[("com.docker.compose.service", "web")]);
+        let stacker = labels(&[("my.stacker.service", "web")]);
+        let candidates = vec![
+            ("project-a-web-1".to_string(), Some(&compose)),
+            ("project-b-web-1".to_string(), Some(&stacker)),
+        ];
+        assert_eq!(
+            resolve_in_listing(&candidates, "web"),
+            Some(("project-b-web-1", Some(STACKER_SERVICE_LABEL)))
+        );
+    }
+
+    /// Docker labels can carry deployment paths and credentials, and the
+    /// struct is serialized into the local API root response, which in
+    /// API-only mode does not require a session (PR #140 review). Labels stay
+    /// available internally for identity resolution but must not serialize.
+    #[test]
+    fn container_info_serialization_omits_labels() {
+        let info = ContainerInfo {
+            name: "project-n8n-1".to_string(),
+            status: "running".to_string(),
+            logs: String::new(),
+            ports: vec![],
+            image: "n8nio/n8n:2.45.4".to_string(),
+            labels: labels(&[("my.stacker.service", "n8n"), ("auth.token", "secret")]),
+        };
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(
+            json.get("labels").is_none(),
+            "labels must not be serialized: {json}"
+        );
+        assert!(!json.to_string().contains("secret"));
+        assert_eq!(json["name"], "project-n8n-1");
+        assert_eq!(json["image"], "n8nio/n8n:2.45.4");
+    }
+
     #[test]
     fn test_name_matches_exact() {
         assert!(name_matches("komodo", "komodo"));
@@ -1025,6 +1419,126 @@ mod tests {
     #[test]
     fn test_name_matches_no_match() {
         assert!(!name_matches("telegraf", "komodo"));
+    }
+
+    fn scope_labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// The label decides, in both directions.
+    #[test]
+    fn scope_label_is_authoritative() {
+        assert_eq!(
+            scope_for_container(
+                &scope_labels(&[("my.stacker.scope", "platform")]),
+                "project-app-1",
+                "floci/floci:latest"
+            ),
+            ContainerScope::Platform
+        );
+        // A user's own caddy, labelled as theirs, stays theirs.
+        assert_eq!(
+            scope_for_container(
+                &scope_labels(&[("my.stacker.scope", "project")]),
+                "caddy",
+                "caddy:2"
+            ),
+            ContainerScope::Project
+        );
+    }
+
+    /// Platform services get their own directory; project ones live under the
+    /// project directory.
+    #[test]
+    fn scope_falls_back_to_the_compose_working_directory() {
+        assert_eq!(
+            scope_for_container(
+                &scope_labels(&[(
+                    "com.docker.compose.project.working_dir",
+                    "/home/trydirect/statuspanel"
+                )]),
+                "statuspanel_agent",
+                "trydirect/status:latest"
+            ),
+            ContainerScope::Platform
+        );
+        assert_eq!(
+            scope_for_container(
+                &scope_labels(&[(
+                    "com.docker.compose.project.working_dir",
+                    "/home/trydirect/project"
+                )]),
+                "project-app-1",
+                "floci/floci:latest"
+            ),
+            ContainerScope::Project
+        );
+    }
+
+    #[test]
+    fn scope_falls_back_to_image_then_name() {
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "whatever", "trydirect/status:latest"),
+            ContainerScope::Platform
+        );
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "statuspanel_agent", "someimage:1"),
+            ContainerScope::Platform
+        );
+    }
+
+    /// Names are matched exactly. The health handler used to filter on the bare
+    /// substring "status", which also moved a user's `status-page` out of their
+    /// own Applications list.
+    #[test]
+    fn scope_never_matches_substrings() {
+        for name in [
+            "status-page",
+            "statuspage",
+            "orderstatus",
+            "my-statuspanel-clone",
+        ] {
+            assert_eq!(
+                scope_for_container(&scope_labels(&[]), name, "someuser/someimage:1"),
+                ContainerScope::Project,
+                "{name} is a user's container"
+            );
+        }
+    }
+
+    /// Telegraf is the platform's monitoring agent: the user asks for it, but
+    /// it feeds the health panel rather than serving their traffic.
+    #[test]
+    fn telegraf_belongs_to_the_platform() {
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "telegraf", "telegraf:1.29"),
+            ContainerScope::Platform
+        );
+    }
+
+    /// And only telegraf itself. A container the user named after it is still
+    /// theirs — the reason these names are matched exactly.
+    #[test]
+    fn a_users_telegraf_lookalike_stays_theirs() {
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "telegraf-proxy", "acme/proxy:1"),
+            ContainerScope::Project
+        );
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "my-telegraf", "acme/thing:1"),
+            ContainerScope::Project
+        );
+    }
+
+    #[test]
+    fn scope_defaults_to_project() {
+        assert_eq!(
+            scope_for_container(&scope_labels(&[]), "anything", "anything:1"),
+            ContainerScope::Project
+        );
         assert!(!name_matches("komodo-core", "komodo")); // "komodo" is prefix, not exact
         assert!(!name_matches("ferretdb", "komodo"));
     }
