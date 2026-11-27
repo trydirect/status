@@ -11,7 +11,6 @@ use pipe_adapter_sdk::{
     PipeAdapterDispatch, PipeAdapterPayload, PipeAdapterReference, PipeSourceAdapter,
     PipeTargetAdapter,
 };
-#[cfg(feature = "docker")]
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -24,7 +23,6 @@ use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(feature = "docker")]
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
 #[cfg(feature = "docker")]
@@ -41,6 +39,7 @@ use crate::transport::{Command as AgentCommand, CommandResult};
 #[cfg(feature = "docker")]
 use crate::agent::docker;
 
+use super::backup::{self, BackupCommand};
 use super::firewall::{self, ConfigureFirewallCommand};
 
 const LOGS_DEFAULT_LIMIT: usize = 400;
@@ -1043,6 +1042,7 @@ pub enum StackerCommand {
     ConfigDiff(ConfigDiffCommand),
     ConfigureProxy(ConfigureProxyCommand),
     Exec(ExecCommand),
+    Backup(BackupCommand),
     ServerResources(ServerResourcesCommand),
     ListContainers(ListContainersCommand),
     ConfigureFirewall(ConfigureFirewallCommand),
@@ -2209,6 +2209,13 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             payload.validate()?;
             Ok(Some(StackerCommand::Exec(payload)))
         }
+        "backup" | "stacker.backup" => {
+            let payload: BackupCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid backup payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::Backup(payload)))
+        }
         "server_resources" | "stacker.server_resources" => {
             let payload: ServerResourcesCommand =
                 serde_json::from_value(unwrap_params(&cmd.params))
@@ -2291,6 +2298,7 @@ pub async fn execute_stacker_command(
             StackerCommand::TriggerPipe(data) => {
                 handle_trigger_pipe(agent_cmd, data, pipe_runtime).await
             }
+            StackerCommand::Backup(data) => backup::handle_backup(agent_cmd, data).await,
             _ => {
                 let _ = (firewall_policy, pipe_runtime);
                 bail!("docker feature not enabled for stacker commands")
@@ -3435,7 +3443,7 @@ fn compose_target_service(app_code: &str) -> Vec<String> {
     }
 }
 
-fn base_result(
+pub(crate) fn base_result(
     agent_cmd: &AgentCommand,
     deployment_hash: &str,
     app_code: &str,
@@ -3477,8 +3485,7 @@ fn finish_success_with_warnings(
     result.result = Some(body);
 }
 
-#[cfg(feature = "docker")]
-fn redact_message(message: &str, enabled: bool) -> (String, bool) {
+pub(crate) fn redact_message(message: &str, enabled: bool) -> (String, bool) {
     if !enabled || message.is_empty() {
         return (message.to_string(), false);
     }
@@ -3604,7 +3611,12 @@ async fn resolve_npm_config(
             error = %error,
             "Failed to initialize Vault client for configure_proxy"
         );
-        NpmCredentialError::VaultUnavailable
+        NpmCredentialError::VaultUnavailable {
+            reason: format!(
+                "the agent's Vault client could not be initialized: {:#}",
+                error
+            ),
+        }
     })? {
         let server_id = resolve_server_id()?;
         let credentials = vault_client.fetch_npm_credentials(&server_id).await?;
@@ -3785,6 +3797,7 @@ async fn execute_with_docker(
         StackerCommand::ConfigDiff(data) => handle_config_diff(agent_cmd, data).await,
         StackerCommand::ConfigureProxy(data) => handle_configure_proxy(agent_cmd, data).await,
         StackerCommand::Exec(data) => handle_exec(agent_cmd, data).await,
+        StackerCommand::Backup(data) => backup::handle_backup(agent_cmd, data).await,
         StackerCommand::ServerResources(data) => handle_server_resources(agent_cmd, data).await,
         StackerCommand::ListContainers(data) => handle_list_containers(agent_cmd, data).await,
         StackerCommand::ProbeEndpoints(data) => handle_probe_endpoints(agent_cmd, data).await,
@@ -6349,152 +6362,330 @@ async fn handle_apply_config(
     Ok(result)
 }
 
-/// Parse compose content and ensure all referenced env_file paths exist
-/// Creates empty files if they don't exist to prevent docker compose failures
+/// Resolve `.` and `..` segments without touching the filesystem.
+/// A `..` only consumes a preceding real component — it never eats a
+/// previously kept `..`, so escapes stay visible to containment checks even
+/// for relative bases. Absolute paths past the root keep their `..`
+/// (over-refusal, never an escape).
+#[cfg(feature = "docker")]
+fn normalize_path_lexically(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let last_is_real = normalized
+                    .components()
+                    .next_back()
+                    .map(|last| matches!(last, Component::Normal(_)))
+                    .unwrap_or(false);
+                if last_is_real {
+                    normalized.pop();
+                } else {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Resolve a config/env destination against the compose project directory.
+///
+/// Absolute destinations are kept as-is; relative ones resolve against
+/// `base_dir` — never the agent process's CWD — which is how Docker Compose
+/// resolves relative `env_file:` entries (stacker/BUGS.md). Without a
+/// `base_dir` the destination is used as given.
+#[cfg(feature = "docker")]
+fn resolve_config_destination(
+    base_dir: Option<&std::path::Path>,
+    destination_path: &str,
+) -> std::path::PathBuf {
+    let path = std::path::Path::new(destination_path);
+    let joined = match (base_dir, path.is_absolute()) {
+        (Some(base_dir), false) => base_dir.join(path),
+        _ => path.to_path_buf(),
+    };
+    normalize_path_lexically(&joined)
+}
+
+/// Lexical containment: `candidate` resolves inside `dir`. Both sides are
+/// normalized without touching the filesystem so `..` segments cannot slip
+/// past the check. An empty/`.` base has no prefix to compare against, so a
+/// candidate counts as contained only when it stays relative and non-escaping.
+#[cfg(feature = "docker")]
+fn path_within_dir(dir: &std::path::Path, candidate: &std::path::Path) -> bool {
+    use std::path::Component;
+
+    let normalized_dir = normalize_path_lexically(dir);
+    let normalized_candidate = normalize_path_lexically(candidate);
+    if normalized_dir.as_os_str().is_empty() {
+        return normalized_candidate.is_relative()
+            && !normalized_candidate
+                .components()
+                .any(|component| matches!(component, Component::ParentDir));
+    }
+    normalized_candidate.starts_with(normalized_dir)
+}
+
+/// A compose `env_file:` entry together with the service block it appears
+/// under (best-effort attribution, used to name the offender in errors).
+#[cfg(feature = "docker")]
+struct EnvFileEntry {
+    service: Option<String>,
+    path: String,
+}
+
+/// Collect every `env_file:` entry in a compose body — inline scalars and
+/// block-sequence items — with the enclosing mapping key as service hint.
+#[cfg(feature = "docker")]
+fn collect_env_file_entries(compose_content: &str) -> Vec<EnvFileEntry> {
+    let lines: Vec<&str> = compose_content.lines().collect();
+    let mut entries = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let Some(after_colon) = line.trim().strip_prefix("env_file:") else {
+            index += 1;
+            continue;
+        };
+
+        let key_indent = line.len() - line.trim_start().len();
+        let service = enclosing_block_key(&lines, index, key_indent);
+
+        let inline = after_colon.trim();
+        if !inline.is_empty() && !inline.starts_with('#') && !inline.starts_with('-') {
+            if let Some(path) = env_file_scalar_path(inline) {
+                push_unique(&mut entries, EnvFileEntry { service, path });
+            }
+            index += 1;
+            continue;
+        }
+
+        // Block sequence: the items following the `env_file:` key.
+        index += 1;
+        while index < lines.len() {
+            let item = lines[index].trim();
+            if item.is_empty() || item.starts_with('#') {
+                index += 1;
+                continue;
+            }
+            let Some(item_value) = item.strip_prefix('-') else {
+                break;
+            };
+            if let Some(path) = env_file_scalar_path(item_value.trim()) {
+                push_unique(
+                    &mut entries,
+                    EnvFileEntry {
+                        service: service.clone(),
+                        path,
+                    },
+                );
+            }
+            index += 1;
+        }
+    }
+
+    entries
+}
+
+/// Keep the first entry per path: duplicates (e.g. the same file referenced
+/// twice) must not be created — or refused — twice. Mirrors the dedup the
+/// previous collection did.
+#[cfg(feature = "docker")]
+fn push_unique(entries: &mut Vec<EnvFileEntry>, entry: EnvFileEntry) {
+    if !entries.iter().any(|existing| existing.path == entry.path) {
+        entries.push(entry);
+    }
+}
+
+/// The file path an `env_file:` scalar names, with trailing YAML comments
+/// stripped. Returns None for comment-only values and unquoted YAML
+/// references (`&anchor` / `*alias`), which cannot be literal file paths.
+#[cfg(feature = "docker")]
+fn env_file_scalar_path(value: &str) -> Option<String> {
+    let value = value.trim();
+    let unquoted = if let Some(rest) = value.strip_prefix('"') {
+        rest.split_once('"').map(|(path, _)| path)?
+    } else if let Some(rest) = value.strip_prefix('\'') {
+        rest.split_once('\'').map(|(path, _)| path)?
+    } else if value.starts_with('*') || value.starts_with('&') {
+        return None;
+    } else {
+        match value.split_once(" #") {
+            Some((path, _)) => path,
+            None => value,
+        }
+    };
+
+    let path = unquoted.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// Best-effort service attribution: the nearest mapping key above `index`
+/// that is indented less than the `env_file:` key itself.
+#[cfg(feature = "docker")]
+fn enclosing_block_key(lines: &[&str], index: usize, key_indent: usize) -> Option<String> {
+    for line in lines[..index].iter().rev() {
+        let indent = line.len() - line.trim_start().len();
+        if indent >= key_indent {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+            continue;
+        }
+        let Some(key) = trimmed.strip_suffix(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            continue;
+        }
+        return Some(key.to_string());
+    }
+    None
+}
+
+/// Parse compose content and ensure all referenced env_file paths exist.
+/// Creates empty files if they don't exist to prevent docker compose failures —
+/// but never outside the compose project directory: an `env_file` resolving
+/// outside the project is a misconfiguration that must surface as an error,
+/// not be papered over with an empty file (stacker/BUGS.md).
+/// The containment check is lexical: a pre-existing dangling symlink inside
+/// the project can still redirect the create — accepted, since the written
+/// content is fixed and create-only.
 #[cfg(feature = "docker")]
 async fn ensure_env_files_exist(
     compose_content: &str,
     compose_dir: &str,
     errors: &mut Vec<CommandError>,
 ) {
-    use regex::Regex;
     use std::path::Path;
 
-    // Match env_file entries in compose - handles both single file and list format
-    // Examples:
-    //   env_file: .env
-    //   env_file: "/path/to/.env"
-    //   env_file:
-    //     - .env
-    //     - "/path/to/other.env"
-    let env_file_pattern = Regex::new(r#"env_file:\s*\n?\s*-?\s*["']?([^"'\n]+)["']?"#)
-        .unwrap_or_else(|_| {
-            // Fallback simple pattern
-            Regex::new(r#"env_file:\s*["']?([^"'\n]+)["']?"#).unwrap()
-        });
+    let compose_dir = Path::new(compose_dir);
 
-    // Also match list items under env_file:
-    let list_item_pattern = Regex::new(r#"^\s*-\s*["']?([^"'\n]+)["']?\s*$"#).unwrap();
+    for entry in collect_env_file_entries(compose_content) {
+        let resolved = resolve_config_destination(Some(compose_dir), &entry.path);
 
-    let mut env_files: Vec<String> = Vec::new();
-
-    // Find all env_file references
-    for cap in env_file_pattern.captures_iter(compose_content) {
-        if let Some(file_match) = cap.get(1) {
-            let file_path = file_match.as_str().trim();
-            if !file_path.is_empty() && !file_path.starts_with('-') {
-                env_files.push(file_path.to_string());
-            }
+        if resolved.exists() {
+            continue;
         }
-    }
 
-    // Also scan for list items following env_file:
-    let mut in_env_file_section = false;
-    for line in compose_content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("env_file:") {
-            in_env_file_section = true;
-            // Check for inline value
-            let after_colon = trimmed.strip_prefix("env_file:").unwrap_or("").trim();
-            if !after_colon.is_empty() && !after_colon.starts_with('-') {
-                let clean = after_colon.trim_matches(|c| c == '"' || c == '\'');
-                if !clean.is_empty() {
-                    env_files.push(clean.to_string());
-                }
-            }
-        } else if in_env_file_section {
-            if let Some(cap) = list_item_pattern.captures(trimmed) {
-                if let Some(file_match) = cap.get(1) {
-                    env_files.push(file_match.as_str().trim().to_string());
-                }
-            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                // End of env_file section
-                in_env_file_section = false;
-            }
-        }
-    }
-
-    // Deduplicate
-    env_files.sort();
-    env_files.dedup();
-
-    // Ensure each env file exists
-    for env_file in env_files {
-        let full_path = if env_file.starts_with('/') {
-            env_file.clone()
-        } else {
-            format!("{}/{}", compose_dir, env_file)
-        };
-
-        let path = Path::new(&full_path);
-
-        if !path.exists() {
+        if !path_within_dir(compose_dir, &resolved) {
+            let service = entry
+                .service
+                .as_deref()
+                .map(|service| format!(" (service {})", service))
+                .unwrap_or_default();
             tracing::warn!(
-                env_file = %full_path,
-                "Compose references env_file that doesn't exist, creating empty file"
+                env_file = %entry.path,
+                resolved = %resolved.display(),
+                service = %entry.service.as_deref().unwrap_or("<unknown>"),
+                "Compose references env_file that resolves outside the project directory, refusing to create it"
             );
+            errors.push(make_error(
+                "env_file_outside_project",
+                format!(
+                    "env_file {}{} resolves outside the compose project directory ({}); refusing to create it",
+                    entry.path,
+                    service,
+                    resolved.display()
+                ),
+                None,
+            ));
+            continue;
+        }
 
-            // Create parent directories if needed
-            if let Some(parent) = path.parent() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    errors.push(make_error(
-                        "env_file_dir_warning",
-                        format!(
-                            "Failed to create directory for env file {}: {}",
-                            full_path, e
-                        ),
-                        None,
-                    ));
-                    continue;
-                }
-            }
+        tracing::warn!(
+            env_file = %resolved.display(),
+            "Compose references env_file that doesn't exist, creating empty file"
+        );
 
-            // Create empty env file
-            if let Err(e) = tokio::fs::write(&full_path, "# Auto-created empty env file\n").await {
+        // Create parent directories if needed
+        if let Some(parent) = resolved.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 errors.push(make_error(
-                    "env_file_create_warning",
-                    format!("Failed to create empty env file {}: {}", full_path, e),
+                    "env_file_dir_warning",
+                    format!(
+                        "Failed to create directory for env file {}: {}",
+                        resolved.display(),
+                        e
+                    ),
                     None,
                 ));
-            } else {
-                tracing::info!(
-                    env_file = %full_path,
-                    "Created empty env file to prevent compose failure"
-                );
+                continue;
             }
+        }
+
+        // Create empty env file
+        if let Err(e) = tokio::fs::write(&resolved, "# Auto-created empty env file\n").await {
+            errors.push(make_error(
+                "env_file_create_warning",
+                format!(
+                    "Failed to create empty env file {}: {}",
+                    resolved.display(),
+                    e
+                ),
+                None,
+            ));
+        } else {
+            tracing::info!(
+                env_file = %resolved.display(),
+                "Created empty env file to prevent compose failure"
+            );
         }
     }
 }
 
-/// Write config file to disk with proper permissions
+/// Write config file to disk with proper permissions.
+/// Relative destinations resolve against the process CWD here; deploy flows
+/// must call `write_config_to_disk_with_force` with the compose dir instead.
 #[cfg(feature = "docker")]
 pub async fn write_config_to_disk(config: &crate::security::vault_client::AppConfig) -> Result<()> {
-    write_config_to_disk_with_force(config, false).await
+    write_config_to_disk_with_force(config, false, None).await
 }
 
+/// Write config file to disk, resolving a *relative* `destination_path`
+/// against `base_dir` (the compose project directory) instead of the agent
+/// process's CWD, and logging the path the file actually lands on
+/// (stacker/BUGS.md).
 #[cfg(feature = "docker")]
 async fn write_config_to_disk_with_force(
     config: &crate::security::vault_client::AppConfig,
     force_overwrite: bool,
+    base_dir: Option<&std::path::Path>,
 ) -> Result<()> {
     use std::fs;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
 
-    let path = Path::new(&config.destination_path);
+    let resolved_path = resolve_config_destination(base_dir, &config.destination_path);
+    let path = resolved_path.as_path();
     let effective_force = force_overwrite || config.force_overwrite;
 
     // Check if the destination path exists as a directory (Docker sometimes creates these)
     // If so, remove it first so we can write the file
     if path.exists() && path.is_dir() {
         tracing::warn!(
-            path = %config.destination_path,
+            path = %path.display(),
             "Destination path exists as directory, removing it to write file"
         );
         fs::remove_dir_all(path).context(format!(
             "Failed to remove directory at file destination: {}",
-            config.destination_path
+            path.display()
         ))?;
     }
 
@@ -6531,7 +6722,7 @@ async fn write_config_to_disk_with_force(
 
         fs::rename(&temp_path, path).context(format!(
             "Failed to atomically move config into place: {}",
-            config.destination_path
+            path.display()
         ))?;
 
         if let Some(parent) = path.parent() {
@@ -6549,7 +6740,8 @@ async fn write_config_to_disk_with_force(
     write_result?;
 
     tracing::info!(
-        path = %config.destination_path,
+        path = %path.display(),
+        destination = %config.destination_path,
         content_type = %config.content_type,
         size = config.content.len(),
         "Config file written to disk"
@@ -6984,6 +7176,9 @@ async fn handle_deploy_app(
     // Determine the compose working directory
     let (compose_dir, compose_file) =
         resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
+    // Relative config destinations resolve against this directory — the same
+    // base Compose uses for relative `env_file:` entries — not the agent CWD.
+    let compose_dir_path = std::path::Path::new(&compose_dir);
 
     // Materialize the compose the deploy will run — the payload's
     // compose_content wins over the compose already on disk — applying the
@@ -7006,19 +7201,27 @@ async fn handle_deploy_app(
     // Write config files if provided (e.g., telegraf.conf, nginx.conf, etc.)
     if let Some(config_files) = &data.config_files {
         for config in config_files {
+            let resolved_path =
+                resolve_config_destination(Some(compose_dir_path), &config.destination_path);
             tracing::info!(
                 app_code = %data.app_code,
                 destination = %config.destination_path,
+                resolved = %resolved_path.display(),
                 "Writing config file from command payload"
             );
-            if let Err(e) =
-                write_config_to_disk_with_force(config, data.force_config_overwrite).await
+            if let Err(e) = write_config_to_disk_with_force(
+                config,
+                data.force_config_overwrite,
+                Some(compose_dir_path),
+            )
+            .await
             {
                 let error = make_error(
                     "config_write_warning",
                     format!(
                         "Failed to write config file {}: {}",
-                        config.destination_path, e
+                        resolved_path.display(),
+                        e
                     ),
                     None,
                 );
@@ -7085,13 +7288,19 @@ async fn handle_deploy_app(
 
     // Write .env from Vault if fetched
     if let Some(env_config) = env_from_vault {
+        let resolved_env_path =
+            resolve_config_destination(Some(compose_dir_path), &env_config.destination_path);
         tracing::info!(
             app_code = %data.app_code,
-            env_file = %env_config.destination_path,
+            env_file = %resolved_env_path.display(),
             "Writing .env file from Vault"
         );
-        if let Err(e) =
-            write_config_to_disk_with_force(&env_config, data.force_config_overwrite).await
+        if let Err(e) = write_config_to_disk_with_force(
+            &env_config,
+            data.force_config_overwrite,
+            Some(compose_dir_path),
+        )
+        .await
         {
             let error = make_error(
                 "env_file_warning",
@@ -7107,7 +7316,7 @@ async fn handle_deploy_app(
             errors.push(error);
         } else {
             tracing::info!(
-                env_file = %env_config.destination_path,
+                env_file = %resolved_env_path.display(),
                 ".env file from Vault written successfully"
             );
         }
@@ -7943,6 +8152,13 @@ async fn handle_deploy_with_configs(
     );
     let mut errors: Vec<CommandError> = Vec::new();
 
+    // Relative config destinations resolve against the compose project
+    // directory — the same base `handle_deploy_app` uses below — never the
+    // agent's CWD.
+    let (compose_dir, _compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
+    let compose_dir_path = std::path::Path::new(&compose_dir);
+
     // Step 1: Fetch and apply configs if requested
     if data.apply_configs {
         tracing::info!(
@@ -7970,7 +8186,13 @@ async fn handle_deploy_with_configs(
                 .await
             {
                 Ok(compose_config) => {
-                    if let Err(e) = write_config_to_disk(&compose_config).await {
+                    if let Err(e) = write_config_to_disk_with_force(
+                        &compose_config,
+                        false,
+                        Some(compose_dir_path),
+                    )
+                    .await
+                    {
                         errors.push(make_error(
                             "compose_write_warning",
                             "Failed to write docker-compose.yml",
@@ -7994,7 +8216,10 @@ async fn handle_deploy_with_configs(
                 .await
             {
                 Ok(app_config) => {
-                    if let Err(e) = write_config_to_disk(&app_config).await {
+                    if let Err(e) =
+                        write_config_to_disk_with_force(&app_config, false, Some(compose_dir_path))
+                            .await
+                    {
                         errors.push(make_error(
                             "config_write_warning",
                             format!("Failed to write config for {}", data.app_code),
@@ -11506,6 +11731,100 @@ services:
         assert_eq!(compose_dir, deploy_dir.to_string_lossy());
         assert_eq!(resolved_file, compose_file.to_string_lossy());
     }
+
+    // Regression tests for config/env destination resolution (BUGS.md):
+    // relative destination_path values must resolve against the compose
+    // project directory, never the agent process's CWD.
+
+    #[test]
+    fn resolve_config_destination_joins_relative_path_to_base_dir() {
+        let base = std::path::Path::new("/home/trydirect/project");
+
+        let resolved = resolve_config_destination(Some(base), "blog/docker/production/.env");
+
+        assert_eq!(
+            resolved,
+            base.join("blog/docker/production/.env"),
+            "a relative destination must land under the compose dir"
+        );
+    }
+
+    #[test]
+    fn resolve_config_destination_keeps_absolute_path_untouched() {
+        let base = std::path::Path::new("/home/trydirect/project");
+
+        let resolved = resolve_config_destination(Some(base), "/etc/nginx/conf.d/app.conf");
+
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from("/etc/nginx/conf.d/app.conf"),
+            "an absolute destination must keep working as-is"
+        );
+    }
+
+    #[test]
+    fn resolve_config_destination_normalizes_parent_segments() {
+        let base = std::path::Path::new("/home/trydirect/project");
+
+        let inside = resolve_config_destination(Some(base), "sub/../.env");
+        assert_eq!(inside, base.join(".env"));
+
+        let escaping = resolve_config_destination(Some(base), "../../leak.env");
+        assert_eq!(
+            escaping,
+            std::path::PathBuf::from("/home/leak.env"),
+            ".. segments must be resolved so containment checks can see the escape"
+        );
+    }
+
+    #[test]
+    fn resolve_config_destination_without_base_dir_keeps_relative_path() {
+        let resolved = resolve_config_destination(None, "sub/.env");
+        assert_eq!(resolved, std::path::PathBuf::from("sub/.env"));
+    }
+
+    #[test]
+    fn resolve_config_destination_keeps_escape_visible_for_relative_bases() {
+        // Regression: `..` must not eat previously kept `..` segments, or an
+        // escape looks contained and lands inside the project instead of
+        // being refused.
+        assert_eq!(
+            resolve_config_destination(None, "../../x.env"),
+            std::path::PathBuf::from("../../x.env")
+        );
+        assert_eq!(
+            resolve_config_destination(Some(std::path::Path::new(".")), "../../x.env"),
+            std::path::PathBuf::from("../../x.env")
+        );
+        assert_eq!(
+            resolve_config_destination(Some(std::path::Path::new("project")), "../../x.env"),
+            std::path::PathBuf::from("../x.env")
+        );
+    }
+
+    #[test]
+    fn path_within_dir_detects_escapes() {
+        let base = std::path::Path::new("/home/trydirect/project");
+
+        assert!(path_within_dir(base, &base.join("sub/.env")));
+        assert!(path_within_dir(base, &base.join("sub/../.env")));
+        assert!(!path_within_dir(
+            base,
+            std::path::Path::new("/home/trydirect/leak.env")
+        ));
+        assert!(!path_within_dir(
+            base,
+            std::path::Path::new("/home/trydirect/project-evil/.env")
+        ));
+
+        // An empty/`.` base has no prefix: only relative, non-escaping
+        // candidates count as contained.
+        let dot = std::path::Path::new(".");
+        assert!(path_within_dir(dot, std::path::Path::new("sub/.env")));
+        assert!(path_within_dir(dot, std::path::Path::new("sub/../.env")));
+        assert!(!path_within_dir(dot, std::path::Path::new("../../x.env")));
+        assert!(!path_within_dir(dot, std::path::Path::new("/etc/x.env")));
+    }
 }
 
 /// Regression tests for `deploy_app`'s `image` field (stacker/BUGS.md §35):
@@ -11892,7 +12211,7 @@ volumes:
 
 #[cfg(all(test, feature = "docker"))]
 mod write_config_tests {
-    use super::write_config_to_disk;
+    use super::{write_config_to_disk, write_config_to_disk_with_force};
     use crate::security::vault_client::{AppConfig, AppConfigDriftCheck};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -12085,6 +12404,211 @@ mod write_config_tests {
         let backups = sibling_backups(&file_path);
         assert_eq!(backups.len(), super::MANAGED_FILE_BACKUP_KEEP);
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "VALUE=7\n");
+    }
+
+    // Regression tests (BUGS.md): a relative destination_path must land under
+    // the resolved compose dir, never the agent's CWD; absolute destinations
+    // keep working as-is.
+
+    #[tokio::test]
+    async fn test_relative_destination_lands_under_base_dir_not_cwd() {
+        let dir = tempdir().unwrap();
+        let unique = uuid::Uuid::new_v4().to_string();
+        let relative = format!("{}/docker/production/.env", unique);
+        let config = app_config(relative.clone(), "KEY=value\n".to_string());
+
+        write_config_to_disk_with_force(&config, false, Some(dir.path()))
+            .await
+            .expect("write should succeed");
+
+        let landed = dir.path().join(&relative);
+        assert_eq!(
+            fs::read_to_string(&landed).unwrap(),
+            "KEY=value\n",
+            "a relative destination_path must land under the resolved compose dir"
+        );
+        assert!(
+            !std::env::current_dir().unwrap().join(&relative).exists(),
+            "a relative destination_path must not land in the agent's CWD"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_absolute_destination_untouched_by_base_dir() {
+        let base = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let file_path = target.path().join("app.conf");
+        let config = app_config(file_path.to_string_lossy().to_string(), "x=1\n".to_string());
+
+        write_config_to_disk_with_force(&config, false, Some(base.path()))
+            .await
+            .expect("write should succeed");
+
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "x=1\n",
+            "an absolute destination_path must keep working as-is"
+        );
+        assert!(
+            fs::read_dir(base.path()).unwrap().next().is_none(),
+            "the base dir must not be touched for absolute destinations"
+        );
+    }
+}
+
+/// Regression tests for `ensure_env_files_exist` (BUGS.md): env files are
+/// created under the compose project directory only — never outside it.
+#[cfg(all(test, feature = "docker"))]
+mod ensure_env_file_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn compose_with_env_file(env_file: &str) -> String {
+        format!(
+            "services:\n  web:\n    image: nginx\n    env_file: {}\n",
+            env_file
+        )
+    }
+
+    #[tokio::test]
+    async fn creates_missing_env_file_inside_project_dir() {
+        let dir = tempdir().unwrap();
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file(".env"),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert!(dir.path().join(".env").exists());
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[tokio::test]
+    async fn creates_block_sequence_env_files_inside_project_dir() {
+        let dir = tempdir().unwrap();
+        let compose = "services:\n  web:\n    image: nginx\n    env_file:\n      - .env\n      - extra.env # trailing comment\n";
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(compose, dir.path().to_str().unwrap(), &mut errors).await;
+
+        assert!(dir.path().join(".env").exists());
+        assert!(dir.path().join("extra.env").exists());
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[tokio::test]
+    async fn refuses_to_create_env_file_outside_project_dir() {
+        let dir = tempdir().unwrap();
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file("../../escape.env"),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert!(
+            !dir.path().join("../../escape.env").exists(),
+            "no file may be created outside the project directory"
+        );
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "env_file_outside_project");
+        assert!(
+            errors[0].message.contains("web"),
+            "the error must name the offending service: {}",
+            errors[0].message
+        );
+        assert!(
+            errors[0].message.contains("../escape.env") || errors[0].message.contains(".."),
+            "the error must name the offending entry: {}",
+            errors[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_to_create_absolute_env_file_outside_project_dir() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let absolute = outside.path().join("orphan.env");
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file(absolute.to_str().unwrap()),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert!(
+            !absolute.exists(),
+            "no file may be created outside the project directory"
+        );
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "env_file_outside_project");
+    }
+
+    #[tokio::test]
+    async fn refuses_duplicate_env_file_entries_once() {
+        let dir = tempdir().unwrap();
+        let compose = "services:\n  web:\n    image: nginx\n    env_file: ../../dup.env\n  db:\n    image: postgres\n    env_file: ../../dup.env\n";
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(compose, dir.path().to_str().unwrap(), &mut errors).await;
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "duplicate env_file entries must be refused once: {:?}",
+            errors
+        );
+    }
+
+    #[tokio::test]
+    async fn leaves_existing_env_file_outside_project_dir_alone() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let absolute = outside.path().join("shared.env");
+        std::fs::write(&absolute, "SHARED=1\n").unwrap();
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file(absolute.to_str().unwrap()),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(&absolute).unwrap(),
+            "SHARED=1\n",
+            "an existing env file outside the project is legitimate and must be left alone"
+        );
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[tokio::test]
+    async fn keeps_env_file_resolving_inside_after_parent_traversal() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let mut errors = Vec::new();
+
+        ensure_env_files_exist(
+            &compose_with_env_file("sub/../.env"),
+            dir.path().to_str().unwrap(),
+            &mut errors,
+        )
+        .await;
+
+        assert!(dir.path().join(".env").exists());
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+        assert!(
+            !dir.path().join("sub").join(".env").exists(),
+            "the file must land at the normalized location only"
+        );
     }
 }
 
