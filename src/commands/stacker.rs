@@ -6829,13 +6829,54 @@ fn stacker_render_hash(content: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Must stay identical to Stacker's `env_body_hash` / `hash_env_body_semantic`
+/// (stacker `src/services/config_renderer.rs`), which stamps the header hash:
+/// comment/blank lines and Stacker-owned keys are dropped and the remaining
+/// `key=value` pairs sorted, so a freshly stamped `DEPLOYMENT_HASH` alone is
+/// not reported as drift.
 #[cfg(feature = "docker")]
 fn env_body_hash(content: &str) -> String {
     let body = content
         .strip_prefix("# stacker-render ")
         .and_then(|_| content.split_once('\n').map(|(_, body)| body))
         .unwrap_or(content);
-    sha256_hex(body.as_bytes())
+
+    let mut entries: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if is_stacker_owned_env_key(key) {
+            continue;
+        }
+        entries.insert(key, value);
+    }
+
+    let mut normalized = String::new();
+    for (key, value) in &entries {
+        normalized.push_str(key);
+        normalized.push('=');
+        normalized.push_str(value);
+        normalized.push('\n');
+    }
+    sha256_hex(normalized.as_bytes())
+}
+
+/// Bookkeeping keys Stacker writes itself, mirrored from stacker
+/// `STACKER_OWNED_ENV_KEYS` + `RESERVED_ENV_PREFIXES`.
+#[cfg(feature = "docker")]
+fn is_stacker_owned_env_key(key: &str) -> bool {
+    const STACKER_OWNED_ENV_KEYS: &[&str] = &["DEPLOYMENT_HASH"];
+    const RESERVED_ENV_PREFIXES: &[&str] = &["STACKER_", "DOCKER_", "VAULT_", "AGENT_"];
+    STACKER_OWNED_ENV_KEYS.contains(&key)
+        || RESERVED_ENV_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
 }
 
 #[cfg(feature = "docker")]
@@ -12316,6 +12357,80 @@ mod write_config_tests {
         assert!(error.to_string().contains("Runtime env drift detected"));
         let written = fs::read_to_string(&file_path).expect("file should remain");
         assert!(written.contains("OLD=value"));
+    }
+
+    // Golden vectors: sha256 of the normalized body Stacker hashes
+    // (`hash_env_body_semantic` in stacker src/services/config_renderer.rs):
+    // comments/blank lines and Stacker-owned keys dropped, keys sorted, "k=v\n".
+    const SEMANTIC_HASH_A1_B2: &str =
+        "beb5f2519a8d4a22ff19d6b4ba05806c75710dc1ad7e2ef37ee1d1a950d4b074";
+    const SEMANTIC_HASH_KEY_VALUE: &str =
+        "c283007d8774ef7af9ef9242045d49e726f834624768abf670d1e9a6634ee651";
+
+    #[test]
+    fn test_env_body_hash_matches_stacker_semantic_hash() {
+        let content = "# stacker-render version=1 hash=x generated_at=now inputs=base\n\
+                       B=2\nDEPLOYMENT_HASH=deployment_1\n# note\n\nA=1\n\
+                       VAULT_DEV_ROOT_TOKEN_ID=t\nSTACKER_X=1\nDOCKER_X=1\nAGENT_X=1\n";
+
+        assert_eq!(super::env_body_hash(content), SEMANTIC_HASH_A1_B2);
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_ignores_deployment_hash_only_drift() {
+        // The live failure: Stacker stamps the semantic hash, the file on disk
+        // differs only in the DEPLOYMENT_HASH bookkeeping key.
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(
+            &file_path,
+            format!(
+                "# stacker-render version=1 hash={SEMANTIC_HASH_KEY_VALUE} generated_at=t0 inputs=service\n\
+                 DEPLOYMENT_HASH=deployment_old\nKEY=value\n"
+            ),
+        )
+        .unwrap();
+
+        let mut config = app_config(
+            file_path.to_string_lossy().to_string(),
+            format!(
+                "# stacker-render version=1 hash={SEMANTIC_HASH_KEY_VALUE} generated_at=t1 inputs=service\n\
+                 DEPLOYMENT_HASH=deployment_new\nKEY=value\n"
+            ),
+        );
+        enable_drift_check(&mut config);
+
+        write_config_to_disk(&config)
+            .await
+            .expect("bookkeeping-only difference must not count as drift");
+
+        let written = fs::read_to_string(&file_path).expect("file should exist");
+        assert!(written.contains("DEPLOYMENT_HASH=deployment_new"));
+    }
+
+    #[tokio::test]
+    async fn test_write_config_to_disk_ignores_key_order_drift() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        fs::write(
+            &file_path,
+            format!(
+                "# stacker-render version=1 hash={SEMANTIC_HASH_A1_B2} generated_at=t0 inputs=base\nB=2\nA=1\n"
+            ),
+        )
+        .unwrap();
+
+        let mut config = app_config(
+            file_path.to_string_lossy().to_string(),
+            format!(
+                "# stacker-render version=1 hash={SEMANTIC_HASH_A1_B2} generated_at=t1 inputs=base\nA=1\nB=2\n"
+            ),
+        );
+        enable_drift_check(&mut config);
+
+        write_config_to_disk(&config)
+            .await
+            .expect("key order must not count as drift");
     }
 
     #[tokio::test]
