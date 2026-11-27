@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod deploy;
 pub mod docker_executor;
 pub mod docker_ops;

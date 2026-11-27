@@ -11,7 +11,6 @@ use pipe_adapter_sdk::{
     PipeAdapterDispatch, PipeAdapterPayload, PipeAdapterReference, PipeSourceAdapter,
     PipeTargetAdapter,
 };
-#[cfg(feature = "docker")]
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -24,7 +23,6 @@ use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(feature = "docker")]
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
 #[cfg(feature = "docker")]
@@ -41,6 +39,7 @@ use crate::transport::{Command as AgentCommand, CommandResult};
 #[cfg(feature = "docker")]
 use crate::agent::docker;
 
+use super::backup::{self, BackupCommand};
 use super::firewall::{self, ConfigureFirewallCommand};
 
 const LOGS_DEFAULT_LIMIT: usize = 400;
@@ -1043,6 +1042,7 @@ pub enum StackerCommand {
     ConfigDiff(ConfigDiffCommand),
     ConfigureProxy(ConfigureProxyCommand),
     Exec(ExecCommand),
+    Backup(BackupCommand),
     ServerResources(ServerResourcesCommand),
     ListContainers(ListContainersCommand),
     ConfigureFirewall(ConfigureFirewallCommand),
@@ -2209,6 +2209,13 @@ pub fn parse_stacker_command(cmd: &AgentCommand) -> Result<Option<StackerCommand
             payload.validate()?;
             Ok(Some(StackerCommand::Exec(payload)))
         }
+        "backup" | "stacker.backup" => {
+            let payload: BackupCommand = serde_json::from_value(unwrap_params(&cmd.params))
+                .context("invalid backup payload")?;
+            let payload = payload.normalize().with_command_context(cmd);
+            payload.validate()?;
+            Ok(Some(StackerCommand::Backup(payload)))
+        }
         "server_resources" | "stacker.server_resources" => {
             let payload: ServerResourcesCommand =
                 serde_json::from_value(unwrap_params(&cmd.params))
@@ -2291,6 +2298,7 @@ pub async fn execute_stacker_command(
             StackerCommand::TriggerPipe(data) => {
                 handle_trigger_pipe(agent_cmd, data, pipe_runtime).await
             }
+            StackerCommand::Backup(data) => backup::handle_backup(agent_cmd, data).await,
             _ => {
                 let _ = (firewall_policy, pipe_runtime);
                 bail!("docker feature not enabled for stacker commands")
@@ -3435,7 +3443,7 @@ fn compose_target_service(app_code: &str) -> Vec<String> {
     }
 }
 
-fn base_result(
+pub(crate) fn base_result(
     agent_cmd: &AgentCommand,
     deployment_hash: &str,
     app_code: &str,
@@ -3477,8 +3485,7 @@ fn finish_success_with_warnings(
     result.result = Some(body);
 }
 
-#[cfg(feature = "docker")]
-fn redact_message(message: &str, enabled: bool) -> (String, bool) {
+pub(crate) fn redact_message(message: &str, enabled: bool) -> (String, bool) {
     if !enabled || message.is_empty() {
         return (message.to_string(), false);
     }
@@ -3790,6 +3797,7 @@ async fn execute_with_docker(
         StackerCommand::ConfigDiff(data) => handle_config_diff(agent_cmd, data).await,
         StackerCommand::ConfigureProxy(data) => handle_configure_proxy(agent_cmd, data).await,
         StackerCommand::Exec(data) => handle_exec(agent_cmd, data).await,
+        StackerCommand::Backup(data) => backup::handle_backup(agent_cmd, data).await,
         StackerCommand::ServerResources(data) => handle_server_resources(agent_cmd, data).await,
         StackerCommand::ListContainers(data) => handle_list_containers(agent_cmd, data).await,
         StackerCommand::ProbeEndpoints(data) => handle_probe_endpoints(agent_cmd, data).await,
