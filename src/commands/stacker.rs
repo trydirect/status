@@ -848,6 +848,184 @@ pub fn inject_runtime_into_compose(compose_content: &str, runtime: &ContainerRun
     serde_yaml::to_string(&doc).unwrap_or_else(|_| compose_content.to_string())
 }
 
+/// Override the `image` of the service `app_code` addresses in a
+/// docker-compose YAML string. Only that service's `image:` is rewritten —
+/// every other service and field survives. Returns `None` when the YAML
+/// cannot be parsed or no service resolves, in which case the caller's
+/// content must be left alone.
+#[cfg(feature = "docker")]
+pub fn override_service_image_in_compose(
+    compose_content: &str,
+    app_code: &str,
+    image: &str,
+) -> Option<String> {
+    let service_key = resolve_compose_service_key(compose_content, app_code)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(compose_content).ok()?;
+    let service_def = doc
+        .get_mut("services")?
+        .get_mut(service_key.as_str())?
+        .as_mapping_mut()?;
+    service_def.insert(
+        serde_yaml::Value::String("image".into()),
+        serde_yaml::Value::String(image.trim().into()),
+    );
+    serde_yaml::to_string(&doc).ok()
+}
+
+/// The compose service key `app_code` addresses.
+///
+/// The logical app code is not always the service key: the CLI generator names
+/// a service `proxy-manager` but labels it
+/// `my.stacker.service=nginx_proxy_manager` (`stacker/stacker/src/cli/generator/compose.rs`).
+/// Resolution: a unique `my.stacker.service` label match wins, then an exact
+/// service-key match (the fallback for stacks without the label), then `None` —
+/// callers fall back to the app code itself, because label resolution is an
+/// addition, never a restriction (PR #140 review).
+#[cfg(feature = "docker")]
+pub fn resolve_compose_service_key(compose_content: &str, app_code: &str) -> Option<String> {
+    let app_code = app_code.trim();
+    if app_code.is_empty() {
+        return None;
+    }
+    let doc: serde_yaml::Value = serde_yaml::from_str(compose_content).ok()?;
+    let services = doc.get("services")?;
+
+    let mut labeled_keys = Vec::new();
+    if let Some(mapping) = services.as_mapping() {
+        for (key, def) in mapping {
+            if service_def_label(def, docker::STACKER_SERVICE_LABEL).map(str::trim)
+                == Some(app_code)
+            {
+                if let Some(key) = key.as_str() {
+                    labeled_keys.push(key.to_string());
+                }
+            }
+        }
+    }
+    if labeled_keys.len() == 1 {
+        return labeled_keys.pop();
+    }
+    if services.get(app_code).is_some() {
+        return Some(app_code.to_string());
+    }
+    None
+}
+
+/// A service definition's label value from its `labels:` block, which Compose
+/// accepts as either a mapping or a list of `key=value` strings.
+#[cfg(feature = "docker")]
+fn service_def_label<'a>(def: &'a serde_yaml::Value, label: &str) -> Option<&'a str> {
+    let labels = def.get("labels")?;
+    if let Some(value) = labels.get(label).and_then(|value| value.as_str()) {
+        return Some(value);
+    }
+    for entry in labels.as_sequence()? {
+        let entry = entry.as_str()?;
+        if let Some((key, value)) = entry.split_once('=') {
+            if key.trim() == label {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Replace a file atomically: back up the current content if it changes, write
+/// a sibling temp file, sync it, and rename it over the original — an
+/// interrupted write can never leave the live file truncated (PR #140 review).
+/// Mirrors the pattern of `write_config_to_disk_with_force`.
+#[cfg(feature = "docker")]
+async fn replace_file_atomically(path: &str, content: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let path = std::path::Path::new(path);
+    backup_existing_file_if_changed(path, content)?;
+    let temp_path = sibling_temp_path(path)?;
+    let write_result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .context(format!(
+                "Failed to create temp file: {}",
+                temp_path.display()
+            ))?;
+        file.write_all(content)
+            .context("Failed to write compose temp file")?;
+        file.sync_all()
+            .context("Failed to sync compose temp file")?;
+        std::fs::rename(&temp_path, path).context(format!(
+            "Failed to atomically move compose into place: {}",
+            path.display()
+        ))?;
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
+}
+
+/// Finalize the compose a deploy will run, and return the service key it
+/// resolves to.
+///
+/// The requested image is applied here — after every `config_files` and env
+/// write — to the compose as it exists at deploy time: a `config_files` entry
+/// targeting the compose file replaces the whole file after it is
+/// materialized, and a drift check would reject an earlier rewrite
+/// (PR #140 review). The returned service key resolves `app_code` the same
+/// way (unique `my.stacker.service` label match, then exact key) and is what
+/// `compose pull/up` must address.
+#[cfg(feature = "docker")]
+async fn finalize_deploy_compose(
+    compose_file: &str,
+    app_code: &str,
+    image: Option<&str>,
+) -> Result<String, CommandError> {
+    let existing = tokio::fs::read_to_string(compose_file).await.map_err(|e| {
+        make_error(
+            "image_override_failed",
+            format!("Failed to read compose file {}: {}", compose_file, e),
+            None,
+        )
+    })?;
+    let service_key = resolve_compose_service_key(&existing, app_code)
+        .unwrap_or_else(|| app_code.trim().to_string());
+
+    if let Some(image) = image.map(str::trim).filter(|value| !value.is_empty()) {
+        let updated = override_service_image_in_compose(&existing, app_code, image).ok_or_else(
+            || {
+                make_error(
+                    "image_override_failed",
+                    format!(
+                        "Requested image '{}' could not be applied to service '{}' in {} (unknown service or unparsable compose)",
+                        image, app_code, compose_file
+                    ),
+                    None,
+                )
+            },
+        )?;
+        if updated != existing {
+            replace_file_atomically(compose_file, updated.as_bytes())
+                .await
+                .map_err(|e| {
+                    make_error(
+                        "image_override_failed",
+                        format!("Failed to write compose file with image override: {}", e),
+                        None,
+                    )
+                })?;
+        }
+    }
+
+    Ok(service_key)
+}
+
 #[derive(Debug, Clone)]
 pub enum StackerCommand {
     Health(HealthCommand),
@@ -1641,6 +1819,17 @@ pub struct DeployAppCommand {
     #[serde(default)]
     compose_content: Option<String>,
     /// Optional: specific image to use (overrides compose file)
+    ///
+    /// Rewrites `image:` of the service `app_code` resolves to — a unique
+    /// `my.stacker.service` label match, then the exact service key — in the
+    /// compose the deploy runs. Applied at finalize time, after every
+    /// `config_files`/env write and right before `docker compose pull/up`, so
+    /// it wins over the compose's own `image:` regardless of what supplied the
+    /// file (a `config_files` entry may replace the compose after it is
+    /// materialized). Only that service is touched; blank values are ignored.
+    /// When it cannot be applied (unknown service or unparsable compose) the
+    /// deploy fails with `image_override_failed` instead of silently running
+    /// the compose's image.
     #[serde(default)]
     image: Option<String>,
     /// Optional: environment variables to set
@@ -2144,8 +2333,29 @@ fn resolve_container_name(app_code: &str, container: &Option<String>) -> String 
     trimmed(app_code)
 }
 
+/// The container to actually operate on.
+///
+/// [`resolve_container_name`] only picks between the requested `container` and
+/// the `app_code`; neither is necessarily a container that exists. An app whose
+/// code is `floci` commonly runs as `project-app-1`, so every command that
+/// addressed Docker by that raw string failed to find anything — logs came back
+/// empty, restarts hit nothing.
+///
+/// [`docker::resolve_container_name`] closes that gap by matching the
+/// `my.stacker.service` label first and a set of anchored name patterns
+/// (`app-1`, `project-app-1`, `app_1`) second.
+///
+/// **Falls back to the raw name.** Stacks deployed before the labels existed
+/// have none, and their container names may match neither pattern; for those
+/// this returns exactly what the caller asked for, which is the behaviour that
+/// was there before. Label resolution is an addition, never a restriction.
+///
+/// Command handlers resolve exactly once here and then call the
+/// `docker::*_resolved` helpers, which skip the lookup: re-resolving an
+/// already-resolved name is a redundant Docker API call and can select a
+/// different container (PR #140 review).
 #[cfg(feature = "docker")]
-async fn resolve_probe_container_name(app_code: &str, container: &Option<String>) -> String {
+async fn resolve_target_container_name(app_code: &str, container: &Option<String>) -> String {
     let requested_name = resolve_container_name(app_code, container);
     docker::resolve_container_name(&requested_name)
         .await
@@ -5184,24 +5394,40 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         }
     };
 
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     // Return health for every container when app_code is "all" or empty.
     if data.app_code == "all" || data.app_code.is_empty() && !data.include_system {
+        // The user's containers and the platform's, split by scope but sent in
+        // one reply. They used to be two mutually exclusive branches, so a
+        // caller got either everything flat or the system subset alone, and the
+        // dashboard had to guess which was which by matching names.
         let mut all_list = Vec::new();
+        let mut system_list = Vec::new();
         for entry in &containers {
             let container_state = map_container_state(&entry.status).to_string();
+            let scope = docker::scope_for_container(&entry.labels, &entry.name, &entry.image);
             let mut item = json!({
-                "app_code": entry.name.trim_start_matches('/'),
+                // From the `my.stacker.service` label, never the container
+                // name — see docker::app_code_for_container.
+                "app_code": docker::app_code_for_container(&entry.labels, &entry.name),
                 "container_name": entry.name.trim_start_matches('/'),
                 "container_state": container_state,
                 "status": derive_health_status(&container_state, false),
+                "scope": scope.as_str(),
+                "image": entry.image.clone(),
             });
             if data.include_metrics {
                 item["metrics"] = build_metrics(entry);
             }
-            all_list.push(item);
+            match scope {
+                docker::ContainerScope::Platform => system_list.push(item),
+                docker::ContainerScope::Project => all_list.push(item),
+            }
         }
+        // Overall health covers the user's containers only. A degraded platform
+        // component is the platform's problem to show, not a reason to tell the
+        // user their stack is unhealthy.
         let overall = if all_list
             .iter()
             .all(|c| c.get("status").and_then(|v| v.as_str()) == Some("ok"))
@@ -5216,6 +5442,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
             "status": overall,
             "last_heartbeat_at": now_timestamp(),
             "containers": all_list,
+            "system_containers": system_list,
         });
         result.result = Some(body);
         return Ok(result);
@@ -5223,18 +5450,15 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 
     // Handle system containers request (status_panel, compose-agent, etc.)
     if data.include_system && (data.app_code.is_empty() || data.app_code == "system") {
-        let system_patterns = [
-            "status",
-            "status_panel",
-            "status-panel",
-            "compose-agent",
-            "compose_agent",
-        ];
+        // Classified, not name-matched. The list here used to include the bare
+        // substring "status", which also catches a user's `status-page`,
+        // `statuspage` or `orderstatus` and quietly moved their app out of
+        // their own Applications list.
         let system_containers: Vec<_> = containers
             .iter()
             .filter(|c| {
-                let name = c.name.trim_start_matches('/').to_lowercase();
-                system_patterns.iter().any(|p| name.contains(p))
+                docker::scope_for_container(&c.labels, &c.name, &c.image)
+                    == docker::ContainerScope::Platform
             })
             .collect();
 
@@ -5242,7 +5466,9 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         for entry in &system_containers {
             let container_state = map_container_state(&entry.status).to_string();
             let mut item = json!({
-                "app_code": entry.name.trim_start_matches('/'),
+                // From the `my.stacker.service` label, never the container
+                // name — see docker::app_code_for_container.
+                "app_code": docker::app_code_for_container(&entry.labels, &entry.name),
                 "container_name": entry.name.trim_start_matches('/'),
                 "container_state": container_state,
                 "status": derive_health_status(&container_state, false),
@@ -5307,8 +5533,8 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
 #[cfg(feature = "docker")]
 async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "logs");
-    let target_name = resolve_container_name(&data.app_code, &data.container);
-    let window = match docker::get_container_logs_window(
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
+    let window = match docker::get_container_logs_window_resolved(
         &target_name,
         data.cursor.clone(),
         Some(data.limit),
@@ -5372,9 +5598,9 @@ async fn handle_logs(agent_cmd: &AgentCommand, data: &LogsCommand) -> Result<Com
 async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "restart");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::restart(&target_name).await {
+    if let Err(e) = docker::restart_resolved(&target_name).await {
         errors.push(make_error(
             "restart_failed",
             format!("Restart failed for `{}`", target_name),
@@ -5382,13 +5608,13 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
         ));
 
         if data.force {
-            if let Err(stop_err) = docker::stop(&target_name).await {
+            if let Err(stop_err) = docker::stop_resolved(&target_name).await {
                 errors.push(make_error(
                     "force_stop_failed",
                     format!("Force stop failed for `{}`", target_name),
                     Some(stop_err.to_string()),
                 ));
-            } else if let Err(retry_err) = docker::restart(&target_name).await {
+            } else if let Err(retry_err) = docker::restart_resolved(&target_name).await {
                 errors.push(make_error(
                     "force_restart_failed",
                     format!("Forced restart failed for `{}`", target_name),
@@ -5461,9 +5687,9 @@ async fn handle_restart(agent_cmd: &AgentCommand, data: &RestartCommand) -> Resu
 async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "stop");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::stop_with_timeout(&target_name, data.timeout).await {
+    if let Err(e) = docker::stop_with_timeout_resolved(&target_name, data.timeout).await {
         errors.push(make_error(
             "stop_failed",
             format!("Stop failed for `{}`", target_name),
@@ -5526,9 +5752,9 @@ async fn handle_stop(agent_cmd: &AgentCommand, data: &StopCommand) -> Result<Com
 async fn handle_start(agent_cmd: &AgentCommand, data: &StartCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "start");
     let mut errors: Vec<CommandError> = Vec::new();
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
-    if let Err(e) = docker::start(&target_name).await {
+    if let Err(e) = docker::start_resolved(&target_name).await {
         errors.push(make_error(
             "start_failed",
             format!("Start failed for `{}`", target_name),
@@ -5688,7 +5914,8 @@ async fn handle_error_summary(
     for container in target_containers {
         // Get logs for this container
         let logs_result =
-            docker::get_container_logs_window(&container.name, None, Some(LOGS_MAX_LIMIT)).await;
+            docker::get_container_logs_window_resolved(&container.name, None, Some(LOGS_MAX_LIMIT))
+                .await;
 
         let mut error_count = 0u64;
         let mut warning_count = 0u64;
@@ -6090,7 +6317,7 @@ async fn handle_apply_config(
             .find(|c| container_matches(&c.name, &data.app_code, &c.labels, &c.image));
 
         if let Some(c) = container {
-            match docker::restart(&c.name).await {
+            match docker::restart_resolved(&c.name).await {
                 Ok(()) => {
                     body["container_restarted"] = json!(true);
                     body["restarted_at"] = json!(now_timestamp());
@@ -6579,27 +6806,23 @@ fn prune_sibling_backups(path: &std::path::Path, keep: usize) -> Result<()> {
     Ok(())
 }
 
-/// Handle deploy_app command - uses docker compose to deploy a new app/service
+/// Materialize the compose file a deploy will run.
+///
+/// The command payload's `compose_content` wins over the compose already at
+/// `compose_file`; the command's Kata runtime override (when requested and
+/// available) is applied to whichever compose is used before it is written.
+/// The requested `image` is deliberately NOT applied here — see
+/// [`finalize_deploy_compose`]: a `config_files` entry can replace the compose
+/// after this step, so the override is finalized later, right before pull/up.
+/// Non-fatal notes are pushed to `errors`; failures that must stop the deploy
+/// are returned as `Err`.
 #[cfg(feature = "docker")]
-async fn handle_deploy_app(
-    agent_cmd: &AgentCommand,
+async fn materialize_deploy_compose(
     data: &DeployAppCommand,
-) -> Result<CommandResult> {
-    use crate::security::vault_client::VaultClient;
-    use tokio::process::Command;
-
-    let mut result = base_result(
-        agent_cmd,
-        &data.deployment_hash,
-        &data.app_code,
-        "deploy_app",
-    );
-    let mut errors: Vec<CommandError> = Vec::new();
-
-    // Determine the compose working directory
-    let (compose_dir, compose_file) =
-        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
-
+    compose_dir: &str,
+    compose_file: &str,
+    errors: &mut Vec<CommandError>,
+) -> Result<(), CommandError> {
     // If compose_content is provided, write it to disk (for new deployments)
     if let Some(compose_content) = &data.compose_content {
         tracing::info!(
@@ -6638,63 +6861,54 @@ async fn handle_deploy_app(
         };
 
         // Create the directory if it doesn't exist
-        if let Err(e) = tokio::fs::create_dir_all(&compose_dir).await {
-            let error = make_error(
+        if let Err(e) = tokio::fs::create_dir_all(compose_dir).await {
+            return Err(make_error(
                 "dir_create_failed",
                 format!("Failed to create directory {}: {}", compose_dir, e),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
 
         // Write the compose file
         if let Err(e) = backup_existing_file_if_changed(
-            std::path::Path::new(&compose_file),
+            std::path::Path::new(compose_file),
             final_compose.as_bytes(),
         ) {
-            let error = make_error(
+            return Err(make_error(
                 "compose_backup_failed",
                 format!(
                     "Failed to back up docker-compose.yml before overwrite: {}",
                     e
                 ),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
-        if let Err(e) = tokio::fs::write(&compose_file, &final_compose).await {
-            let error = make_error(
+        if let Err(e) = tokio::fs::write(compose_file, &final_compose).await {
+            return Err(make_error(
                 "compose_write_failed",
                 format!("Failed to write docker-compose.yml: {}", e),
                 None,
-            );
-            result.status = "failed".into();
-            result.error = Some(error.message.clone());
-            result.errors = Some(vec![error]);
-            return Ok(result);
+            ));
         }
 
         tracing::info!(
             compose_file = %compose_file,
             "docker-compose.yml written successfully"
         );
-    } else if let Some(runtime) = &data.runtime {
+        return Ok(());
+    }
+
+    if let Some(runtime) = &data.runtime {
         // Compose content not in payload — modify existing file on disk if runtime is requested
         if *runtime == ContainerRuntime::Kata {
-            match tokio::fs::try_exists(&compose_file).await {
+            match tokio::fs::try_exists(compose_file).await {
                 Ok(true) => {
                     let kata_available = detect_kata_runtime().await;
                     if kata_available {
-                        if let Ok(existing) = tokio::fs::read_to_string(&compose_file).await {
+                        if let Ok(existing) = tokio::fs::read_to_string(compose_file).await {
                             let injected = inject_runtime_into_compose(&existing, runtime);
                             if let Err(e) = backup_existing_file_if_changed(
-                                std::path::Path::new(&compose_file),
+                                std::path::Path::new(compose_file),
                                 injected.as_bytes(),
                             ) {
                                 errors.push(make_error(
@@ -6705,8 +6919,7 @@ async fn handle_deploy_app(
                                     ),
                                     None,
                                 ));
-                            } else if let Err(e) = tokio::fs::write(&compose_file, &injected).await
-                            {
+                            } else if let Err(e) = tokio::fs::write(compose_file, &injected).await {
                                 errors.push(make_error(
                                     "runtime_inject_warning",
                                     format!(
@@ -6746,6 +6959,42 @@ async fn handle_deploy_app(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Handle deploy_app command - uses docker compose to deploy a new app/service
+#[cfg(feature = "docker")]
+async fn handle_deploy_app(
+    agent_cmd: &AgentCommand,
+    data: &DeployAppCommand,
+) -> Result<CommandResult> {
+    use crate::security::vault_client::VaultClient;
+    use tokio::process::Command;
+
+    let mut result = base_result(
+        agent_cmd,
+        &data.deployment_hash,
+        &data.app_code,
+        "deploy_app",
+    );
+    let mut errors: Vec<CommandError> = Vec::new();
+
+    // Determine the compose working directory
+    let (compose_dir, compose_file) =
+        resolve_compose_paths_for_service(&data.deployment_hash, &data.app_code).await;
+
+    // Materialize the compose the deploy will run — the payload's
+    // compose_content wins over the compose already on disk — applying the
+    // command's overrides before anything is pulled or deployed.
+    if let Err(error) =
+        materialize_deploy_compose(data, &compose_dir, &compose_file, &mut errors).await
+    {
+        result.status = "failed".into();
+        result.error = Some(error.message.clone());
+        result.errors = Some(vec![error]);
+        return Ok(result);
     }
 
     let has_env_config_file = data
@@ -6927,6 +7176,26 @@ async fn handle_deploy_app(
         return Ok(result);
     }
 
+    // Finalize the compose before deploying: apply the requested image to the
+    // final file — after every config/env write, so a `config_files` entry
+    // targeting the compose cannot replace the override and drift checks see
+    // the original file — and resolve the service key the deploy addresses
+    // (PR #140 review).
+    let image = data
+        .image
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let service_key = match finalize_deploy_compose(&compose_file, &data.app_code, image).await {
+        Ok(service_key) => service_key,
+        Err(error) => {
+            result.status = "failed".into();
+            result.error = Some(error.message.clone());
+            result.errors = Some(vec![error]);
+            return Ok(result);
+        }
+    };
+
     // Detect which compose variant is available (docker compose or docker-compose)
     let compose_variant = match detect_compose_variant().await {
         Some(variant) => {
@@ -6978,7 +7247,7 @@ async fn handle_deploy_app(
         let pull_result = pull_cmd.arg("-f").arg(&compose_file);
         let pull_result = pull_result
             .arg("pull")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -7021,7 +7290,7 @@ async fn handle_deploy_app(
             .arg("-f")
             .arg(&compose_file)
             .arg("stop")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -7035,7 +7304,7 @@ async fn handle_deploy_app(
             .arg(&compose_file)
             .arg("rm")
             .arg("-f")
-            .args(compose_target_service(&data.app_code))
+            .args(compose_target_service(&service_key))
             .current_dir(&compose_dir)
             .output()
             .await;
@@ -7058,7 +7327,7 @@ async fn handle_deploy_app(
         .arg(&compose_file)
         .arg("up")
         .arg("-d")
-        .args(compose_target_service(&data.app_code))
+        .args(compose_target_service(&service_key))
         .current_dir(&compose_dir);
 
     // Add environment variables if provided
@@ -8239,12 +8508,12 @@ async fn handle_configure_proxy(
 #[cfg(feature = "docker")]
 async fn handle_exec(agent_cmd: &AgentCommand, data: &ExecCommand) -> Result<CommandResult> {
     let mut result = base_result(agent_cmd, &data.deployment_hash, &data.app_code, "exec");
-    let target_name = resolve_container_name(&data.app_code, &data.container);
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     // Execute the command inside the container with timeout
     match tokio::time::timeout(
         std::time::Duration::from_secs(data.timeout as u64),
-        docker::exec_in_container_with_output(&target_name, &data.command),
+        docker::exec_in_container_with_output_resolved(&target_name, &data.command),
     )
     .await
     {
@@ -8341,6 +8610,27 @@ async fn handle_server_resources(
     Ok(result)
 }
 
+/// One `list_containers` entry built from a plain (non-health) container
+/// listing. Every listing mode carries the identity fields — the logical app
+/// code and who owns the container — because container discovery and the
+/// dashboard split key on them, and disabling resource metrics must not make
+/// them disappear (PR #140 review).
+#[cfg(feature = "docker")]
+fn container_list_entry(
+    name: &str,
+    status: &str,
+    image: &str,
+    labels: &HashMap<String, String>,
+) -> Value {
+    json!({
+        "name": name,
+        "app_code": docker::app_code_for_container(labels, name),
+        "scope": docker::scope_for_container(labels, name, image).as_str(),
+        "status": status,
+        "image": image,
+    })
+}
+
 /// Handle list_containers command - list all containers with optional health/logs
 #[cfg(feature = "docker")]
 async fn handle_list_containers(
@@ -8370,6 +8660,14 @@ async fn handle_list_containers(
                     });
                     json!({
                         "name": c.name,
+                        // The logical app code, from `my.stacker.service` —
+                        // container discovery keys on this. See
+                        // docker::app_code_for_container.
+                        "app_code": docker::app_code_for_container(&c.labels, &c.name),
+                        // Who owns this container. The dashboard splits its
+                        // Containers and System Containers sections on this
+                        // instead of matching names.
+                        "scope": docker::scope_for_container(&c.labels, &c.name, &c.image).as_str(),
                         "status": c.status,
                         "image": c.image,
                         "ports": c.ports,
@@ -8403,13 +8701,10 @@ async fn handle_list_containers(
                 .map(|c| {
                     container_meta.push(ContainerMatchMeta {
                         name: c.name.clone(),
-                        image: String::new(),
-                        labels: HashMap::new(),
+                        image: c.image.clone(),
+                        labels: c.labels.clone(),
                     });
-                    json!({
-                        "name": c.name,
-                        "status": c.status,
-                    })
+                    container_list_entry(&c.name, &c.status, &c.image, &c.labels)
                 })
                 .collect::<Vec<_>>(),
             Err(e) => {
@@ -8430,7 +8725,7 @@ async fn handle_list_containers(
     if data.include_logs {
         for container in containers.iter_mut() {
             if let Some(name) = container.get("name").and_then(|n| n.as_str()) {
-                match docker::get_container_logs(name, &data.log_lines.to_string()).await {
+                match docker::get_container_logs_resolved(name, &data.log_lines.to_string()).await {
                     Ok(logs) => {
                         container
                             .as_object_mut()
@@ -9585,7 +9880,7 @@ async fn handle_probe_endpoints(
         "probe_endpoints",
     );
     let requested_container = resolve_container_name(&data.app_code, &data.container);
-    let target_name = resolve_probe_container_name(&data.app_code, &data.container).await;
+    let target_name = resolve_target_container_name(&data.app_code, &data.container).await;
 
     let mut protocols_detected: Vec<String> = Vec::new();
     let mut endpoints: Vec<Value> = Vec::new();
@@ -11213,6 +11508,388 @@ services:
     }
 }
 
+/// Regression tests for `deploy_app`'s `image` field (stacker/BUGS.md §35):
+/// the documented contract is "Optional: specific image to use (overrides
+/// compose file)", but the deploy used to materialize the compose exactly as
+/// written and never read `image`, so `docker compose pull/up` ran the
+/// compose's own image while the command reported `status: "deployed"`.
+///
+/// Precedence and ordering in the deploy pipeline:
+/// - payload `compose_content` wins over the compose file already on disk;
+/// - the requested `image` is applied at finalize time — after every
+///   `config_files`/env write — to the compose as it exists at deploy time,
+///   wins over the `image:` of the service `app_code` resolves to (unique
+///   `my.stacker.service` label match, then exact service key), and touches
+///   that service only;
+/// - a blank `image` is ignored.
+#[cfg(all(test, feature = "docker"))]
+mod deploy_image_override_tests {
+    use super::*;
+
+    /// The compose shape observed live in stacker/BUGS.md §35: the n8n service
+    /// carries the stale image, with a second service and volumes that must
+    /// survive the override untouched.
+    const N8N_COMPOSE: &str = r#"services:
+  n8n:
+    image: n8nio/n8n:2.45.4
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+  db:
+    image: postgres:16
+volumes:
+  n8n_data: {}
+"#;
+
+    fn deploy_command(params: Value) -> DeployAppCommand {
+        serde_json::from_value(params).expect("deploy_app payload should deserialize")
+    }
+
+    async fn materialize(
+        compose_dir: &std::path::Path,
+        data: &DeployAppCommand,
+    ) -> Result<(), CommandError> {
+        let compose_dir = compose_dir.to_string_lossy().to_string();
+        let compose_file = format!("{}/docker-compose.yml", compose_dir);
+        materialize_deploy_compose(data, &compose_dir, &compose_file, &mut Vec::new()).await
+    }
+
+    /// The deploy's finalize step — handler order: after every config/env
+    /// write, right before `compose pull/up`.
+    async fn finalize(
+        compose_dir: &std::path::Path,
+        data: &DeployAppCommand,
+    ) -> Result<String, CommandError> {
+        let compose_file = format!("{}/docker-compose.yml", compose_dir.to_string_lossy());
+        finalize_deploy_compose(&compose_file, &data.app_code, data.image.as_deref()).await
+    }
+
+    fn materialized_yaml(dir: &std::path::Path) -> serde_yaml::Value {
+        let written = std::fs::read_to_string(dir.join("docker-compose.yml"))
+            .expect("compose should be written");
+        serde_yaml::from_str(&written).expect("materialized compose should parse")
+    }
+
+    fn service_image(doc: &serde_yaml::Value, service: &str) -> String {
+        doc.get("services")
+            .and_then(|services| services.get(service))
+            .and_then(|service| service.get("image"))
+            .and_then(|image| image.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn image_override_rewrites_target_service_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+            "pull": true,
+            "force_recreate": true,
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("compose should finalize");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(
+            service_image(&doc, "n8n"),
+            "n8nio/n8n:2.47.7",
+            "the requested image must win over the compose's image for the target service"
+        );
+        assert_eq!(
+            service_image(&doc, "db"),
+            "postgres:16",
+            "other services must keep their own image"
+        );
+
+        let n8n = doc.get("services").unwrap().get("n8n").unwrap();
+        assert_eq!(
+            n8n.get("ports").unwrap().get(0).unwrap().as_str().unwrap(),
+            "5678:5678",
+            "ports must survive the override"
+        );
+        assert_eq!(
+            n8n.get("volumes")
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "n8n_data:/home/node/.n8n",
+            "volumes must survive the override"
+        );
+        assert!(
+            doc.get("volumes").unwrap().get("n8n_data").is_some(),
+            "top-level volumes must survive the override"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_override_rewrites_compose_on_disk_without_payload_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        finalize(dir.path(), &data)
+            .await
+            .expect("on-disk compose should be rewritten");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(service_image(&doc, "n8n"), "n8nio/n8n:2.47.7");
+        assert_eq!(
+            service_image(&doc, "db"),
+            "postgres:16",
+            "other services must keep their own image"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_override_fails_when_target_service_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "gateway",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        let error = finalize(dir.path(), &data).await.expect_err(
+            "an unappliable override must fail instead of deploying the compose's image",
+        );
+        assert_eq!(error.code, "image_override_failed");
+    }
+
+    #[tokio::test]
+    async fn without_image_the_compose_content_is_written_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize must not require an override");
+
+        let written = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        assert_eq!(
+            written, N8N_COMPOSE,
+            "no override must not rewrite the compose"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_image_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "   ",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+        finalize(dir.path(), &data)
+            .await
+            .expect("a blank image must not fail finalize");
+
+        let written = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        assert_eq!(
+            written, N8N_COMPOSE,
+            "a blank image must not rewrite the compose"
+        );
+    }
+
+    /// The logical app code is not always the Compose service key: the CLI
+    /// generator names a service `proxy-manager` but labels it
+    /// `my.stacker.service=nginx_proxy_manager` (PR #140 review). The override
+    /// must resolve the unique Stacker-label match — exact-key fallback —
+    /// instead of rejecting the valid service with `image_override_failed`.
+    #[test]
+    fn image_override_resolves_service_by_stacker_label() {
+        let compose = r#"services:
+  proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    labels:
+      my.stacker.service: nginx_proxy_manager
+  app:
+    image: example/app:1
+"#;
+
+        let rewritten = override_service_image_in_compose(
+            compose,
+            "nginx_proxy_manager",
+            "jc21/nginx-proxy-manager:5.2",
+        )
+        .expect("the Stacker-labelled service must be resolvable");
+
+        let doc: serde_yaml::Value = serde_yaml::from_str(&rewritten).unwrap();
+        let services = doc.get("services").unwrap();
+        assert_eq!(
+            services
+                .get("proxy-manager")
+                .unwrap()
+                .get("image")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "jc21/nginx-proxy-manager:5.2"
+        );
+        assert_eq!(
+            services
+                .get("app")
+                .unwrap()
+                .get("image")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "example/app:1"
+        );
+    }
+
+    /// The exact service key is the fallback for stacks without the label, and
+    /// unknown app codes resolve to nothing (PR #140 review).
+    #[test]
+    fn service_key_resolution_falls_back_to_the_exact_key() {
+        assert_eq!(
+            resolve_compose_service_key(N8N_COMPOSE, "n8n"),
+            Some("n8n".to_string())
+        );
+        assert_eq!(resolve_compose_service_key(N8N_COMPOSE, "gateway"), None);
+        assert_eq!(resolve_compose_service_key(N8N_COMPOSE, "  "), None);
+    }
+
+    /// A unique Stacker-label match is authoritative — the label is the
+    /// logical identity the generator writes, the key is incidental — and
+    /// ambiguous labels fall back to the exact key (PR #140 review).
+    #[test]
+    fn service_key_resolution_prefers_a_unique_stacker_label() {
+        let dual = r#"services:
+  proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    labels:
+      my.stacker.service: nginx_proxy_manager
+  nginx_proxy_manager:
+    image: example/other:1
+"#;
+        assert_eq!(
+            resolve_compose_service_key(dual, "nginx_proxy_manager"),
+            Some("proxy-manager".to_string())
+        );
+
+        let ambiguous = r#"services:
+  one:
+    image: example/one:1
+    labels:
+      my.stacker.service: web
+  two:
+    image: example/two:1
+    labels:
+      my.stacker.service: web
+  web:
+    image: example/web:1
+"#;
+        assert_eq!(
+            resolve_compose_service_key(ambiguous, "web"),
+            Some("web".to_string())
+        );
+    }
+
+    /// The finalize write is atomic (PR #140 review): the live compose is
+    /// backed up, written through a sibling temp file, and renamed over the
+    /// original — no truncated live file and no stray temp on disk.
+    #[tokio::test]
+    async fn finalize_replaces_the_compose_atomically_with_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize should succeed");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(service_image(&doc, "n8n"), "n8nio/n8n:2.47.7");
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("docker-compose.yml.stacker-bak-")),
+            "the pre-override compose must be backed up: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(".tmp.")),
+            "no temp files may be left behind: {names:?}"
+        );
+    }
+
+    /// `config_files` entries are written after the compose is materialized,
+    /// and one targeting `docker-compose.yml` replaces the whole file. The
+    /// requested image must be applied to the compose as it exists when the
+    /// deploy is finalized — after every config/env write — or the override is
+    /// lost (and a drift check can reject the earlier rewrite) (PR #140
+    /// review).
+    #[tokio::test]
+    async fn image_override_survives_a_config_file_replacing_the_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = deploy_command(json!({
+            "deployment_hash": "testhash",
+            "app_code": "n8n",
+            "compose_content": N8N_COMPOSE,
+            "image": "n8nio/n8n:2.47.7",
+        }));
+
+        materialize(dir.path(), &data)
+            .await
+            .expect("compose should materialize");
+
+        // A config_files entry targeting docker-compose.yml lands after
+        // materialization and replaces the whole file.
+        std::fs::write(dir.path().join("docker-compose.yml"), N8N_COMPOSE).unwrap();
+
+        finalize(dir.path(), &data)
+            .await
+            .expect("finalize must apply the override to the replaced compose");
+
+        let doc = materialized_yaml(dir.path());
+        assert_eq!(
+            service_image(&doc, "n8n"),
+            "n8nio/n8n:2.47.7",
+            "the requested image must survive a config file replacing the compose"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "docker"))]
 mod write_config_tests {
     use super::write_config_to_disk;
@@ -11987,6 +12664,25 @@ mod list_containers_command_tests {
         };
         cmd = cmd.normalize();
         assert_eq!(cmd.log_lines, 100); // Should be clamped to 100
+    }
+
+    /// `list_containers` entries carry the logical identity fields even when
+    /// health metrics are disabled — container discovery and the dashboard
+    /// split key on them (PR #140 review).
+    #[cfg(feature = "docker")]
+    #[test]
+    fn plain_list_entry_carries_app_identity() {
+        let mut labels = HashMap::new();
+        labels.insert("my.stacker.service".to_string(), "n8n".to_string());
+
+        let entry =
+            super::container_list_entry("project-n8n-1", "running", "n8nio/n8n:2.45.4", &labels);
+
+        assert_eq!(entry["app_code"], "n8n");
+        assert_eq!(entry["scope"], "project");
+        assert_eq!(entry["image"], "n8nio/n8n:2.45.4");
+        assert_eq!(entry["name"], "project-n8n-1");
+        assert_eq!(entry["status"], "running");
     }
 
     #[test]
