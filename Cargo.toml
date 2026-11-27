@@ -43,7 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }
 # Keep OpenSSL vendored so musl cross-builds can compile transitive mail adapters.
 native-tls = { version = "0.2.18", features = ["vendored"] }
 # Pin minimum rustls-webpki to fix RUSTSEC-2026-0049 (CRL matching logic)
