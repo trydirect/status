@@ -3298,6 +3298,79 @@ fn compose_paths_from_label_line(line: &str) -> Option<(String, String)> {
     compose_paths_from_label_values(working_dir, config_files)
 }
 
+/// Where the deployment's stack compose lives, reported to Stacker as
+/// `stack_compose` so it shows the real path instead of guessing
+/// `/home/trydirect/<name>-<id>` (a stack can run in a legacy
+/// `/home/trydirect/project`). `COMPOSE_PROJECT_DIR` wins when configured;
+/// otherwise the compose labels of the project's own containers.
+#[cfg(feature = "docker")]
+fn stack_compose_location(containers: &[docker::ContainerHealth]) -> Option<(String, String)> {
+    stack_compose_location_from(resolve_compose_paths_from_env(), containers)
+}
+
+#[cfg(feature = "docker")]
+fn stack_compose_location_from(
+    configured: Option<(String, String)>,
+    containers: &[docker::ContainerHealth],
+) -> Option<(String, String)> {
+    if configured.is_some() {
+        return configured;
+    }
+    let (dir, config_files) = stack_compose_labels(containers)?;
+    compose_paths_from_label_values(&dir, &config_files).or_else(|| {
+        // The host path may not be visible inside the agent container:
+        // report what Docker recorded rather than nothing.
+        let file = config_files
+            .split(',')
+            .map(str::trim)
+            .find(|value| !value.is_empty())?;
+        Some((dir.clone(), file.to_string()))
+    })
+}
+
+/// Add `stack_compose: {dir, file}` to a report body when the location is known.
+#[cfg(feature = "docker")]
+fn attach_stack_compose(body: &mut Value, location: Option<(String, String)>) {
+    if let Some((dir, file)) = location {
+        body["stack_compose"] = json!({ "dir": dir, "file": file });
+    }
+}
+
+/// The compose working dir and config files most of the project's containers
+/// share. Platform containers (status panel, proxy manager) run from their own
+/// compose projects and are skipped; ties resolve to the smallest dir so the
+/// answer is stable.
+#[cfg(feature = "docker")]
+fn stack_compose_labels(containers: &[docker::ContainerHealth]) -> Option<(String, String)> {
+    let mut counts: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for container in containers {
+        if docker::scope_for_container(&container.labels, &container.name, &container.image)
+            != docker::ContainerScope::Project
+        {
+            continue;
+        }
+        let Some(dir) = container
+            .labels
+            .get("com.docker.compose.project.working_dir")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let config_files = container
+            .labels
+            .get("com.docker.compose.project.config_files")
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        *counts.entry((dir.to_string(), config_files)).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
+        .map(|(location, _)| location)
+}
+
 #[cfg(feature = "docker")]
 fn compose_paths_from_label_values(
     working_dir: &str,
@@ -5449,7 +5522,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
         } else {
             "degraded"
         };
-        let body = json!({
+        let mut body = json!({
             "type": "all_health",
             "deployment_hash": data.deployment_hash.clone(),
             "status": overall,
@@ -5457,6 +5530,7 @@ async fn handle_health(agent_cmd: &AgentCommand, data: &HealthCommand) -> Result
             "containers": all_list,
             "system_containers": system_list,
         });
+        attach_stack_compose(&mut body, stack_compose_location(&containers));
         result.result = Some(body);
         return Ok(result);
     }
@@ -7618,7 +7692,7 @@ async fn handle_deploy_app(
 
                 let effective_runtime = data.runtime.as_ref().unwrap_or(&ContainerRuntime::Runc);
 
-                let body = json!({
+                let mut body = json!({
                     "type": "deploy_app",
                     "deployment_hash": data.deployment_hash.clone(),
                     "app_code": data.app_code.clone(),
@@ -7628,6 +7702,9 @@ async fn handle_deploy_app(
                     "deployed_at": now_timestamp(),
                     "output": stdout.trim(),
                 });
+                // `compose up` just succeeded with this file, so it is the
+                // stack's real location.
+                attach_stack_compose(&mut body, Some((compose_dir.clone(), compose_file.clone())));
 
                 finish_success_with_warnings(&mut result, body, &errors);
             } else {
@@ -11755,6 +11832,143 @@ services:
 
         assert_eq!(compose_dir, deploy_dir.to_string_lossy());
         assert_eq!(resolved_file, compose_file.to_string_lossy());
+    }
+
+    fn container(name: &str, image: &str, labels: &[(&str, &str)]) -> docker::ContainerHealth {
+        docker::ContainerHealth {
+            name: name.to_string(),
+            image: image.to_string(),
+            status: "running".to_string(),
+            labels: labels
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn compose_labels(dir: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("com.docker.compose.project.working_dir", dir.to_string()),
+            (
+                "com.docker.compose.project.config_files",
+                format!("{dir}/docker-compose.yml"),
+            ),
+        ]
+    }
+
+    fn with_labels(name: &str, image: &str, labels: &[(&str, String)]) -> docker::ContainerHealth {
+        let borrowed: Vec<(&str, &str)> = labels.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        container(name, image, &borrowed)
+    }
+
+    #[test]
+    fn stack_compose_labels_take_the_project_containers_working_dir() {
+        // A legacy stack in /home/trydirect/project next to the platform's own
+        // compose projects: Stacker guessed /home/trydirect/<name>-<id>.
+        let containers = vec![
+            with_labels(
+                "project-database-1",
+                "postgres:16",
+                &compose_labels("/home/trydirect/project"),
+            ),
+            with_labels(
+                "project-upload-1",
+                "org/upload",
+                &compose_labels("/home/trydirect/project"),
+            ),
+            with_labels(
+                "statuspanel_agent",
+                "trydirect/status:latest",
+                &compose_labels("/home/trydirect/statuspanel"),
+            ),
+            with_labels(
+                "nginx-proxy-manager",
+                "jc21/nginx-proxy-manager:latest",
+                &compose_labels("/home/trydirect/nginx_proxy_manager"),
+            ),
+        ];
+
+        assert_eq!(
+            stack_compose_labels(&containers),
+            Some((
+                "/home/trydirect/project".to_string(),
+                "/home/trydirect/project/docker-compose.yml".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn stack_compose_labels_prefer_the_dir_most_project_containers_share() {
+        let containers = vec![
+            with_labels("a-1", "x", &compose_labels("/home/trydirect/other")),
+            with_labels("b-1", "x", &compose_labels("/home/trydirect/project")),
+            with_labels("c-1", "x", &compose_labels("/home/trydirect/project")),
+        ];
+
+        assert_eq!(
+            stack_compose_labels(&containers).map(|(dir, _)| dir),
+            Some("/home/trydirect/project".to_string())
+        );
+    }
+
+    #[test]
+    fn stack_compose_labels_are_none_without_compose_labels() {
+        let containers = vec![container("standalone", "redis:7", &[])];
+
+        assert_eq!(stack_compose_labels(&containers), None);
+    }
+
+    #[test]
+    fn stack_compose_location_reports_the_labels_when_the_file_is_not_visible() {
+        // The agent may not see the host path; report what Docker recorded.
+        let containers = vec![with_labels(
+            "project-web-1",
+            "nginx",
+            &compose_labels("/nonexistent/stack"),
+        )];
+
+        assert_eq!(
+            stack_compose_location_from(None, &containers),
+            Some((
+                "/nonexistent/stack".to_string(),
+                "/nonexistent/stack/docker-compose.yml".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn attach_stack_compose_adds_dir_and_file_only_when_known() {
+        let mut body = json!({"type": "all_health"});
+        attach_stack_compose(&mut body, None);
+        assert!(body.get("stack_compose").is_none());
+
+        attach_stack_compose(
+            &mut body,
+            Some((
+                "/home/trydirect/project".into(),
+                "/home/trydirect/project/docker-compose.yml".into(),
+            )),
+        );
+        assert_eq!(body["stack_compose"]["dir"], "/home/trydirect/project");
+        assert_eq!(
+            body["stack_compose"]["file"],
+            "/home/trydirect/project/docker-compose.yml"
+        );
+    }
+
+    #[test]
+    fn stack_compose_location_prefers_the_configured_project_dir() {
+        let containers = vec![with_labels("project-web-1", "nginx", &compose_labels("/x"))];
+        let configured = Some((
+            "/srv/stack".to_string(),
+            "/srv/stack/compose.yml".to_string(),
+        ));
+
+        assert_eq!(
+            stack_compose_location_from(configured.clone(), &containers),
+            configured
+        );
     }
 
     #[test]
